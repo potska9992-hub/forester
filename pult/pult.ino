@@ -1,0 +1,3378 @@
+// ============================================================
+// Пульт гидрораспределителя. Журнал версий
+//  1.1 - экран выводится по одной странице за проход цикла (цикл больше не замирает на 30 мс),
+//        шина I2C больше не падает до 100 кГц после каждого кадра, меню отсортированы
+//        по важности (Back / Exit всегда внизу), нумерация версий 1.x
+//  1.0 - первая полная версия (раньше называлась v3.1): экраны, журнал, Debug, Receiver,
+//        Power / Bind, Factory Reset, режим CONTROL PWM / CURRENT
+// ============================================================
+#include <Arduino.h>
+#include <Wire.h>
+#include <Preferences.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SH110X.h>
+#include <Adafruit_MCP23X17.h>
+#include <Adafruit_ADS1X15.h>
+#include <esp_system.h>
+#include <stdarg.h>
+
+// ============ ПИНЫ И АДРЕСА ============
+#define SDA_PIN        2
+#define SCL_PIN        3
+#define I2C_CLOCK      400000      // если будут глюки на шине, поставить 100000
+
+#define BTN_MENU_PIN   33          // нажата = LOW
+#define ESTOP_PIN      34          // NC-контакт: HIGH = нажата или обрыв
+#define VBAT_PIN       4
+
+#define OLED_ADDR      0x3C
+#define MCP_ADDR       0x20
+#define ADS1_ADDR      0x48
+#define ADS2_ADDR      0x49
+
+#define SCREEN_W       128
+#define SCREEN_H       64
+
+// ============ НАВИГАЦИЯ ПО МЕНЮ (индексы 0..7 = CH1..CH8) ============
+// Меняются только здесь, логика меню не трогается.
+#define MENU_NAV_CH     2          // CH3: вверх/вниз по списку, +/- при вводе числа
+#define MENU_ENTER_CH   5          // CH6: ввод/назад
+#define TEST_LEVER_CH   1          // CH2: тестовый джойстик (Receiver -> Current Limits / Start Duty)
+
+// ============ ПАРАМЕТРЫ ============
+#define NUM_CH          8
+#define NUM_EV          12
+#define DEF_DEADZONE    500        // в отсчётах ADC (GAIN_ONE) от центра
+#define DZ_MIN          100
+#define DZ_MAX          3000
+#define DZ_STEP         50
+#define MIN_SIDE        2500       // минимальный ход в каждую сторону при калибровке
+#define DEF_CENTER      13200      // значения по умолчанию до первой калибровки
+#define DEF_MIN         0
+#define DEF_MAX         26400
+
+#define EXPO_STEP       5
+#define MAXP_MIN        10         // минимум для Max, %
+#define MAXP_STEP       5
+
+#define NAV_ON          60         // порог срабатывания тумблера навигации, %
+#define NAV_OFF         30         // порог возврата в центр, %
+#define NAV_REARM_MS    80
+#define REPEAT_DELAY_MS 600        // автоповтор при удержании (числовые экраны)
+#define REPEAT_MS       120
+#define SAFE_HOLD_MS    400        // сколько всё должно стоять в центре для Safe Start
+#define LONG_PRESS_MS   700
+#define DEBOUNCE_MS     30
+#define READ_PERIOD_MS  20
+#define DISP_PERIOD_MS  150
+#define LOG_PERIOD_MS   1000
+#define BOOT_MS         1500
+#define CAL_COUNT_MS    5000       // отсчёт перед записью центра
+#define CAL_AVG_MS      500
+#define CAL_RANGE_MS    10000
+#define MENU_ROWS       4
+#define TOAST_MS        1800
+#define RESTORED_MS     700        // длительность вспышки «связь восстановлена»
+#define HB_FLASH_MS     100        // длительность вспышки пульса
+
+// ============ ВЕРСИЯ ПРОШИВКИ ============
+#define FW_VERSION      "1.1"
+#define FACTORY_PIN     1111       // код для Factory Reset
+#define DEF_BIND_ID     0xA5C3E17BUL
+#define BIND_TIMEOUT_MS 60000UL
+#define LOG_MAX         10         // событий в журнале
+#define LOG_SHOW        5          // событий на экране Event Log
+#define LOG_NVS_GAP_MS  10000UL    // одна и та же авария в NVS не чаще
+#define SLOG_LINES      6          // строк serial-лога для страницы Debug -> Log
+#define NUM_SCR         6          // рабочих экранов
+#define NUM_DP          6          // страниц Debug
+#define TX_PWR_DEF      10         // dBm по умолчанию
+#define RF_FREQ_TXT     "868.1MHz SF7 BW250"   // справочно, пока радио не подключено
+
+// ============ БАТАРЕЯ ============
+#define DEF_DIVIDER     3.3503f    // коэффициент делителя по умолчанию
+#define DEF_VFULL       8.40f      // напряжение 100%
+#define DEF_VEMPTY      6.00f      // напряжение 0%
+#define DEF_WARN        20         // % для надписи LOW BATTERY
+#define DEF_CRIT        10         // % для надписи BATT CRITICAL
+#define BAT_UPDATE_MS   30000UL    // обновление процента на экранах
+#define BAT_FAST_MS     2000UL     // фоновый замер (поиск минимума)
+#define BAT_LIVE_MS     1000UL     // замер на странице Battery
+#define BAT_USB_V       4.0f       // ниже этого считаем, что батареи нет (USB)
+#define BAT_MIN_SAVE_MS 10000UL    // не чаще раз в 10 с писать минимум в NVS
+
+// ============ КАРТА КАНАЛОВ ============
+// ads: 0 = ADS1 (0x48), 1 = ADS2 (0x49); input: вход A0..A3
+// redPin / greenPin: пин MCP23017 (0-7 порт A, 8-15 порт B)
+struct ChannelHw { uint8_t ads; uint8_t input; uint8_t redPin; uint8_t greenPin; };
+const ChannelHw CH[NUM_CH] = {
+  {0, 0,  7,  6},   // CH1
+  {0, 1,  5,  4},   // CH2
+  {0, 2,  3,  2},   // CH3
+  {0, 3,  1,  0},   // CH4
+  {1, 0,  8,  9},   // CH5
+  {1, 1, 10, 11},   // CH6
+  {1, 2, 12, 13},   // CH7
+  {1, 3, 14, 15}    // CH8
+};
+
+// ============ ОБЪЕКТЫ ============
+Adafruit_SH1106G  display(SCREEN_W, SCREEN_H, &Wire, -1, I2C_CLOCK, I2C_CLOCK);   // библиотека по умолчанию роняет шину до 100 кГц после кадра
+Adafruit_MCP23X17 mcp;
+Adafruit_ADS1115  ads1, ads2;
+Adafruit_ADS1115* adsBank[2] = { &ads1, &ads2 };
+Preferences       prefs;
+
+bool okOled = false, okMcp = false;
+bool adsOk[2] = { false, false };
+
+// ============ КНОПКИ ============
+struct Button {
+  uint8_t pin;
+  bool activeHigh;
+  bool raw, state, changed, pressedEv, shortEv, longEv, longFired;
+  unsigned long t, pressStart;
+};
+Button btnMenu = { BTN_MENU_PIN, false, false, false, false, false, false, false, true, 0, 0 };
+Button estop   = { ESTOP_PIN,    true,  false, false, false, false, false, false, true, 0, 0 };
+
+// ============ ТИПЫ (объявлены ДО функций, иначе Arduino IDE ломает автопрототипы) ============
+enum State { ST_BOOT, ST_SAFE, ST_RUN, ST_MENU, ST_CAL_C, ST_CAL_R, ST_CAL_RES, ST_ESTOP };
+enum MenuScr {
+  MS_MAIN, MS_TX, MS_CAL, MS_CHLIST, MS_CHEDIT, MS_DZ,
+  MS_BAT, MS_BATEDIT, MS_LED, MS_LEDSTAT, MS_EVLIST, MS_EVEDIT, MS_PRESET, MS_TEST,
+  MS_EXPO, MS_MAXV,
+  MS_SCREENS, MS_SCRITEM, MS_SCRMOVE, MS_POWER, MS_TXPWR,
+  MS_BIND, MS_BINDRUN, MS_BINDID, MS_EVLOG,
+  MS_DBGLIST, MS_DBGDESC, MS_DBGPAGE,
+  MS_PIN, MS_FRTARGET, MS_CONFIRM,
+  MS_RX, MS_RXCH, MS_RXDIR, MS_RXGLOB, MS_RXEDIT, MS_RXSTAT
+};
+enum ChItem { CI_TYPE, CI_REV, CI_EN, CI_EXPO, CI_MAX, CI_LED, CI_BACK };
+enum EvItem { EI_EN, EI_COLOR, EI_PAT, EI_INT, EI_WHERE, EI_FIXED, EI_BACK };
+enum BatKind { BE_DIV, BE_FULL, BE_EMPTY, BE_WARN, BE_CRIT };
+enum SimMode { SIM_OFF, SIM_LINK, SIM_LOST };
+struct Nav { bool armed; unsigned long since; unsigned long held; unsigned long last; int dir; };
+struct EvCfg { uint8_t en, color, pat, whereAll, ival; };
+
+// порядок = порядок в меню: частое и важное сверху, опасное и временное внизу, Back последний
+enum TxItem { TX_CAL, TX_CHSET, TX_PWR, TX_BIND, TX_SCR, TX_LED, TX_BAT, TX_LOG, TX_DBG, TX_SIM, TX_FR, TX_BACK, TX_COUNT };
+enum RxTopic { RT_LIMIT, RT_DUTY, RT_MAXD, RT_RAMP, RT_CHEN, RT_GLOB, RT_STAT, RT_BACK, RT_COUNT };
+enum ScrId { SC_MAIN, SC_TX, SC_RX, SC_LINK, SC_POWER, SC_LOG };
+enum DbgPage { DP_RADIO, DP_TELEM, DP_LIM, DP_RAW, DP_SYS, DP_LOG };
+enum ConfAct { CA_CLEARLOG, CA_FORGET, CA_FR_TX, CA_FR_RX };
+enum LogType { LT_ESTOP, LT_RXALARM, LT_NOLINK, LT_LINKOK, LT_RXFAULT, LT_LIMIT, LT_BATTTX, LT_OVL, LT_SHORT, LT_OPEN, LT_BATTRX, LT_COUNT };
+// параметры приёмника (SetConfig): SOL = на соленоид (канал x сторона A/B), CH = на канал, GLOB = общие
+enum RxParam { RXP_LIMIT, RXP_DUTY, RXP_MAXD, RXP_RAMPUP, RXP_RAMPDN, RXP_CHEN,
+               RXP_OVLDLY, RXP_LINKTMO, RXP_PWMFREQ, RXP_DITHAMP, RXP_DITHFRQ, RXP_PWR,
+               RXP_MODE, RXP_STARTI, RXP_MAXI, NUM_RXP };
+enum RxScope { PS_SOL, PS_CH, PS_GLOB };
+enum RxFmt { F_AMP, F_PCT, F_MS, F_HZ, F_ONOFF, F_DBM, F_MODE };
+struct RxParamDef { const char* name; uint8_t scope; int16_t mn, mx, step, def; uint8_t fmt; };
+struct LogEv { uint8_t type, ch, side, cnt; uint16_t dA; uint32_t t; bool old; };
+struct Telem {
+  int16_t cur[NUM_CH];      // ток, 0.1 А (у отключённого по перегрузке: пиковый)
+  int8_t  pwm[NUM_CH];      // ШИМ со знаком, минус = сторона B
+  uint8_t mLim, mOvl, mOpen, side;   // маски по каналам; side: бит = сторона B
+  uint8_t vrx;              // напряжение приёмника, 0.1 В
+  int8_t  rssi;             // RSSI приёмника, dBm
+  uint8_t kill, reason;     // killswitch: 0/1; причина 0..3
+};
+
+const RxParamDef RXP[NUM_RXP] = {
+  { "LIMIT",     PS_SOL,    5,  100,  1,  20, F_AMP   },   // 0.5..10.0 А, по умолчанию 2.0 А
+  { "DUTY",      PS_SOL,    0,  100,  1,  30, F_PCT   },   // стартовый ШИМ
+  { "MAX DUTY",  PS_SOL,   10,  100,  1, 100, F_PCT   },
+  { "RAMP UP",   PS_CH,     0, 2000, 50, 200, F_MS    },
+  { "RAMP DN",   PS_CH,     0, 2000, 50, 200, F_MS    },
+  { "ENABLE",    PS_CH,     0,    1,  1,   1, F_ONOFF },
+  { "OVL DELAY", PS_GLOB,  20, 1000, 10, 150, F_MS    },
+  { "LINK TMO",  PS_GLOB, 200, 2000, 50, 500, F_MS    },
+  { "PWM FREQ",  PS_GLOB,  50,  500, 10, 100, F_HZ    },
+  { "DITH AMP",  PS_GLOB,   0,   20,  1,   0, F_PCT   },
+  { "DITH FREQ", PS_GLOB,  10,   60,  5,  30, F_HZ    },
+  { "RX POWER",  PS_GLOB,   2,   22,  1,  10, F_DBM   },
+  { "CONTROL",   PS_GLOB,   0,    1,  1,   0, F_MODE  },   // 0 = PWM (без обратной связи), 1 = CURRENT (по току)
+  { "START I",   PS_SOL,    0,  100,  1,   5, F_AMP   },   // стартовый ток, режим CURRENT (0.1 А)
+  { "MAX I",     PS_SOL,    5,  100,  1,  15, F_AMP   }    // максимальный рабочий ток, режим CURRENT
+};
+
+// цвета: 0 красный, 1 зелёный, 2 янтарный (оба)
+#define COL_RED    0
+#define COL_GREEN  1
+#define COL_AMBER  2
+// ритмы
+#define PAT_STEADY 0
+#define PAT_SLOW   1
+#define PAT_FAST   2
+#define PAT_PULSE  3
+#define PAT_DOUBLE 4
+#define PAT_ALT    5      // красный/янтарный попеременно
+// события (порядок = приоритет, 0 самый важный)
+#define EV_ESTOP    0
+#define EV_RXALARM  1
+#define EV_NOLINK   2
+#define EV_RXFAULT  3
+#define EV_OVERLOAD 4
+#define EV_OPEN     5
+#define EV_LIMIT    6
+#define EV_NOTCTR   7
+#define EV_RESTORED 8
+#define EV_HEART    9
+#define EV_BATTTX   10
+#define EV_BATTRX   11
+// маска цвета светодиода: бит0 красный, бит1 зелёный, 3 = янтарный; 0x80 = погасить (тёмная вспышка)
+#define MASK_DARK  0x80
+
+void initButton(Button &b) {
+  bool lvl = digitalRead(b.pin);
+  b.raw = b.state = b.activeHigh ? lvl : !lvl;
+  b.t = millis();
+  b.longFired = true;   // кнопка, зажатая при старте, событий не даёт
+}
+
+void updateButton(Button &b) {
+  unsigned long now = millis();
+  b.changed = b.pressedEv = b.shortEv = b.longEv = false;
+  bool lvl = digitalRead(b.pin);
+  bool p = b.activeHigh ? lvl : !lvl;
+  if (p != b.raw) { b.raw = p; b.t = now; }
+  if (b.state != b.raw && (now - b.t) >= DEBOUNCE_MS) {
+    b.state = b.raw;
+    b.changed = true;
+    if (b.state) { b.pressedEv = true; b.pressStart = now; b.longFired = false; }
+    else if (!b.longFired) { b.shortEv = true; }
+  }
+  if (b.state && !b.longFired && (now - b.pressStart) >= LONG_PRESS_MS) {
+    b.longFired = true;
+    b.longEv = true;
+  }
+}
+
+// ============ ДАННЫЕ КАНАЛОВ ============
+#define T_JOY 0
+#define T_SW3 1
+#define LED_BOTH  0
+#define LED_RED   1
+#define LED_GREEN 2
+#define LED_OFF   3
+const uint8_t DEF_TYPE[NUM_CH] = { T_JOY, T_JOY, T_SW3, T_JOY, T_JOY, T_SW3, T_JOY, T_JOY };
+
+// Стандартные настройки событий (пресет Standard)   en color pat        whereAll ival
+const EvCfg DEF_EV[NUM_EV] = {
+  { 1, COL_RED,   PAT_FAST,   1, 0 },   // 0  E-Stop пульта (фиксировано)
+  { 1, COL_RED,   PAT_FAST,   1, 0 },   // 1  аварийная кнопка приёмника
+  { 1, COL_AMBER, PAT_SLOW,   1, 0 },   // 2  нет связи
+  { 1, COL_RED,   PAT_ALT,    1, 0 },   // 3  неисправность приёмника
+  { 1, COL_RED,   PAT_FAST,   0, 0 },   // 4  перегрузка секции
+  { 1, COL_AMBER, PAT_FAST,   0, 0 },   // 5  обрыв соленоида
+  { 1, COL_RED,   PAT_SLOW,   0, 0 },   // 6  лимит тока достигнут
+  { 1, COL_RED,   PAT_SLOW,   0, 0 },   // 7  Safe Start: канал не в центре
+  { 1, COL_GREEN, PAT_PULSE,  1, 0 },   // 8  связь восстановлена
+  { 1, COL_GREEN, PAT_PULSE,  1, 2 },   // 9  пульс (ival 2 = 5 с)
+  { 0, COL_AMBER, PAT_DOUBLE, 1, 0 },   // 10 батарея пульта (по умолчанию выключено)
+  { 1, COL_AMBER, PAT_DOUBLE, 1, 0 }    // 11 батарея приёмника
+};
+const char* EV_NAME[NUM_EV] = {
+  "E-Stop pult", "RX alarm btn", "No link", "RX fault", "Overload", "Open circuit",
+  "Cur. limit", "Not centered", "Link back", "Heartbeat", "Batt pult", "Batt RX"
+};
+const uint8_t HB_SEC[4] = { 2, 3, 5, 10 };
+
+int16_t raw[NUM_CH];
+int16_t cenV[NUM_CH], mnV[NUM_CH], mxV[NUM_CH];   // калибровка
+uint8_t chType[NUM_CH];
+bool    chRev[NUM_CH];
+bool    chEn[NUM_CH];
+uint8_t chExpo[NUM_CH];      // 0..100 %
+uint8_t chMaxP[NUM_CH];      // MAXP_MIN..100 %
+uint8_t chLed[NUM_CH];       // LED_BOTH / RED / GREEN / OFF
+bool    ledGreenOn = true, ledRedOn = true;
+EvCfg   ev[NUM_EV];
+int16_t deadzone = DEF_DEADZONE;
+unsigned long readUs = 0, dispUs = 0;
+int     ctl[NUM_CH];         // что пульт отправляет приёмнику (-100..100); в меню нули
+
+// ---- батарея (настройки) ----
+float   divRatio = DEF_DIVIDER;
+float   vFull = DEF_VFULL, vEmpty = DEF_VEMPTY;
+float   vMinSeen = 99.0f;    // самое низкое напряжение, которое видел пульт
+uint8_t batWarn = DEF_WARN, batCrit = DEF_CRIT;
+uint8_t batCurve = 1;        // 1 = типовая Li-ion кривая, 0 = линейно
+
+// ---- экраны (порядок, включение, стартовый) ----
+uint8_t scrOrder[NUM_SCR] = { SC_MAIN, SC_TX, SC_RX, SC_LINK, SC_POWER, SC_LOG };
+uint8_t scrEn = 0x3F;
+uint8_t scrStart = SC_MAIN;
+const char* SCR_NAME[NUM_SCR] = { "Main", "TX channels", "RX channels", "Link", "Power", "Event log" };
+
+// ---- радио (пока только настройки, радио подключим позже) ----
+const uint8_t  TXP_LIST[8] = { 2, 5, 8, 10, 14, 17, 20, 22 };
+const uint16_t TXP_MW[8]   = { 2, 3, 6, 10, 25, 50, 100, 158 };
+uint8_t  txPower = TX_PWR_DEF;
+uint32_t bindId = DEF_BIND_ID;
+
+void keyOf(char* k, size_t n, char p, int i) { snprintf(k, n, "%c%d", p, i); }
+
+uint16_t packEv(const EvCfg &c) {
+  return (uint16_t)((c.en & 1) | ((c.color & 3) << 1) | ((c.pat & 7) << 3) | ((c.whereAll & 1) << 6) | ((c.ival & 3) << 7));
+}
+EvCfg unpackEv(uint16_t v) {
+  EvCfg c;
+  c.en = v & 1;
+  c.color = (v >> 1) & 3;
+  c.pat = (v >> 3) & 7;
+  c.whereAll = (v >> 6) & 1;
+  c.ival = (v >> 7) & 3;
+  if (c.color > COL_AMBER) c.color = COL_AMBER;
+  if (c.pat > PAT_ALT) c.pat = PAT_STEADY;
+  return c;
+}
+
+// ============ СЕРИЙНЫЙ ЛОГ (последние строки видны на странице Debug -> Log) ============
+char slog[SLOG_LINES][24];
+int  slogCount = 0;
+
+void logLine(const char* t) {
+  Serial.println(t);
+  snprintf(slog[slogCount % SLOG_LINES], sizeof(slog[0]), "%.19s", t);
+  slogCount++;
+}
+
+void logFmt(const char* fmt, ...) {
+  char b[96];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(b, sizeof(b), fmt, ap);
+  va_end(ap);
+  logLine(b);
+}
+#define LOGF(...) logFmt(__VA_ARGS__)
+
+// ============ ЖУРНАЛ СОБЫТИЙ ============
+// RAM: 10 последних событий, одинаковые подряд (тип+канал+сторона) сливаются со счётчиком.
+// NVS: только события силовой части приёмника (перегрузка, КЗ, обрыв, критическое напряжение),
+// пишутся в момент события, повторы не пишутся.
+LogEv   logRam[LOG_MAX];        // [0] = самое новое
+int     logN = 0;
+uint8_t plog[LOG_MAX][5];       // сохранённые: type, ch, side, dA lo, dA hi; [0] = новое
+int     plogN = 0;
+uint32_t lastPersist[LT_COUNT][NUM_CH];
+const char* LT_NAME[LT_COUNT] = { "ESTP", "RXAL", "NOLK", "LINK", "RXFT", "LIM", "BATT", "OVL", "SHRT", "OPEN", "RXBT" };
+
+bool logPersistent(uint8_t t) { return t == LT_OVL || t == LT_SHORT || t == LT_OPEN || t == LT_BATTRX; }
+bool logHasChannel(uint8_t t) { return t == LT_LIMIT || t == LT_OVL || t == LT_SHORT || t == LT_OPEN; }
+
+void savePersistLog() {
+  uint8_t blob[LOG_MAX * 5 + 1];
+  blob[0] = (uint8_t)plogN;
+  memcpy(blob + 1, plog, LOG_MAX * 5);
+  prefs.begin("log", false);
+  prefs.putBytes("ring", blob, sizeof(blob));
+  prefs.end();
+}
+
+void loadPersistLog() {
+  uint8_t blob[LOG_MAX * 5 + 1];
+  memset(blob, 0, sizeof(blob));
+  memset(plog, 0, sizeof(plog));
+  prefs.begin("log", false);
+  size_t n = prefs.getBytes("ring", blob, sizeof(blob));
+  prefs.end();
+  plogN = 0;
+  logN = 0;
+  if (n != sizeof(blob)) return;
+  int cnt = blob[0];
+  if (cnt > LOG_MAX) cnt = LOG_MAX;
+  memcpy(plog, blob + 1, LOG_MAX * 5);
+  plogN = cnt;
+  for (int i = 0; i < cnt && logN < LOG_MAX; i++) {
+    if (plog[i][0] >= LT_COUNT || plog[i][1] >= NUM_CH) continue;
+    LogEv &e = logRam[logN++];
+    e.type = plog[i][0];
+    e.ch = plog[i][1];
+    e.side = plog[i][2] & 1;
+    e.dA = (uint16_t)(plog[i][3] | (plog[i][4] << 8));
+    e.cnt = 1;
+    e.t = 0;
+    e.old = true;     // событие до последней перезагрузки
+  }
+}
+
+void logEvent(uint8_t type, uint8_t ch, uint8_t side, uint16_t dA) {
+  uint32_t now = millis();
+  if (logN > 0) {
+    LogEv &l = logRam[0];
+    if (l.type == type && l.ch == ch && l.side == side && !l.old) {   // повтор: только счётчик, в NVS не пишем
+      if (l.cnt < 255) l.cnt++;
+      if (dA > l.dA) l.dA = dA;
+      l.t = now;
+      return;
+    }
+  }
+  int n = (logN < LOG_MAX) ? logN : LOG_MAX - 1;
+  for (int i = n; i > 0; i--) logRam[i] = logRam[i - 1];
+  LogEv &e = logRam[0];
+  e.type = type; e.ch = ch; e.side = side; e.cnt = 1; e.dA = dA; e.t = now; e.old = false;
+  if (logN < LOG_MAX) logN++;
+  if (logPersistent(type)) {
+    uint8_t c = (ch < NUM_CH) ? ch : 0;
+    if (lastPersist[type][c] == 0 || (now - lastPersist[type][c]) >= LOG_NVS_GAP_MS) {
+      lastPersist[type][c] = now ? now : 1;
+      memmove(plog[1], plog[0], (LOG_MAX - 1) * 5);
+      plog[0][0] = type; plog[0][1] = c; plog[0][2] = side;
+      plog[0][3] = (uint8_t)(dA & 0xFF); plog[0][4] = (uint8_t)(dA >> 8);
+      if (plogN < LOG_MAX) plogN++;
+      savePersistLog();
+    }
+  }
+}
+
+void logClear() {
+  logN = 0;
+  plogN = 0;
+  memset(plog, 0, sizeof(plog));
+  memset(lastPersist, 0, sizeof(lastPersist));
+  prefs.begin("log", false);
+  prefs.clear();
+  prefs.end();
+}
+
+// Текст строки журнала (до 19 символов): "3m OVL 3B 5.2 x5"
+void logText(const LogEv &e, char* b, size_t n) {
+  char tm[10];
+  if (e.old) {
+    snprintf(tm, sizeof(tm), "old");
+  } else {
+    unsigned long sec = (millis() - e.t) / 1000UL;
+    if (sec < 60)        snprintf(tm, sizeof(tm), "%lus", sec);
+    else if (sec < 3600) snprintf(tm, sizeof(tm), "%lum", sec / 60);
+    else                 snprintf(tm, sizeof(tm), "%luh", sec / 3600);
+  }
+  int p = snprintf(b, n, "%s %s", tm, LT_NAME[e.type]);
+  if (logHasChannel(e.type) && p < (int)n) p += snprintf(b + p, n - p, " %d%c", e.ch + 1, e.side ? 'B' : 'A');
+  if (e.dA > 0 && p < (int)n) p += snprintf(b + p, n - p, " %d.%d", e.dA / 10, e.dA % 10);
+  if (e.cnt > 1 && p < (int)n) {
+    if (e.cnt > 99) snprintf(b + p, n - p, " x99+");
+    else            snprintf(b + p, n - p, " x%d", e.cnt);
+  }
+}
+
+// ============ СОХРАНЕНИЕ: экраны, мощность, привязка ============
+void saveScreens() {
+  prefs.begin("screens", false);
+  prefs.putBytes("ord", scrOrder, NUM_SCR);
+  prefs.putUChar("en", scrEn);
+  prefs.putUChar("st", scrStart);
+  prefs.end();
+}
+
+void loadScreens() {
+  uint8_t o[NUM_SCR];
+  prefs.begin("screens", false);
+  size_t n = prefs.getBytes("ord", o, NUM_SCR);
+  uint8_t en = prefs.getUChar("en", 0x3F);
+  uint8_t st = prefs.getUChar("st", SC_MAIN);
+  prefs.end();
+  bool ok = (n == NUM_SCR);
+  if (ok) {
+    uint8_t seen = 0;
+    for (int i = 0; i < NUM_SCR; i++) {
+      if (o[i] >= NUM_SCR) ok = false;
+      else seen |= (uint8_t)(1 << o[i]);
+    }
+    if (seen != 0x3F) ok = false;
+  }
+  if (ok) memcpy(scrOrder, o, NUM_SCR);
+  en &= 0x3F;
+  en |= 1;                                   // Main всегда включён
+  if (st >= NUM_SCR || !((en >> st) & 1)) st = SC_MAIN;
+  scrEn = en;
+  scrStart = st;
+}
+
+void saveRadio() {
+  prefs.begin("radio", false);
+  prefs.putUChar("txp", txPower);
+  prefs.end();
+}
+
+void saveBind() {
+  prefs.begin("bind", false);
+  prefs.putUInt("id", bindId);
+  prefs.end();
+}
+
+void loadConfig() {
+  char k[8];
+  prefs.begin("joy", false);
+  for (int i = 0; i < NUM_CH; i++) {
+    keyOf(k, sizeof(k), 'c', i); cenV[i] = prefs.getShort(k, DEF_CENTER);
+    keyOf(k, sizeof(k), 'n', i); mnV[i]  = prefs.getShort(k, DEF_MIN);
+    keyOf(k, sizeof(k), 'x', i); mxV[i]  = prefs.getShort(k, DEF_MAX);
+  }
+  deadzone = prefs.getShort("dz", DEF_DEADZONE);
+  prefs.end();
+
+  prefs.begin("chcfg", false);
+  for (int i = 0; i < NUM_CH; i++) {
+    keyOf(k, sizeof(k), 't', i); chType[i] = prefs.getUChar(k, DEF_TYPE[i]);
+    keyOf(k, sizeof(k), 'r', i); chRev[i]  = prefs.getBool(k, false);
+    keyOf(k, sizeof(k), 'e', i); chEn[i]   = prefs.getBool(k, true);
+    keyOf(k, sizeof(k), 'p', i); chExpo[i] = prefs.getUChar(k, 0);
+    keyOf(k, sizeof(k), 'm', i); chMaxP[i] = prefs.getUChar(k, 100);
+    keyOf(k, sizeof(k), 'l', i); chLed[i]  = prefs.getUChar(k, LED_BOTH);
+    if (chExpo[i] > 100) chExpo[i] = 100;
+    if (chMaxP[i] > 100) chMaxP[i] = 100;
+    if (chMaxP[i] < MAXP_MIN) chMaxP[i] = MAXP_MIN;
+    if (chLed[i] > LED_OFF) chLed[i] = LED_BOTH;
+  }
+  prefs.end();
+
+  prefs.begin("led", false);
+  ledGreenOn = prefs.getBool("g", true);
+  ledRedOn   = prefs.getBool("r", true);
+  prefs.end();
+
+  prefs.begin("alerts", false);
+  for (int e = 0; e < NUM_EV; e++) {
+    snprintf(k, sizeof(k), "e%d", e);
+    uint16_t v = prefs.getUShort(k, 0xFFFF);
+    ev[e] = (v == 0xFFFF) ? DEF_EV[e] : unpackEv(v);
+  }
+  prefs.end();
+
+  prefs.begin("bat", false);
+  divRatio = prefs.getFloat("div", DEF_DIVIDER);
+  vFull    = prefs.getFloat("full", DEF_VFULL);
+  vEmpty   = prefs.getFloat("empty", DEF_VEMPTY);
+  vMinSeen = prefs.getFloat("min", 99.0f);
+  batWarn  = prefs.getUChar("warn", DEF_WARN);
+  batCrit  = prefs.getUChar("crit", DEF_CRIT);
+  batCurve = prefs.getUChar("curve", 1);
+  prefs.end();
+  if (divRatio < 2.0f || divRatio > 5.0f) divRatio = DEF_DIVIDER;
+  if (vFull - vEmpty < 0.5f) { vFull = DEF_VFULL; vEmpty = DEF_VEMPTY; }
+  if (batCrit < 1 || batCrit >= batWarn) { batWarn = DEF_WARN; batCrit = DEF_CRIT; }
+
+  loadScreens();
+
+  prefs.begin("radio", false);
+  uint8_t tp = prefs.getUChar("txp", TX_PWR_DEF);
+  prefs.end();
+  txPower = TX_PWR_DEF;
+  for (int i = 0; i < 8; i++) if (TXP_LIST[i] == tp) txPower = tp;
+
+  prefs.begin("bind", false);
+  bindId = prefs.getUInt("id", DEF_BIND_ID);
+  prefs.end();
+
+  loadPersistLog();
+
+  LOGF("Config loaded from NVS, deadzone=%d, divider=%.4f, full=%.2f, empty=%.2f",
+                deadzone, divRatio, vFull, vEmpty);
+}
+
+void saveCenter(int i) {
+  char k[8];
+  prefs.begin("joy", false);
+  keyOf(k, sizeof(k), 'c', i); prefs.putShort(k, cenV[i]);
+  prefs.end();
+}
+
+void saveRange(int i) {
+  char k[8];
+  prefs.begin("joy", false);
+  keyOf(k, sizeof(k), 'n', i); prefs.putShort(k, mnV[i]);
+  keyOf(k, sizeof(k), 'x', i); prefs.putShort(k, mxV[i]);
+  prefs.end();
+}
+
+void saveDeadzone() {
+  prefs.begin("joy", false);
+  prefs.putShort("dz", deadzone);
+  prefs.end();
+}
+
+void saveChannelCfg(int i) {
+  char k[8];
+  prefs.begin("chcfg", false);
+  keyOf(k, sizeof(k), 't', i); prefs.putUChar(k, chType[i]);
+  keyOf(k, sizeof(k), 'r', i); prefs.putBool(k, chRev[i]);
+  keyOf(k, sizeof(k), 'e', i); prefs.putBool(k, chEn[i]);
+  keyOf(k, sizeof(k), 'p', i); prefs.putUChar(k, chExpo[i]);
+  keyOf(k, sizeof(k), 'm', i); prefs.putUChar(k, chMaxP[i]);
+  keyOf(k, sizeof(k), 'l', i); prefs.putUChar(k, chLed[i]);
+  prefs.end();
+}
+
+void saveLedCfg() {
+  prefs.begin("led", false);
+  prefs.putBool("g", ledGreenOn);
+  prefs.putBool("r", ledRedOn);
+  prefs.end();
+}
+
+void saveEv(int e) {
+  char k[8];
+  snprintf(k, sizeof(k), "e%d", e);
+  prefs.begin("alerts", false);
+  prefs.putUShort(k, packEv(ev[e]));
+  prefs.end();
+}
+
+void saveAllEv() {
+  for (int e = 0; e < NUM_EV; e++) saveEv(e);
+}
+
+void saveBatCfg() {
+  prefs.begin("bat", false);
+  prefs.putFloat("div", divRatio);
+  prefs.putFloat("full", vFull);
+  prefs.putFloat("empty", vEmpty);
+  prefs.putUChar("warn", batWarn);
+  prefs.putUChar("crit", batCrit);
+  prefs.putUChar("curve", batCurve);
+  prefs.end();
+}
+
+void saveBatMin() {
+  prefs.begin("bat", false);
+  prefs.putFloat("min", vMinSeen);
+  prefs.end();
+}
+
+void readAll() {
+  unsigned long t0 = micros();
+  for (int i = 0; i < NUM_CH; i++) {
+    uint8_t b = CH[i].ads;
+    raw[i] = adsOk[b] ? adsBank[b]->readADC_SingleEnded(CH[i].input) : cenV[i];
+  }
+  readUs = micros() - t0;
+}
+
+bool isMoved(int i) {
+  return adsOk[CH[i].ads] && abs(raw[i] - cenV[i]) > deadzone;
+}
+
+// -100..+100 по калибровке, симметрично относительно центра
+int normalizeBase(int i) {
+  int c = cenV[i];
+  long v = 0;
+  if (raw[i] >= c) {
+    int span = mxV[i] - c;
+    if (span > 0) v = (long)(raw[i] - c) * 100 / span;
+  } else {
+    int span = c - mnV[i];
+    if (span > 0) v = (long)(raw[i] - c) * 100 / span;
+  }
+  return (int)constrain(v, -100L, 100L);
+}
+
+// Значение канала БЕЗ Expo/Max: мёртвая зона -> Reverse -> защёлка для тумблера.
+// Именно оно используется для навигации по меню (Expo/Max на меню не влияют).
+int valBase(int i) {
+  if (!isMoved(i)) return 0;
+  int v = normalizeBase(i);
+  if (chRev[i]) v = -v;
+  if (chType[i] == T_SW3) {
+    if (v > 50) v = 100;
+    else if (v < -50) v = -100;
+    else v = 0;
+  }
+  return v;
+}
+
+// Кривая: плавный центр (expo 0..100 %) и ограничение максимума (maxp %)
+int applyCurve(int v, int expo, int maxp) {
+  float f = v / 100.0f;
+  float k = expo / 100.0f;
+  float o = ((1.0f - k) * f + k * f * f * f) * (maxp / 100.0f) * 100.0f;
+  return (int)(o >= 0 ? o + 0.5f : o - 0.5f);
+}
+
+// Итоговое значение канала (то, что уйдёт в приёмник): valBase -> Expo -> Max.
+// Для тумблера Switch3 Expo и Max не применяются.
+int val(int i) {
+  int v = valBase(i);
+  if (v != 0 && chType[i] == T_JOY) v = applyCurve(v, chExpo[i], chMaxP[i]);
+  return v;
+}
+
+// канал мешает Safe Start: включён и (не в центре или нет связи с АЦП)
+bool chBad(int i) {
+  if (!chEn[i]) return false;
+  if (!adsOk[CH[i].ads]) return true;
+  return isMoved(i);
+}
+
+// ============ СОСТОЯНИЯ ============
+State   state = ST_BOOT;
+MenuScr menuScr = MS_MAIN;
+int     sel = 0, menuTop = 0;
+int     idxMain = 0, idxTx = 0, idxCal = 0, idxChList = 0, idxChEdit = 0, idxBat = 0;
+int     idxLed = 0, idxEvList = 0, idxEvEdit = 0, idxPreset = 0, idxRx = 0, idxRxCh = 0, idxRxDir = 0;
+int     editCh = 0;
+int     dzEdit = DEF_DEADZONE;
+int     editInt = 0;            // для Expo / Max
+int     batKind = BE_DIV;
+int     batEditCv = 0;          // сотые доли вольта
+int     batEditI = 0;           // проценты
+int     evSel = 0;              // выбранное событие в LED & Alerts
+bool    evFromLed = false;      // открыто ярлыком Heartbeat -> назад в LED & Alerts
+int     testEv = 0;             // событие на экране Test alerts
+int     screenNo = 0;
+SimMode simMode = SIM_OFF;      // имитация приёмника (пока нет радио)
+unsigned long restoredAt = 0;   // когда была вспышка «связь восстановлена»
+unsigned long bootStart = 0;
+unsigned long safeSince = 0;
+
+// ---- состояния меню ----
+int  idxScr = 0, idxPower = 0, idxBind = 0, idxEvLog = 0, idxDbg = 0, idxFr = 0, idxRxGlob = 0;
+int  scrSel = 0;                 // позиция выбранного экрана в scrOrder
+int  dbgPage = 0, dbgTop = 0;    // страница Debug и первая видимая строка описания
+int  pinDigit[4] = { 0, 0, 0, 0 };
+int  pinPos = 0;
+ConfAct confAct = CA_CLEARLOG;   // что подтверждаем
+MenuScr confBack = MS_TX;        // куда вернуться
+int  confIdx = 0;
+unsigned long bindStart = 0, bindDoneAt = 0;
+int  bindPhase = 0;              // 0 ждём, 1 успех, 2 тайм-аут
+unsigned long restartAt = 0;     // не 0 = перезагрузка в этот момент (после Factory Reset)
+
+const char* stateName() {
+  switch (state) {
+    case ST_BOOT:    return "BOOT";
+    case ST_SAFE:    return "SAFE";
+    case ST_RUN:     return "RUN";
+    case ST_MENU:    return "MENU";
+    case ST_CAL_C:   return "CAL-C";
+    case ST_CAL_R:   return "CAL-R";
+    case ST_CAL_RES: return "CAL-RES";
+    case ST_ESTOP:   return "ESTOP";
+  }
+  return "?";
+}
+
+bool rxLinked() { return simMode == SIM_LINK; }   // позже: свежая телеметрия от приёмника
+
+// ---- короткие сообщения внизу экрана ----
+char toastText[20] = "";
+unsigned long toastUntil = 0;
+void toast(const char* t) {
+  snprintf(toastText, sizeof(toastText), "%s", t);
+  toastUntil = millis() + TOAST_MS;
+}
+bool toastActive() { return (long)(toastUntil - millis()) > 0; }
+
+// ============ БАТАРЕЯ ============
+float vbat = 0;                 // напряжение, показываемое на экране
+float pinV = 0;                 // последнее напряжение на пине (до делителя)
+int   vbatPct = 0;
+int   batLevel = 0;             // 0 норма, 1 LOW BATTERY, 2 BATT CRITICAL
+int   batCnt = 0;
+bool  batUsb = false;
+bool  batInit = false;
+unsigned long lastBatSlow = 0, lastBatFast = 0, lastMinSave = 0;
+
+float measurePin() {
+  uint32_t sum = 0;
+  for (int i = 0; i < 16; i++) sum += analogReadMilliVolts(VBAT_PIN);
+  return sum / 16.0f / 1000.0f;
+}
+
+// Типовая кривая Li-ion: доля диапазона напряжения -> процент заряда
+const float CURVE_F[7] = { 0.00f, 0.25f, 0.42f, 0.58f, 0.75f, 0.92f, 1.00f };
+const float CURVE_P[7] = { 0.0f,  5.0f,  15.0f, 45.0f, 75.0f, 95.0f, 100.0f };
+
+int pctFromV(float v) {
+  float span = vFull - vEmpty;
+  if (span < 0.1f) span = 0.1f;
+  float f = (v - vEmpty) / span;
+  if (f <= 0.0f) return 0;
+  if (f >= 1.0f) return 100;
+  if (batCurve == 0) return (int)(f * 100.0f + 0.5f);
+  for (int i = 1; i < 7; i++) {
+    if (f <= CURVE_F[i]) {
+      float t = (f - CURVE_F[i - 1]) / (CURVE_F[i] - CURVE_F[i - 1]);
+      return (int)(CURVE_P[i - 1] + t * (CURVE_P[i] - CURVE_P[i - 1]) + 0.5f);
+    }
+  }
+  return 100;
+}
+
+void batTick(unsigned long now) {
+  bool live = (state == ST_MENU && (menuScr == MS_BAT || menuScr == MS_BATEDIT));
+  unsigned long period = live ? BAT_LIVE_MS : BAT_FAST_MS;
+  if (batInit && (now - lastBatFast) < period) return;
+  lastBatFast = now;
+
+  pinV = measurePin();
+  float v = pinV * divRatio;
+  batUsb = (v < BAT_USB_V);
+
+  // самое низкое напряжение, которое видел пульт (пригодится для Empty)
+  if (!batUsb && v > 5.0f && v < vMinSeen - 0.03f && (now - lastMinSave) >= BAT_MIN_SAVE_MS) {
+    vMinSeen = v;
+    lastMinSave = now;
+    saveBatMin();
+  }
+
+  bool slow = !batInit || (now - lastBatSlow) >= BAT_UPDATE_MS;
+  if (live || slow) {
+    vbat = v;
+    vbatPct = pctFromV(v);
+  }
+  if (slow) {
+    lastBatSlow = now;
+    if (batUsb) {
+      batLevel = 0; batCnt = 0;
+    } else {
+      int up   = (vbatPct <= batCrit) ? 2 : (vbatPct <= batWarn) ? 1 : 0;
+      int down = (vbatPct <= batCrit + 3) ? 2 : (vbatPct <= batWarn + 3) ? 1 : 0;
+      if (!batInit) {
+        batLevel = up; batCnt = 0;      // при старте сразу
+      } else {
+        int cand = batLevel;
+        if (up > batLevel) cand = up;
+        else if (down < batLevel) cand = down;
+        if (cand != batLevel) {
+          if (++batCnt >= 3) { batLevel = cand; batCnt = 0; }   // 3 замера подряд
+        } else {
+          batCnt = 0;
+        }
+      }
+    }
+    LOGF("Battery: %.2f V (%d%%) level=%d%s", vbat, vbatPct, batLevel, batUsb ? " [USB]" : "");
+  }
+  batInit = true;
+}
+
+void drawBattery() {
+  const int battW = 10, battH = 30, nubW = 4, nubH = 3;
+  int battX = SCREEN_W - 12;
+  int battY = SCREEN_H - battH - nubH - 10;
+
+  bool show = !(batLevel == 2 && ((millis() / 500) % 2 == 1));   // критический: значок мигает
+  if (show) {
+    display.fillRect(battX + (battW - nubW) / 2, battY, nubW, nubH, SH110X_WHITE);
+    display.drawRect(battX, battY + nubH, battW, battH, SH110X_WHITE);
+    int innerH = battH - 4;
+    int fillH = (int)(innerH * (vbatPct / 100.0f));
+    if (batUsb) fillH = 0;
+    display.fillRect(battX + 2, battY + nubH + battH - 2 - fillH, battW - 4, fillH, SH110X_WHITE);
+  }
+
+  char s[8];
+  if (batUsb) snprintf(s, sizeof(s), "USB");
+  else        snprintf(s, sizeof(s), "%d%%", vbatPct);
+  int16_t x1, y1; uint16_t w, h;
+  display.setTextSize(1);
+  display.setTextColor(SH110X_WHITE);
+  display.getTextBounds(s, 0, 0, &x1, &y1, &w, &h);
+  display.setCursor(battX + battW - w, battY + nubH + battH + 2);
+  display.print(s);
+}
+
+// Нижняя строка: подсказка. Если батарея низкая, раз в секунду вместо подсказки
+// показывается предупреждение. Короткие сообщения (toast) имеют приоритет.
+void drawHintText(const char* t, int y) {
+  const char* s = t;
+  if (toastActive()) s = toastText;
+  else if (batLevel > 0 && ((millis() / 1000) % 2 == 0)) s = (batLevel == 2) ? "BATT CRITICAL!" : "LOW BATTERY";
+  display.setTextColor(SH110X_WHITE);
+  display.setCursor(0, y);
+  display.print(s);
+}
+
+// ---- навигация тумблерами: один шаг за отклонение, повтор только через центр ----
+// repeat = true (числовые экраны): при удержании тумблера значение идёт само.
+Nav navA = { false, 0, 0, 0, 0 };   // MENU_NAV_CH
+Nav navB = { false, 0, 0, 0, 0 };   // MENU_ENTER_CH
+
+void navReset() {
+  navA = { false, 0, 0, 0, 0 };
+  navB = { false, 0, 0, 0, 0 };
+}
+
+int navPoll(int ch, Nav &n, unsigned long now, bool repeat) {
+  int v = valBase(ch);   // без Expo/Max
+  if (!n.armed) {
+    if (repeat && n.dir != 0) {
+      int d = (v >= NAV_ON) ? 1 : (v <= -NAV_ON) ? -1 : 0;
+      if (d == n.dir) {
+        if ((now - n.held) >= REPEAT_DELAY_MS && (now - n.last) >= REPEAT_MS) {
+          n.last = now;
+          return d;
+        }
+        return 0;
+      }
+      n.dir = 0;
+    }
+    if (abs(v) < NAV_OFF) {
+      if (n.since == 0) n.since = now;
+      if (now - n.since >= NAV_REARM_MS) n.armed = true;
+    } else {
+      n.since = 0;
+    }
+    return 0;
+  }
+  if (v >= NAV_ON)  { n.armed = false; n.since = 0; n.dir = 1;  n.held = now; n.last = now; return 1; }
+  if (v <= -NAV_ON) { n.armed = false; n.since = 0; n.dir = -1; n.held = now; n.last = now; return -1; }
+  return 0;
+}
+
+// множитель шага при долгом удержании: 1 .. 10
+int navMult(const Nav &n, unsigned long now) {
+  if (n.dir == 0) return 1;
+  int m = 1 + (int)((now - n.held) / 1000UL);
+  return m > 10 ? 10 : m;
+}
+
+// ============ ПРИЁМНИК (пока симулятор; потом заменится радио: SetConfig -> Ack) ============
+// Значения: [параметр][канал][сторона]. Сторона 0 = Extend (A), 1 = Retract (B).
+// Параметры канала хранятся со стороной 0, общие параметры: канал 0, сторона 0.
+uint16_t simNvs[NUM_RXP][NUM_CH][2];
+uint16_t simRam[NUM_RXP][NUM_CH][2];
+
+void simInit() {
+  for (int p = 0; p < NUM_RXP; p++)
+    for (int c = 0; c < NUM_CH; c++)
+      for (int d = 0; d < 2; d++) {
+        simNvs[p][c][d] = RXP[p].def;
+        simRam[p][c][d] = RXP[p].def;
+      }
+}
+
+void rxNorm(int param, int &ch, int &dir) {
+  if (RXP[param].scope == PS_GLOB) { ch = 0; dir = 0; }
+  else if (RXP[param].scope == PS_CH) { dir = 0; }
+}
+
+// «Только прочитать» (на радио это SetConfig со значением 0xFFFF): вернуть текущее значение
+uint16_t rxQuery(int ch, int dir, int param) {
+  rxNorm(param, ch, dir);
+  return simRam[param][ch][dir];
+}
+
+// Применить значение (на радио: SetConfig -> Ack). commit = сохранить в память приёмника.
+// Возвращает значение, которое реально применил приёмник.
+uint16_t rxSet(int ch, int dir, int param, int value, bool commit) {
+  rxNorm(param, ch, dir);
+  value = constrain(value, (int)RXP[param].mn, (int)RXP[param].mx);
+  simRam[param][ch][dir] = value;
+  if (commit) simNvs[param][ch][dir] = value;
+  return value;
+}
+
+// потеря связи: приёмник сам откатывает несохранённое
+void rxRevertAll() {
+  for (int p = 0; p < NUM_RXP; p++)
+    for (int c = 0; c < NUM_CH; c++)
+      for (int d = 0; d < 2; d++) simRam[p][c][d] = simNvs[p][c][d];
+}
+
+// сброс настроек приёмника (привязка не затрагивается)
+void rxFactoryReset() { simInit(); }
+
+int  rxTopic = RT_LIMIT;           // что выбрано в меню Receiver
+int  rxParam = RXP_LIMIT, rxCh = 0, rxDir = 0;
+int  rxCur = 0, rxOrig = 0;        // текущее (из Ack) и исходное значение
+MenuScr rxRetScr = MS_RXDIR;       // куда вернуться после правки
+bool leverArmed = false;           // тестовый джойстик разрешён, когда побывал в центре
+
+bool isRxScreen() {
+  return menuScr == MS_RX || menuScr == MS_RXCH || menuScr == MS_RXDIR || menuScr == MS_RXGLOB ||
+         menuScr == MS_RXEDIT || menuScr == MS_RXSTAT;
+}
+
+// все включённые каналы, кроме тумблеров навигации и тестового джойстика, в центре
+bool othersCentered() {
+  for (int i = 0; i < NUM_CH; i++) {
+    if (i == MENU_NAV_CH || i == MENU_ENTER_CH || i == TEST_LEVER_CH) continue;
+    if (chBad(i)) return false;
+  }
+  return true;
+}
+
+// ---- симулятор телеметрии приёмника (пока нет радио) ----
+// Условный ток = 3.5 А на 100% ШИМ. Выше 1.3 x лимита: перегрузка (канал отключается, пока рычаг не в центре),
+// от лимита до 1.3 x лимита: ограничение по лимиту.
+Telem tel;
+bool  telValid = false;
+bool  ovlLatch[NUM_CH];
+uint16_t simPeak[NUM_CH];
+uint32_t rfTx = 0, rfRx = 0, rfLost = 0;
+int   rfRssi = -63, rfSnr10 = 95, rfRate = 26;
+unsigned long rfAgeMs = 0;
+uint16_t rxId = 0x3F2A;
+
+void simTelemetry(unsigned long now) {
+  memset(&tel, 0, sizeof(tel));
+  if (!rxLinked()) {
+    telValid = false;
+    memset(ovlLatch, 0, sizeof(ovlLatch));
+    return;
+  }
+  telValid = true;
+  tel.vrx = 124;
+  tel.rssi = (int8_t)rfRssi;
+  tel.kill = (state == ST_ESTOP) ? 1 : 0;
+  tel.reason = 0;
+  for (int c = 0; c < NUM_CH; c++) {
+    int p = ctl[c];
+    int side = (p < 0) ? 1 : 0;
+    int mag = abs(p);
+    if (!simRam[RXP_CHEN][c][0]) continue;
+    bool curMode = simRam[RXP_MODE][0][0] != 0;
+    int maxd = simRam[RXP_MAXD][c][side];
+    if (!curMode && mag > maxd) mag = maxd;
+    if (ovlLatch[c]) {
+      if (p == 0) {
+        ovlLatch[c] = false;
+      } else {
+        tel.mOvl |= (uint8_t)(1 << c);
+        tel.side |= (uint8_t)(side << c);
+        tel.cur[c] = simPeak[c];
+        continue;
+      }
+    }
+    int raw = mag * 35 / 100;                // 0.1 А при 100 % ШИМ около 3.5 А
+    if (curMode) {                           // ток: от стартового до максимального, ШИМ считается из тока
+      int i0 = simRam[RXP_STARTI][c][side], i1 = simRam[RXP_MAXI][c][side];
+      raw = (mag > 0) ? i0 + mag * (i1 - i0) / 100 : 0;
+      mag = constrain(raw * 100 / 35, 0, 100);
+    }
+    int lim = simRam[RXP_LIMIT][c][side];
+    if (raw > 0 && raw > lim * 13 / 10) {
+      ovlLatch[c] = true;
+      simPeak[c] = raw;
+      tel.mOvl |= (uint8_t)(1 << c);
+      tel.side |= (uint8_t)(side << c);
+      tel.cur[c] = raw;
+      continue;
+    }
+    tel.pwm[c] = (int8_t)(side ? -mag : mag);
+    if (raw > 0 && raw >= lim) { tel.mLim |= (uint8_t)(1 << c); raw = lim; }
+    tel.cur[c] = raw;
+    if (mag > 0) tel.side |= (uint8_t)(side << c);
+  }
+  rfTx++; rfRx++;
+  rfAgeMs = now % 300;
+}
+
+// Фронты событий: связь, телеметрия, батарея -> журнал
+void eventsTick(unsigned long now) {
+  static bool pLinked = false;
+  static uint8_t pOvl = 0, pOpen = 0, pLim = 0;
+  static int pBat = 0;
+
+  bool linked = rxLinked();
+  if (linked && !pLinked) {
+    restoredAt = now ? now : 1;
+    logEvent(LT_LINKOK, 0, 0, 0);
+  }
+  if (!linked && pLinked) {
+    rxRevertAll();                       // несохранённое откатывается
+    logEvent(LT_NOLINK, 0, 0, 0);
+  }
+  pLinked = linked;
+
+  uint8_t ovl = telValid ? tel.mOvl : 0;
+  uint8_t opn = telValid ? tel.mOpen : 0;
+  uint8_t lim = telValid ? tel.mLim : 0;
+  for (int c = 0; c < NUM_CH; c++) {
+    uint8_t bit = (uint8_t)(1 << c);
+    int side = (tel.side >> c) & 1;
+    if ((ovl & bit) && !(pOvl & bit)) {
+      int l = simRam[RXP_LIMIT][c][side];
+      int th = l * 2;
+      if (th < 40) th = 40;                                  // порог КЗ: 2 x лимит, не менее 4 А
+      logEvent((tel.cur[c] >= th) ? LT_SHORT : LT_OVL, c, side, (uint16_t)tel.cur[c]);
+    }
+    if ((opn & bit) && !(pOpen & bit)) logEvent(LT_OPEN, c, side, 0);
+    if ((lim & bit) && !(pLim & bit))  logEvent(LT_LIMIT, c, side, (uint16_t)tel.cur[c]);
+  }
+  pOvl = ovl; pOpen = opn; pLim = lim;
+
+  if (batLevel >= 1 && pBat == 0) logEvent(LT_BATTTX, 0, 0, (uint16_t)(vbat * 10.0f));
+  pBat = batLevel;
+}
+
+// ============ МЕНЮ ============
+// Пункты меню канала зависят от типа: Expo и Max только у джойстика
+int chItems(int ch, uint8_t* ids) {
+  int n = 0;
+  ids[n++] = CI_TYPE;
+  ids[n++] = CI_REV;
+  ids[n++] = CI_EN;
+  if (chType[ch] == T_JOY) { ids[n++] = CI_EXPO; ids[n++] = CI_MAX; }
+  ids[n++] = CI_LED;
+  ids[n++] = CI_BACK;
+  return n;
+}
+
+// Пункты экрана настройки события
+int evItems(int e, uint8_t* ids) {
+  int n = 0;
+  if (e == EV_ESTOP) { ids[n++] = EI_FIXED; ids[n++] = EI_BACK; return n; }
+  if (e != EV_RXALARM && e != EV_NOLINK) ids[n++] = EI_EN;     // эти два выключить нельзя
+  ids[n++] = EI_COLOR;
+  if (e == EV_HEART) ids[n++] = EI_INT;
+  else               ids[n++] = EI_PAT;
+  if (e >= EV_OVERLOAD && e <= EV_NOTCTR) ids[n++] = EI_WHERE;
+  ids[n++] = EI_BACK;
+  return n;
+}
+
+int menuCount() {
+  switch (menuScr) {
+    case MS_MAIN:    return 3;
+    case MS_TX:      return TX_COUNT;
+    case MS_CAL:     return 4;
+    case MS_CHLIST:  return NUM_CH + 1;
+    case MS_CHEDIT:  { uint8_t ids[8]; return chItems(editCh, ids); }
+    case MS_BAT:     return 10;
+    case MS_LED:     return 7;
+    case MS_LEDSTAT: return 3;
+    case MS_EVLIST:  return NUM_EV + 1;
+    case MS_EVEDIT:  { uint8_t ids[8]; return evItems(evSel, ids); }
+    case MS_PRESET:  return 4;
+    case MS_SCREENS: return NUM_SCR + 1;
+    case MS_SCRITEM: return 4;
+    case MS_SCRMOVE: return NUM_SCR;
+    case MS_POWER:   return 3;
+    case MS_BIND:    return 4;
+    case MS_EVLOG:   return logN + 2;
+    case MS_DBGLIST: return NUM_DP + 1;
+    case MS_FRTARGET: return 3;
+    case MS_RX:      return RT_COUNT;
+    case MS_RXCH:    return NUM_CH + 1;
+    case MS_RXDIR:   return 3;
+    case MS_RXGLOB:  return 7;
+    default:         return 0;
+  }
+}
+
+void adjustTop() {
+  if (sel < menuTop) menuTop = sel;
+  if (sel >= menuTop + MENU_ROWS) menuTop = sel - MENU_ROWS + 1;
+  if (menuTop < 0) menuTop = 0;
+}
+
+void gotoScr(MenuScr s, int index) {
+  menuScr = s;
+  sel = index;
+  menuTop = 0;
+  adjustTop();
+  navReset();
+}
+
+const char* COL_NAME[3] = { "Red", "Green", "Amber" };
+const char* PAT_NAME[6] = { "Steady", "Slow", "Fast", "Pulse", "Double", "Alt" };
+
+// эффективные настройки события: E-Stop фиксирован, у двух обязательных Enable всегда ON
+EvCfg cfgOf(int e) {
+  EvCfg c = ev[e];
+  if (e == EV_ESTOP) c = DEF_EV[EV_ESTOP];
+  if (e == EV_ESTOP || e == EV_RXALARM || e == EV_NOLINK) c.en = 1;
+  return c;
+}
+
+// ---- пресеты ----
+void presetFill(int p, EvCfg* out, bool &g, bool &r) {
+  for (int e = 0; e < NUM_EV; e++) out[e] = DEF_EV[e];
+  g = true; r = true;
+  if (p == 0) {                     // Quiet
+    g = false;
+    out[EV_LIMIT].en = 0; out[EV_NOTCTR].en = 0; out[EV_RESTORED].en = 0;
+    out[EV_HEART].en = 0; out[EV_BATTTX].en = 0;  out[EV_BATTRX].en = 0;
+  } else if (p == 2) {              // Full
+    for (int e = 0; e < NUM_EV; e++) out[e].en = 1;
+    out[EV_HEART].ival = 0;
+  }
+}
+
+const char* presetName() {
+  static const char* names[3] = { "Quiet", "Standard", "Full" };
+  EvCfg t[NUM_EV];
+  for (int p = 0; p < 3; p++) {
+    bool g, r;
+    presetFill(p, t, g, r);
+    if (g != ledGreenOn || r != ledRedOn) continue;
+    bool same = true;
+    for (int e = 1; e < NUM_EV && same; e++) {
+      EvCfg c = ev[e];
+      if (e == EV_RXALARM || e == EV_NOLINK) c.en = t[e].en;
+      if (c.en != t[e].en || c.color != t[e].color || c.pat != t[e].pat ||
+          c.whereAll != t[e].whereAll || c.ival != t[e].ival) same = false;
+    }
+    if (same) return names[p];
+  }
+  return "Custom";
+}
+
+void presetApply(int p) {
+  bool g, r;
+  presetFill(p, ev, g, r);
+  ledGreenOn = g; ledRedOn = r;
+  saveAllEv();
+  saveLedCfg();
+}
+
+// ============ ВСПОМОГАТЕЛЬНОЕ (меню, экраны, журнал) ============
+void fmtParam(int p, int v, char* b, size_t n) {
+  switch (RXP[p].fmt) {
+    case F_AMP:   snprintf(b, n, "%d.%dA", v / 10, v % 10); break;
+    case F_PCT:   snprintf(b, n, "%d%%", v); break;
+    case F_MS:    snprintf(b, n, "%dms", v); break;
+    case F_HZ:    snprintf(b, n, "%dHz", v); break;
+    case F_ONOFF: snprintf(b, n, "%s", v ? "ON" : "OFF"); break;
+    case F_MODE:  snprintf(b, n, "%s", v ? "CURRENT" : "PWM"); break;
+    default:      snprintf(b, n, "%ddBm", v); break;
+  }
+}
+
+bool rxCurMode() { return rxQuery(0, 0, RXP_MODE) != 0; }
+
+// параметры, при правке которых работает тестовый рычаг
+bool rxLeverParam(int p) { return p == RXP_LIMIT || p == RXP_DUTY || p == RXP_STARTI; }
+
+int rxTopicParam(int topic) {
+  switch (topic) {
+    case RT_LIMIT: return RXP_LIMIT;
+    case RT_DUTY:  return rxCurMode() ? RXP_STARTI : RXP_DUTY;
+    case RT_MAXD:  return rxCurMode() ? RXP_MAXI : RXP_MAXD;
+    case RT_CHEN:  return RXP_CHEN;
+    default:       return RXP_RAMPUP;
+  }
+}
+
+// ---- экраны ----
+bool scrEnabled(uint8_t id) { return ((scrEn >> id) & 1) != 0; }
+
+uint8_t scrNext(uint8_t cur) {
+  int pos = 0;
+  for (int i = 0; i < NUM_SCR; i++) if (scrOrder[i] == cur) pos = i;
+  for (int k = 1; k <= NUM_SCR; k++) {
+    uint8_t id = scrOrder[(pos + k) % NUM_SCR];
+    if (scrEnabled(id)) return id;
+  }
+  return cur;
+}
+
+void scrToggle(uint8_t id) {
+  if (id == SC_MAIN) { toast("Main always on"); return; }
+  if (scrEnabled(id)) {
+    if (id == scrStart) { toast("Is start screen"); return; }
+    scrEn &= (uint8_t)~(1 << id);
+  } else {
+    scrEn |= (uint8_t)(1 << id);
+  }
+  saveScreens();
+}
+
+void scrMove(int dir) {
+  int j = scrSel + dir;
+  if (j < 0 || j >= NUM_SCR) return;
+  uint8_t t = scrOrder[scrSel];
+  scrOrder[scrSel] = scrOrder[j];
+  scrOrder[j] = t;
+  scrSel = j;
+}
+
+// ---- подтверждение ----
+void startConfirm(ConfAct act, MenuScr back, int idx) {
+  confAct = act;
+  confBack = back;
+  confIdx = idx;
+  gotoScr(MS_CONFIRM, 0);
+}
+
+void factoryResetTx() {
+  static const char* ns[] = { "joy", "chcfg", "led", "alerts", "bat", "screens", "radio", "log" };
+  for (int i = 0; i < 8; i++) {
+    prefs.begin(ns[i], false);
+    prefs.clear();
+    prefs.end();
+  }
+  logLine("FACTORY RESET: pult");
+  restartAt = millis() + 1500UL;      // привязка (namespace "bind") не затрагивается
+}
+
+void doConfirm() {
+  if (restartAt) return;
+  switch (confAct) {
+    case CA_CLEARLOG:
+      logClear();
+      logLine("Event log cleared");
+      toast("Log cleared");
+      gotoScr(confBack, 0);
+      break;
+    case CA_FORGET:
+      bindId = DEF_BIND_ID;
+      saveBind();
+      logLine("Bind forgotten");
+      toast("Bind forgotten");
+      gotoScr(confBack, confIdx);
+      break;
+    case CA_FR_TX:
+      factoryResetTx();               // экран остаётся до перезагрузки
+      break;
+    case CA_FR_RX:
+      if (!rxLinked() || !othersCentered()) {
+        toast("Not possible now");
+      } else {
+        rxFactoryReset();
+        logLine("FACTORY RESET: RX");
+        toast("RX reset");
+      }
+      gotoScr(confBack, confIdx);
+      break;
+  }
+}
+
+// ---- код для Factory Reset ----
+void startPin() {
+  for (int i = 0; i < 4; i++) pinDigit[i] = 0;
+  pinPos = 0;
+  gotoScr(MS_PIN, 0);
+}
+
+void pinStep(int a, int b) {
+  if (a) pinDigit[pinPos] = (pinDigit[pinPos] + a + 10) % 10;
+  if (b > 0) {
+    if (++pinPos >= 4) {
+      int code = pinDigit[0] * 1000 + pinDigit[1] * 100 + pinDigit[2] * 10 + pinDigit[3];
+      if (code == FACTORY_PIN) {
+        gotoScr(MS_FRTARGET, 0);
+      } else {
+        logLine("Factory reset: wrong code");
+        toast("Wrong code");
+        gotoScr(MS_TX, idxTx);
+      }
+    }
+  } else if (b < 0) {
+    if (pinPos > 0) pinPos--;
+    else gotoScr(MS_TX, idxTx);
+  }
+}
+
+// ---- привязка (пока без радио: LINK в симуляторе имитирует успех) ----
+void startBind() {
+  bindStart = millis();
+  bindPhase = 0;
+  logLine("Bind: started");
+  gotoScr(MS_BINDRUN, 0);
+}
+
+void bindTick(unsigned long now) {
+  if (bindPhase == 0) {
+    if (simMode == SIM_LINK && (now - bindStart) >= 3000UL) {
+      bindId = (uint32_t)esp_random();
+      if (bindId == DEF_BIND_ID) bindId ^= 1UL;
+      saveBind();
+      bindPhase = 1;
+      bindDoneAt = now;
+      LOGF("Bind OK %08lX", (unsigned long)bindId);
+    } else if ((now - bindStart) >= BIND_TIMEOUT_MS) {
+      bindPhase = 2;
+      bindDoneAt = now;
+      logLine("Bind: timeout");
+    }
+  } else if ((now - bindDoneAt) >= 2000UL) {
+    if (bindPhase == 2) toast("Bind timeout");
+    gotoScr(MS_BIND, idxBind);
+  }
+}
+
+// ---- мощность пульта ----
+void startTxPwrEdit() {
+  editInt = 0;
+  for (int i = 0; i < 8; i++) if (TXP_LIST[i] == txPower) editInt = i;
+  gotoScr(MS_TXPWR, 0);
+}
+
+// ---- описания страниц Debug (листаются CH3) ----
+const char* const DESC_RAW[] = {
+  "RAW ADC", "Raw values of the", "8 channels from the", "ADS1115 chips.", "Center is about", "13200.", "",
+  "ADS8 = time to read", "all 8 channels.", "DZ = dead zone,", "in ADC counts." };
+const char* const DESC_RADIO[] = {
+  "RADIO", "First line: radio", "settings (freq, SF,", "bandwidth).", "TX/RX = power of", "pult and receiver.", "",
+  "RSSI = signal level.", "Closer to 0 is", "better: -63 good,", "-110 bad.", "SNR = signal/noise.", "",
+  "Lost = lost packets", "and percent.", "26/s = packets", "per second.", "Age = time since", "last telemetry.", "ID = receiver code." };
+const char* const DESC_TELEM[] = {
+  "TELEMETRY RAW", "I = current of each", "channel, in 0.1 A.", "P = PWM, -100..100.", "Minus = side B.", "",
+  "L = limit reached", "O = overload", "X = open circuit", "Each is a mask: one", "bit per channel.",
+  "s = faulty side", "bit: 0=A, 1=B.", "",
+  "Vrx = receiver", "battery, volts.", "R = receiver RSSI.", "K = killswitch:", "no, or the reason." };
+const char* const DESC_SYS[] = {
+  "SYSTEM", "FW: version, date.", "Up: run time.", "Temp: chip temp.", "Heap: free memory.",
+  "I2C: devices found.", "Draw a+b: a = render", "time, b = time to", "send the frame, ms." };
+const char* const DESC_LOG[] = {
+  "LOG", "Last lines of the", "serial log, newest", "at the bottom.", "Same text as on the", "USB serial monitor." };
+const char* const DESC_LIM[] = {
+  "LIMITS / NOW / OVL", "One row per channel", "channel, then A", "side, then B side.", "Each side has 3", "numbers, in 0.1 A.", "",
+  "Lim = current limit", "Now = current now", "Ovl = last overload", "from the log", "-- = no data", "",
+  "Example row:", "3 30 00 -- 30 31 52", "= CH3. A: lim 3.0,", "now 0, no overload.", "B: lim 3.0, now 3.1", "overload 5.2 A." };
+struct DescRef { const char* const* lines; int n; };
+const DescRef DESC[NUM_DP] = {
+  { DESC_RADIO, (int)(sizeof(DESC_RADIO) / sizeof(DESC_RADIO[0])) },
+  { DESC_TELEM, (int)(sizeof(DESC_TELEM) / sizeof(DESC_TELEM[0])) },
+  { DESC_LIM,   (int)(sizeof(DESC_LIM)   / sizeof(DESC_LIM[0])) },
+  { DESC_RAW,   (int)(sizeof(DESC_RAW)   / sizeof(DESC_RAW[0])) },
+  { DESC_SYS,   (int)(sizeof(DESC_SYS)   / sizeof(DESC_SYS[0])) },
+  { DESC_LOG,   (int)(sizeof(DESC_LOG)   / sizeof(DESC_LOG[0])) }
+};
+
+// порядок пунктов в меню -> внутренний номер пункта (чтобы не переписывать обработчики)
+const uint8_t BAT_MAP[9] = { 0, 5, 6, 1, 2, 3, 4, 7, 8 };   // Cal divider, Warn, Crit, Full V, Empty V, Full=now, Empty=low, Curve, Reset
+const uint8_t LED_MAP[6] = { 3, 1, 0, 2, 4, 5 };            // Presets, Alert events, Status LEDs, Heartbeat, Test alerts, Reset alerts
+
+void menuLabel(int i, char* b, size_t n) {
+  static const char* mainL[] = { "Transmitter", "Receiver", "Exit" };
+  static const char* calL[]  = { "Set Center", "Set Min/Max", "Dead Zone", "Back" };
+  static const char* ledM[]  = { "Both", "Red", "Green", "Off" };
+  static const char* simN[]  = { "OFF", "LINK", "LOST" };
+  static const char* ledL[]  = { "Status LEDs", "Alert events", "Heartbeat", "Presets", "Test alerts", "Reset alerts", "Back" };
+  static const char* rxL[]   = { "Current Limits", "Start Duty", "Max Duty", "Ramps", "Channels On/Off", "Global", "RX Status", "Back" };
+  static const char* dbgL[]  = { "Radio", "Telemetry", "Limits", "RAW ADC", "System", "Log", "Back" };
+  switch (menuScr) {
+    case MS_MAIN: snprintf(b, n, "%s", mainL[i]); break;
+    case MS_TX:
+      switch (i) {
+        case TX_CAL:   snprintf(b, n, "Calibrate"); break;
+        case TX_CHSET: snprintf(b, n, "Channel Setup"); break;
+        case TX_BAT:   snprintf(b, n, "Battery"); break;
+        case TX_LED:   snprintf(b, n, "LED & Alerts"); break;
+        case TX_SCR:   snprintf(b, n, "Screens"); break;
+        case TX_PWR:   snprintf(b, n, "Power"); break;
+        case TX_BIND:  snprintf(b, n, "Bind"); break;
+        case TX_LOG:   snprintf(b, n, "Event Log"); break;
+        case TX_DBG:   snprintf(b, n, "Debug"); break;
+        case TX_FR:    snprintf(b, n, "Factory Reset"); break;
+        case TX_SIM:   snprintf(b, n, "Sim RX: %s", simN[simMode]); break;
+        default:       snprintf(b, n, "Back"); break;
+      }
+      break;
+    case MS_CAL:  snprintf(b, n, "%s", calL[i]);  break;
+    case MS_CHLIST:
+      if (i < NUM_CH) snprintf(b, n, "CH%d %s %s %s", i + 1,
+                               chType[i] == T_SW3 ? "Sw3" : "Joy",
+                               chRev[i] ? "REV" : "nrm",
+                               chEn[i] ? "on" : "OFF");
+      else snprintf(b, n, "Back");
+      break;
+    case MS_CHEDIT: {
+      uint8_t ids[8];
+      int cnt = chItems(editCh, ids);
+      if (i >= cnt) { b[0] = 0; break; }
+      switch (ids[i]) {
+        case CI_TYPE: snprintf(b, n, "Type: %s", chType[editCh] == T_SW3 ? "Switch3" : "Joystick"); break;
+        case CI_REV:  snprintf(b, n, "Reverse: %s", chRev[editCh] ? "ON" : "OFF"); break;
+        case CI_EN:   snprintf(b, n, "Enable: %s", chEn[editCh] ? "ON" : "OFF"); break;
+        case CI_EXPO: snprintf(b, n, "Expo: %d%%", chExpo[editCh]); break;
+        case CI_MAX:  snprintf(b, n, "Max: %d%%", chMaxP[editCh]); break;
+        case CI_LED:  snprintf(b, n, "LED: %s", ledM[chLed[editCh]]); break;
+        default:      snprintf(b, n, "Back"); break;
+      }
+      break;
+    }
+    case MS_BAT:
+      switch (i < 9 ? BAT_MAP[i] : i) {
+        case 0: snprintf(b, n, "Cal divider"); break;
+        case 1: snprintf(b, n, "Full V  %.2f", vFull); break;
+        case 2: snprintf(b, n, "Empty V %.2f", vEmpty); break;
+        case 3: snprintf(b, n, "Full = now"); break;
+        case 4:
+          if (vMinSeen < 90.0f) snprintf(b, n, "Empty=low %.2f", vMinSeen);
+          else                  snprintf(b, n, "Empty=low --");
+          break;
+        case 5: snprintf(b, n, "Warn %%: %d", batWarn); break;
+        case 6: snprintf(b, n, "Crit %%: %d", batCrit); break;
+        case 7: snprintf(b, n, "Curve: %s", batCurve ? "Li-ion" : "Linear"); break;
+        case 8: snprintf(b, n, "Reset limits"); break;
+        default: snprintf(b, n, "Back"); break;
+      }
+      break;
+    case MS_LED:     snprintf(b, n, "%s", ledL[i < 6 ? LED_MAP[i] : 6]); break;
+    case MS_LEDSTAT:
+      if (i == 0)      snprintf(b, n, "Green LEDs: %s", ledGreenOn ? "ON" : "OFF");
+      else if (i == 1) snprintf(b, n, "Red LEDs: %s", ledRedOn ? "ON" : "OFF");
+      else             snprintf(b, n, "Back");
+      break;
+    case MS_EVLIST:
+      if (i < NUM_EV) snprintf(b, n, "%-12s%s", EV_NAME[i], cfgOf(i).en ? "ON" : "off");
+      else            snprintf(b, n, "Back");
+      break;
+    case MS_EVEDIT: {
+      uint8_t ids[8];
+      int cnt = evItems(evSel, ids);
+      if (i >= cnt) { b[0] = 0; break; }
+      EvCfg c = cfgOf(evSel);
+      switch (ids[i]) {
+        case EI_EN:    snprintf(b, n, "Enable: %s", c.en ? "ON" : "OFF"); break;
+        case EI_COLOR: snprintf(b, n, "Color: %s", COL_NAME[c.color]); break;
+        case EI_PAT:   snprintf(b, n, "Pattern: %s", PAT_NAME[c.pat]); break;
+        case EI_INT:   snprintf(b, n, "Every: %d s", HB_SEC[c.ival]); break;
+        case EI_WHERE: snprintf(b, n, "Where: %s", c.whereAll ? "All" : "Channel"); break;
+        case EI_FIXED: snprintf(b, n, "Fixed: red fast"); break;
+        default:       snprintf(b, n, "Back"); break;
+      }
+      break;
+    }
+    case MS_PRESET: {
+      static const char* pn[] = { "Quiet", "Standard", "Full", "Back" };
+      snprintf(b, n, "%s", pn[i]);
+      break;
+    }
+    case MS_RX:
+      if (i == RT_DUTY)      snprintf(b, n, "%s", rxCurMode() ? "Start Current" : "Start Duty");
+      else if (i == RT_MAXD) snprintf(b, n, "%s", rxCurMode() ? "Max Current" : "Max Duty");
+      else                   snprintf(b, n, "%s", rxL[i]);
+      break;
+    case MS_RXCH:
+      if (i < NUM_CH) {
+        if (rxTopic == RT_CHEN) snprintf(b, n, "Channel %d %s", i + 1, rxQuery(i, 0, RXP_CHEN) ? "ON" : "OFF");
+        else                    snprintf(b, n, "Channel %d", i + 1);
+      } else snprintf(b, n, "Back");
+      break;
+    case MS_RXDIR:
+      if (i < 2) {
+        char v[12];
+        if (rxTopic == RT_RAMP) {
+          fmtParam(RXP_RAMPUP + i, rxQuery(rxCh, 0, RXP_RAMPUP + i), v, sizeof(v));
+          snprintf(b, n, "%s %s", i ? "Ramp down" : "Ramp up", v);
+        } else {
+          int p = rxTopicParam(rxTopic);
+          fmtParam(p, rxQuery(rxCh, i, p), v, sizeof(v));
+          snprintf(b, n, "%s %s", i ? "Retract" : "Extend", v);
+        }
+      } else snprintf(b, n, "Back");
+      break;
+    case MS_RXGLOB:
+      if (i < 6) {
+        char v[12];
+        int p = (i == 0) ? RXP_MODE : RXP_OVLDLY + i - 1;
+        fmtParam(p, rxQuery(0, 0, p), v, sizeof(v));
+        snprintf(b, n, "%-9s %s", RXP[p].name, v);
+      } else snprintf(b, n, "Back");
+      break;
+    case MS_SCREENS:
+      if (i < NUM_SCR) {
+        uint8_t id = scrOrder[i];
+        snprintf(b, n, "%-11s%s%s", SCR_NAME[id], scrEnabled(id) ? "ON" : "off", id == scrStart ? "*" : "");
+      } else snprintf(b, n, "Back");
+      break;
+    case MS_SCRMOVE: {
+      uint8_t id = scrOrder[i];
+      snprintf(b, n, "%-11s%s", SCR_NAME[id], i == scrSel ? "<<" : "");
+      break;
+    }
+    case MS_SCRITEM: {
+      uint8_t id = scrOrder[scrSel];
+      switch (i) {
+        case 0:  snprintf(b, n, "Enable: %s", scrEnabled(id) ? "ON" : "OFF"); break;
+        case 1:  snprintf(b, n, "Move"); break;
+        case 2:  snprintf(b, n, "Set as start%s", id == scrStart ? " *" : ""); break;
+        default: snprintf(b, n, "Back"); break;
+      }
+      break;
+    }
+    case MS_POWER:
+      if (i == 0)      snprintf(b, n, "TX pult %ddBm", txPower);
+      else if (i == 1) {
+        if (rxLinked()) snprintf(b, n, "RX recv %ddBm", (int)rxQuery(0, 0, RXP_PWR));
+        else            snprintf(b, n, "RX recv --");
+      } else snprintf(b, n, "Back");
+      break;
+    case MS_BIND: {
+      static const char* bl[] = { "Start Bind", "Show ID", "Forget", "Back" };
+      snprintf(b, n, "%s", bl[i]);
+      break;
+    }
+    case MS_EVLOG:
+      if (i < logN)       logText(logRam[i], b, n);
+      else if (i == logN) snprintf(b, n, "Clear log");
+      else                snprintf(b, n, "Back");
+      break;
+    case MS_DBGLIST: snprintf(b, n, "%s", dbgL[i]); break;
+    case MS_FRTARGET: {
+      static const char* fl[] = { "Transmitter", "Receiver", "Back" };
+      snprintf(b, n, "%s", fl[i]);
+      break;
+    }
+    default: b[0] = 0; break;
+  }
+}
+
+void enterMenu() {
+  state = ST_MENU;
+  idxMain = 0;
+  gotoScr(MS_MAIN, 0);
+  logLine("MENU: entered (setup mode, controls = 0)");
+}
+
+void goSafe();
+
+// Выход из меню всегда через Safe Start: все включённые каналы должны быть в центре,
+// иначе управление сразу пошло бы в приёмник.
+void exitMenu() {
+  goSafe();
+  navReset();
+  logLine("MENU: exit -> Safe Start");
+}
+
+void startCalCenter();
+void startCalRange();
+
+void startBatEdit(int kind) {
+  batKind = kind;
+  switch (kind) {
+    case BE_DIV:   batEditCv = (int)(vbat * 100.0f + 0.5f); break;
+    case BE_FULL:  batEditCv = (int)(vFull * 100.0f + 0.5f); break;
+    case BE_EMPTY: batEditCv = (int)(vEmpty * 100.0f + 0.5f); break;
+    case BE_WARN:  batEditI = batWarn; break;
+    case BE_CRIT:  batEditI = batCrit; break;
+  }
+  gotoScr(MS_BATEDIT, 0);
+}
+
+void batEditStep(int a, int m) {
+  switch (batKind) {
+    case BE_DIV:   batEditCv = constrain(batEditCv + a * m, 300, 900); break;
+    case BE_FULL:  batEditCv = constrain(batEditCv + a * m, 650, 900); break;
+    case BE_EMPTY: batEditCv = constrain(batEditCv + a * m, 500, 800); break;
+    case BE_WARN:  batEditI = constrain(batEditI + a * (m > 3 ? 3 : m), (int)batCrit + 1, 99); break;
+    case BE_CRIT:  batEditI = constrain(batEditI + a * (m > 3 ? 3 : m), 1, (int)batWarn - 1); break;
+  }
+}
+
+void batEditSave() {
+  float x = batEditCv / 100.0f;
+  switch (batKind) {
+    case BE_DIV:
+      if (pinV < 0.3f || batUsb) { toast("No battery"); break; }
+      {
+        float r = x / pinV;                 // реальное напряжение / напряжение на пине
+        if (r >= 2.0f && r <= 5.0f) {
+          divRatio = r;
+          saveBatCfg();
+          vbat = pinV * divRatio;
+          vbatPct = pctFromV(vbat);
+          toast("Divider saved");
+          LOGF("Divider -> %.4f (meter %.2f V, pin %.3f V)", divRatio, x, pinV);
+        } else {
+          toast("Bad value");
+        }
+      }
+      break;
+    case BE_FULL:
+      if (x >= vEmpty + 0.5f) { vFull = x; saveBatCfg(); toast("Saved"); }
+      else toast("Full > Empty");
+      break;
+    case BE_EMPTY:
+      if (x <= vFull - 0.5f) { vEmpty = x; saveBatCfg(); toast("Saved"); }
+      else toast("Empty < Full");
+      break;
+    case BE_WARN:
+      batWarn = batEditI; saveBatCfg(); toast("Saved");
+      break;
+    case BE_CRIT:
+      batCrit = batEditI; saveBatCfg(); toast("Saved");
+      break;
+  }
+  vbatPct = pctFromV(vbat);
+  gotoScr(MS_BAT, idxBat);
+}
+
+// ---- Receiver ----
+void enterReceiver() {
+  if (!rxLinked())          { toast("RX not connected"); return; }
+  if (!othersCentered())    { toast("Center controls");  return; }
+  gotoScr(MS_RX, idxRx);
+}
+
+void startRxEdit(int param, int ch, int dir, MenuScr ret) {
+  rxParam = param;
+  rxCh = ch;
+  rxDir = dir;
+  rxRetScr = ret;
+  rxOrig = rxQuery(ch, dir, param);           // на радио: SetConfig(0xFFFF) -> Ack
+  rxCur = rxOrig;
+  leverArmed = false;                         // джойстик заработает, когда будет в центре
+  gotoScr(MS_RXEDIT, 0);
+}
+
+void gotoRxRet() {
+  switch (rxRetScr) {
+    case MS_RXCH:   gotoScr(MS_RXCH, idxRxCh); break;
+    case MS_RXDIR:  gotoScr(MS_RXDIR, idxRxDir); break;
+    case MS_RXGLOB: gotoScr(MS_RXGLOB, idxRxGlob); break;
+    case MS_POWER:  gotoScr(MS_POWER, idxPower); break;
+    default:        gotoScr(MS_RX, idxRx); break;
+  }
+}
+
+void rxEditStep(int a, int m) {
+  const RxParamDef &d = RXP[rxParam];
+  if (rxParam == RXP_PWR) {                    // мощность: шаг по списку значений
+    int idx = 0;
+    for (int i = 0; i < 8; i++) if (TXP_LIST[i] <= rxCur) idx = i;
+    idx = constrain(idx + a, 0, 7);
+    rxCur = rxSet(rxCh, rxDir, rxParam, TXP_LIST[idx], false);
+    return;
+  }
+  if (d.fmt == F_ONOFF || d.fmt == F_MODE) {
+    rxCur = rxSet(rxCh, rxDir, rxParam, a > 0 ? 1 : 0, false);
+    return;
+  }
+  int cap = (((int)d.mx - (int)d.mn) / (int)d.step > 30) ? 10 : 3;
+  int k = (m > cap) ? cap : m;
+  rxCur = rxSet(rxCh, rxDir, rxParam, rxCur + a * d.step * k, false);   // применить сразу, без записи в память
+}
+
+void rxEditSave() {
+  rxCur = rxSet(rxCh, rxDir, rxParam, rxCur, true);        // записать в память приёмника
+  LOGF("RX saved p%d ch%d d%d v%d", rxParam, rxCh + 1, rxDir, rxCur);
+  toast("Saved");
+  gotoRxRet();
+}
+
+void rxEditCancel() {
+  rxSet(rxCh, rxDir, rxParam, rxOrig, false);              // вернуть исходное
+  toast("Cancelled");
+  gotoRxRet();
+}
+
+void menuSelect(int i) {
+  switch (menuScr) {
+    case MS_MAIN:
+      idxMain = i;
+      if (i == 0)      gotoScr(MS_TX, idxTx);
+      else if (i == 1) enterReceiver();
+      else             exitMenu();
+      break;
+    case MS_TX:
+      idxTx = i;
+      switch (i) {
+        case TX_CAL:   gotoScr(MS_CAL, idxCal); break;
+        case TX_CHSET: gotoScr(MS_CHLIST, idxChList); break;
+        case TX_BAT:   gotoScr(MS_BAT, idxBat); break;
+        case TX_LED:   gotoScr(MS_LED, idxLed); break;
+        case TX_SCR:   gotoScr(MS_SCREENS, idxScr); break;
+        case TX_PWR:   gotoScr(MS_POWER, idxPower); break;
+        case TX_BIND:  gotoScr(MS_BIND, idxBind); break;
+        case TX_LOG:   gotoScr(MS_EVLOG, idxEvLog); break;
+        case TX_DBG:   gotoScr(MS_DBGLIST, idxDbg); break;
+        case TX_FR:    startPin(); break;
+        case TX_SIM:
+          simMode = (SimMode)((simMode + 1) % 3);      // откат и журнал делает eventsTick
+          LOGF("Sim RX -> %d", simMode);
+          break;
+        default:       gotoScr(MS_MAIN, idxMain); break;
+      }
+      break;
+    case MS_CAL:
+      idxCal = i;
+      if (i == 0)      startCalCenter();
+      else if (i == 1) startCalRange();
+      else if (i == 2) { dzEdit = deadzone; gotoScr(MS_DZ, 0); }
+      else             gotoScr(MS_TX, idxTx);
+      break;
+    case MS_CHLIST:
+      idxChList = i;
+      if (i < NUM_CH) { editCh = i; idxChEdit = 0; gotoScr(MS_CHEDIT, 0); }
+      else            gotoScr(MS_TX, idxTx);
+      break;
+    case MS_CHEDIT: {
+      uint8_t ids[8];
+      int cnt = chItems(editCh, ids);
+      if (i >= cnt) break;
+      idxChEdit = i;
+      switch (ids[i]) {
+        case CI_TYPE:
+          chType[editCh] = (chType[editCh] == T_JOY) ? T_SW3 : T_JOY;
+          saveChannelCfg(editCh);
+          LOGF("CH%d type -> %s", editCh + 1, chType[editCh] == T_SW3 ? "Switch3" : "Joystick");
+          break;
+        case CI_REV:
+          chRev[editCh] = !chRev[editCh];
+          saveChannelCfg(editCh);
+          LOGF("CH%d reverse -> %s", editCh + 1, chRev[editCh] ? "ON" : "OFF");
+          break;
+        case CI_EN:
+          chEn[editCh] = !chEn[editCh];
+          saveChannelCfg(editCh);
+          LOGF("CH%d enable -> %s", editCh + 1, chEn[editCh] ? "ON" : "OFF");
+          break;
+        case CI_EXPO:
+          editInt = chExpo[editCh];
+          gotoScr(MS_EXPO, 0);
+          break;
+        case CI_MAX:
+          editInt = chMaxP[editCh];
+          gotoScr(MS_MAXV, 0);
+          break;
+        case CI_LED:
+          chLed[editCh] = (chLed[editCh] + 1) % 4;
+          saveChannelCfg(editCh);
+          LOGF("CH%d led mode -> %d", editCh + 1, chLed[editCh]);
+          break;
+        default:
+          gotoScr(MS_CHLIST, idxChList);
+          break;
+      }
+      break;
+    }
+    case MS_BAT:
+      idxBat = i;
+      switch (i < 9 ? BAT_MAP[i] : i) {
+        case 0: startBatEdit(BE_DIV); break;
+        case 1: startBatEdit(BE_FULL); break;
+        case 2: startBatEdit(BE_EMPTY); break;
+        case 3:
+          if (batUsb || vbat < 5.0f) toast("No battery");
+          else if (vbat < vEmpty + 0.5f) toast("Too low");
+          else { vFull = vbat; saveBatCfg(); vbatPct = pctFromV(vbat); toast("Full set"); }
+          break;
+        case 4:
+          if (vMinSeen > 90.0f) toast("No data yet");
+          else if (vMinSeen > vFull - 0.5f) toast("Too high");
+          else { vEmpty = vMinSeen; saveBatCfg(); vbatPct = pctFromV(vbat); toast("Empty set"); }
+          break;
+        case 5: startBatEdit(BE_WARN); break;
+        case 6: startBatEdit(BE_CRIT); break;
+        case 7: batCurve = batCurve ? 0 : 1; saveBatCfg(); vbatPct = pctFromV(vbat); break;
+        case 8:
+          vFull = DEF_VFULL; vEmpty = DEF_VEMPTY; batWarn = DEF_WARN; batCrit = DEF_CRIT;
+          batCurve = 1; vMinSeen = 99.0f;
+          saveBatCfg(); saveBatMin();
+          vbatPct = pctFromV(vbat);
+          toast("Limits reset");
+          break;
+        default: gotoScr(MS_TX, idxTx); break;
+      }
+      break;
+    case MS_LED:
+      idxLed = i;
+      switch (i < 6 ? LED_MAP[i] : i) {
+        case 0: gotoScr(MS_LEDSTAT, 0); break;
+        case 1: evFromLed = false; gotoScr(MS_EVLIST, idxEvList); break;
+        case 2: evFromLed = true; evSel = EV_HEART; idxEvEdit = 0; gotoScr(MS_EVEDIT, 0); break;
+        case 3: gotoScr(MS_PRESET, idxPreset); break;
+        case 4: testEv = 0; gotoScr(MS_TEST, 0); break;
+        case 5:
+          for (int e = 0; e < NUM_EV; e++) ev[e] = DEF_EV[e];
+          ledGreenOn = true; ledRedOn = true;
+          saveAllEv(); saveLedCfg();
+          toast("Alerts reset");
+          break;
+        default: gotoScr(MS_TX, idxTx); break;
+      }
+      break;
+    case MS_LEDSTAT:
+      if (i == 0)      { ledGreenOn = !ledGreenOn; saveLedCfg(); toast("Saved"); }
+      else if (i == 1) { ledRedOn = !ledRedOn; saveLedCfg(); toast("Saved"); }
+      else             gotoScr(MS_LED, idxLed);
+      break;
+    case MS_EVLIST:
+      idxEvList = i;
+      if (i < NUM_EV) { evSel = i; evFromLed = false; idxEvEdit = 0; gotoScr(MS_EVEDIT, 0); }
+      else            gotoScr(MS_LED, idxLed);
+      break;
+    case MS_EVEDIT: {
+      uint8_t ids[8];
+      int cnt = evItems(evSel, ids);
+      if (i >= cnt) break;
+      idxEvEdit = i;
+      EvCfg &c = ev[evSel];
+      switch (ids[i]) {
+        case EI_EN:    c.en = !c.en; saveEv(evSel); break;
+        case EI_COLOR: c.color = (c.color + 1) % 3; saveEv(evSel); break;
+        case EI_PAT:   c.pat = (c.pat + 1) % 6; saveEv(evSel); break;
+        case EI_INT:   c.ival = (c.ival + 1) % 4; saveEv(evSel); break;
+        case EI_WHERE: c.whereAll = !c.whereAll; saveEv(evSel); break;
+        case EI_FIXED: break;
+        default:
+          if (evFromLed) gotoScr(MS_LED, idxLed);
+          else           gotoScr(MS_EVLIST, idxEvList);
+          break;
+      }
+      break;
+    }
+    case MS_PRESET:
+      idxPreset = i;
+      if (i < 3) { presetApply(i); toast("Preset applied"); }
+      else       gotoScr(MS_LED, idxLed);
+      break;
+    case MS_RX:
+      idxRx = i;
+      rxTopic = i;
+      if (i == RT_GLOB)      gotoScr(MS_RXGLOB, idxRxGlob);
+      else if (i == RT_STAT) gotoScr(MS_RXSTAT, 0);
+      else if (i == RT_BACK) gotoScr(MS_MAIN, idxMain);
+      else                   gotoScr(MS_RXCH, idxRxCh);
+      break;
+    case MS_RXCH:
+      idxRxCh = i;
+      if (i < NUM_CH) {
+        rxCh = i;
+        if (rxTopic == RT_CHEN) startRxEdit(RXP_CHEN, rxCh, 0, MS_RXCH);
+        else                    gotoScr(MS_RXDIR, idxRxDir);
+      } else gotoScr(MS_RX, idxRx);
+      break;
+    case MS_RXDIR:
+      idxRxDir = i;
+      if (i < 2) {
+        if (rxTopic == RT_RAMP) startRxEdit(RXP_RAMPUP + i, rxCh, 0, MS_RXDIR);
+        else                    startRxEdit(rxTopicParam(rxTopic), rxCh, i, MS_RXDIR);
+      } else gotoScr(MS_RXCH, idxRxCh);
+      break;
+    case MS_RXGLOB:
+      idxRxGlob = i;
+      if (i < 6) startRxEdit((i == 0) ? RXP_MODE : RXP_OVLDLY + i - 1, 0, 0, MS_RXGLOB);
+      else       gotoScr(MS_RX, idxRx);
+      break;
+    case MS_SCREENS:
+      idxScr = i;
+      if (i < NUM_SCR) { scrSel = i; gotoScr(MS_SCRITEM, 0); }
+      else             gotoScr(MS_TX, idxTx);
+      break;
+    case MS_SCRITEM: {
+      uint8_t id = scrOrder[scrSel];
+      switch (i) {
+        case 0: scrToggle(id); break;
+        case 1: gotoScr(MS_SCRMOVE, scrSel); break;
+        case 2: scrStart = id; scrEn |= (uint8_t)(1 << id); saveScreens(); toast("Start set"); break;
+        default: gotoScr(MS_SCREENS, idxScr); break;
+      }
+      break;
+    }
+    case MS_POWER:
+      idxPower = i;
+      if (i == 0)      startTxPwrEdit();
+      else if (i == 1) {
+        if (!rxLinked()) toast("RX not connected");
+        else             startRxEdit(RXP_PWR, 0, 0, MS_POWER);
+      } else gotoScr(MS_TX, idxTx);
+      break;
+    case MS_BIND:
+      idxBind = i;
+      if (i == 0)      startBind();
+      else if (i == 1) gotoScr(MS_BINDID, 0);
+      else if (i == 2) startConfirm(CA_FORGET, MS_BIND, idxBind);
+      else             gotoScr(MS_TX, idxTx);
+      break;
+    case MS_EVLOG:
+      idxEvLog = i;
+      if (i == logN)      startConfirm(CA_CLEARLOG, MS_EVLOG, idxEvLog);
+      else if (i > logN)  gotoScr(MS_TX, idxTx);
+      break;
+    case MS_DBGLIST:
+      idxDbg = i;
+      if (i < NUM_DP) { dbgPage = i; dbgTop = 0; gotoScr(MS_DBGDESC, 0); }
+      else            gotoScr(MS_TX, idxTx);
+      break;
+    case MS_FRTARGET:
+      idxFr = i;
+      if (i == 0)      startConfirm(CA_FR_TX, MS_FRTARGET, idxFr);
+      else if (i == 1) {
+        if (!rxLinked())            toast("RX not connected");
+        else if (!othersCentered()) toast("Center controls");
+        else                        startConfirm(CA_FR_RX, MS_FRTARGET, idxFr);
+      } else gotoScr(MS_TX, idxTx);
+      break;
+    default:
+      break;
+  }
+}
+
+void menuBack() {
+  switch (menuScr) {
+    case MS_MAIN:     exitMenu(); break;
+    case MS_TX:       gotoScr(MS_MAIN, idxMain); break;
+    case MS_CAL:
+    case MS_CHLIST:
+    case MS_BAT:
+    case MS_LED:
+    case MS_SCREENS:
+    case MS_POWER:
+    case MS_BIND:
+    case MS_EVLOG:
+    case MS_DBGLIST:
+    case MS_FRTARGET:
+    case MS_PIN:      gotoScr(MS_TX, idxTx); break;
+    case MS_CHEDIT:   gotoScr(MS_CHLIST, idxChList); break;
+    case MS_DZ:       gotoScr(MS_CAL, idxCal); break;
+    case MS_BATEDIT:  gotoScr(MS_BAT, idxBat); break;
+    case MS_LEDSTAT:
+    case MS_EVLIST:
+    case MS_PRESET:
+    case MS_TEST:     gotoScr(MS_LED, idxLed); break;
+    case MS_EVEDIT:   if (evFromLed) gotoScr(MS_LED, idxLed); else gotoScr(MS_EVLIST, idxEvList); break;
+    case MS_EXPO:
+    case MS_MAXV:     gotoScr(MS_CHEDIT, idxChEdit); break;
+    case MS_SCRITEM:  gotoScr(MS_SCREENS, idxScr); break;
+    case MS_SCRMOVE:  saveScreens(); gotoScr(MS_SCRITEM, 0); break;
+    case MS_TXPWR:    gotoScr(MS_POWER, idxPower); break;
+    case MS_BINDRUN:
+    case MS_BINDID:   gotoScr(MS_BIND, idxBind); break;
+    case MS_DBGDESC:
+    case MS_DBGPAGE:  gotoScr(MS_DBGLIST, idxDbg); break;
+    case MS_CONFIRM:  gotoScr(confBack, confIdx); break;
+    case MS_RX:       gotoScr(MS_MAIN, idxMain); break;
+    case MS_RXCH:     gotoScr(MS_RX, idxRx); break;
+    case MS_RXDIR:    gotoScr(MS_RXCH, idxRxCh); break;
+    case MS_RXGLOB:   gotoScr(MS_RX, idxRx); break;
+    case MS_RXEDIT:   rxEditCancel(); break;
+    case MS_RXSTAT:   gotoScr(MS_RX, idxRx); break;
+  }
+}
+
+void navStep(unsigned long now) {
+  bool numeric = (menuScr == MS_DZ || menuScr == MS_EXPO || menuScr == MS_MAXV ||
+                  menuScr == MS_BATEDIT || menuScr == MS_RXEDIT || menuScr == MS_TXPWR);
+  int a = navPoll(MENU_NAV_CH, navA, now, numeric);
+  int b = navPoll(MENU_ENTER_CH, navB, now, false);
+
+  if (numeric) {
+    int m = navMult(navA, now);
+    if (b < 0) { menuBack(); return; }
+    switch (menuScr) {
+      case MS_DZ:
+        if (a) dzEdit = constrain(dzEdit + a * DZ_STEP * (m > 6 ? 6 : m), DZ_MIN, DZ_MAX);
+        if (b > 0) {
+          deadzone = dzEdit;
+          saveDeadzone();
+          LOGF("Dead zone saved: %d", deadzone);
+          toast("Saved");
+          gotoScr(MS_CAL, idxCal);
+        }
+        break;
+      case MS_EXPO:
+        if (a) editInt = constrain(editInt + a * EXPO_STEP * (m > 3 ? 3 : m), 0, 100);
+        if (b > 0) {
+          chExpo[editCh] = editInt;
+          saveChannelCfg(editCh);
+          LOGF("CH%d expo -> %d%%", editCh + 1, editInt);
+          toast("Saved");
+          gotoScr(MS_CHEDIT, idxChEdit);
+        }
+        break;
+      case MS_MAXV:
+        if (a) editInt = constrain(editInt + a * MAXP_STEP * (m > 3 ? 3 : m), MAXP_MIN, 100);
+        if (b > 0) {
+          chMaxP[editCh] = editInt;
+          saveChannelCfg(editCh);
+          LOGF("CH%d max -> %d%%", editCh + 1, editInt);
+          toast("Saved");
+          gotoScr(MS_CHEDIT, idxChEdit);
+        }
+        break;
+      case MS_BATEDIT:
+        if (a) batEditStep(a, m);
+        if (b > 0) batEditSave();
+        break;
+      case MS_RXEDIT:
+        if (a) rxEditStep(a, m);
+        if (b > 0) rxEditSave();
+        break;
+      case MS_TXPWR:
+        if (a) editInt = constrain(editInt + a, 0, 7);
+        if (b > 0) {
+          txPower = TXP_LIST[editInt];
+          saveRadio();
+          LOGF("TX power -> %d dBm", txPower);
+          toast("Saved");
+          gotoScr(MS_POWER, idxPower);
+        }
+        break;
+      default:
+        break;
+    }
+    return;
+  }
+
+  switch (menuScr) {
+    case MS_DBGPAGE:
+    case MS_RXSTAT:
+    case MS_BINDID:
+      if (b) menuBack();
+      return;
+    case MS_BINDRUN:
+      if (b < 0) menuBack();
+      return;
+    case MS_TEST:
+      if (a) testEv = (testEv + a + NUM_EV) % NUM_EV;
+      if (b) menuBack();
+      return;
+    case MS_DBGDESC: {
+      int total = DESC[dbgPage].n;
+      if (a > 0 && dbgTop + 6 < total) dbgTop += 3;
+      if (a < 0) dbgTop = (dbgTop >= 3) ? dbgTop - 3 : 0;
+      if (b > 0) gotoScr(MS_DBGPAGE, 0);
+      else if (b < 0) menuBack();
+      return;
+    }
+    case MS_PIN:
+      pinStep(a, b);
+      return;
+    case MS_CONFIRM:
+      if (b > 0) doConfirm();
+      else if (b < 0) menuBack();
+      return;
+    case MS_SCRMOVE:
+      if (a) { scrMove(a > 0 ? 1 : -1); sel = scrSel; adjustTop(); }
+      if (b) menuBack();
+      return;
+    default:
+      break;
+  }
+
+  int cnt = menuCount();
+  if (a && cnt > 0) { sel = (sel + a + cnt) % cnt; adjustTop(); }
+  if (b > 0) menuSelect(sel);
+  else if (b < 0) menuBack();
+}
+
+// ============ КАЛИБРОВКА ============
+unsigned long calStart = 0, calResMs = 3000;
+int  calPhase = 0, calCount = 0, calFailCount = 0, calKind = 0;
+long calSum[NUM_CH];
+int16_t mnT[NUM_CH], mxT[NUM_CH];
+bool calChOk[NUM_CH];
+
+void startCalCenter() {
+  state = ST_CAL_C;
+  calPhase = 0;
+  calStart = millis();
+  logLine("CAL: set all controls to center, wait 5 s");
+}
+
+void startCalRange() {
+  for (int i = 0; i < NUM_CH; i++) { mnT[i] = 32767; mxT[i] = -32768; }
+  state = ST_CAL_R;
+  calStart = millis();
+  logLine("CAL: move all controls to both extremes (10 s)");
+}
+
+void cancelCal() {
+  logLine("CAL: cancelled");
+  state = ST_MENU;
+  gotoScr(MS_CAL, idxCal);
+}
+
+void calCenterTick(unsigned long now) {
+  if (calPhase == 0) {
+    if (now - calStart >= CAL_COUNT_MS) {
+      calPhase = 1;
+      calStart = now;
+      calCount = 0;
+      for (int i = 0; i < NUM_CH; i++) calSum[i] = 0;
+    }
+  } else {
+    for (int i = 0; i < NUM_CH; i++) calSum[i] += raw[i];
+    calCount++;
+    if ((now - calStart) >= CAL_AVG_MS && calCount > 0) {
+      Serial.print("CAL: center =");
+      for (int i = 0; i < NUM_CH; i++) {
+        cenV[i] = (int16_t)(calSum[i] / calCount);
+        saveCenter(i);
+        Serial.printf(" %d", cenV[i]);
+      }
+      Serial.println();
+      calKind = 0;
+      calFailCount = 0;
+      calResMs = 2500;
+      calStart = now;
+      state = ST_CAL_RES;
+    }
+  }
+}
+
+void calRangeTick(unsigned long now) {
+  for (int i = 0; i < NUM_CH; i++) {
+    if (raw[i] < mnT[i]) mnT[i] = raw[i];
+    if (raw[i] > mxT[i]) mxT[i] = raw[i];
+  }
+  if ((now - calStart) >= CAL_RANGE_MS) {
+    calFailCount = 0;
+    for (int i = 0; i < NUM_CH; i++) {
+      bool ok = adsOk[CH[i].ads] &&
+                (cenV[i] - mnT[i]) >= MIN_SIDE &&
+                (mxT[i] - cenV[i]) >= MIN_SIDE;
+      calChOk[i] = ok;
+      if (ok) {
+        mnV[i] = mnT[i];
+        mxV[i] = mxT[i];
+        saveRange(i);
+        LOGF("CAL: CH%d ok  min=%d max=%d", i + 1, mnV[i], mxV[i]);
+      } else {
+        calFailCount++;
+        LOGF("CAL: CH%d NOT MOVED  min=%d max=%d (old range kept)", i + 1, mnT[i], mxT[i]);
+      }
+    }
+    calKind = 1;
+    calResMs = calFailCount ? 5000 : 3000;
+    calStart = now;
+    state = ST_CAL_RES;
+  }
+}
+
+// ============ ПЕРЕХОДЫ БЕЗОПАСНОСТИ ============
+void goEstop() {
+  state = ST_ESTOP;
+  logEvent(LT_ESTOP, 0, 0, 0);
+  navReset();
+  rxRevertAll();
+  logLine("STATE: ESTOP");
+}
+
+void goSafe() {
+  state = ST_SAFE;
+  safeSince = 0;
+  logLine("STATE: SAFE START (set all controls to center)");
+}
+
+// ============ СВЕТОДИОДЫ И СОБЫТИЯ ============
+int lastA = -1, lastB = -1;
+
+void setLedBit(uint8_t pin, uint8_t &a, uint8_t &b) {
+  if (pin < 8) a |= (1 << pin);
+  else         b |= (1 << (pin - 8));
+}
+
+uint8_t colorMask(uint8_t c) { return c == COL_RED ? 1 : (c == COL_GREEN ? 2 : 3); }
+
+bool patOwns(uint8_t pat) {   // непрерывные ритмы занимают светодиод целиком, вспышки лишь накладываются
+  return pat == PAT_STEADY || pat == PAT_SLOW || pat == PAT_FAST || pat == PAT_ALT;
+}
+
+uint8_t patMask(const EvCfg &c, unsigned long t) {
+  if (c.pat == PAT_ALT) return ((t % 1000) < 500) ? 1 : 3;
+  bool on;
+  switch (c.pat) {
+    case PAT_SLOW:   on = (t % 1000) < 500; break;
+    case PAT_FAST:   on = (t % 400) < 200; break;
+    case PAT_PULSE:  on = (t % 2000) < 100; break;
+    case PAT_DOUBLE: { unsigned long p = t % 2000; on = (p < 100) || (p >= 250 && p < 350); break; }
+    default:         on = true; break;
+  }
+  return on ? colorMask(c.color) : 0;
+}
+
+// Маска события в момент t. Для «связь восстановлена» t = время с момента события.
+uint8_t evMask(int e, unsigned long t) {
+  EvCfg c = cfgOf(e);
+  if (e == EV_HEART) {
+    unsigned long period = HB_SEC[c.ival] * 1000UL;
+    if ((t % period) >= HB_FLASH_MS) return 0;
+    // зелёная вспышка на уже зелёном светодиоде не видна: тогда делаем короткое гашение
+    if (c.color == COL_GREEN && ledGreenOn) return MASK_DARK;
+    return colorMask(c.color);
+  }
+  return patMask(c, t);
+}
+
+bool evAllAct[NUM_EV];
+uint8_t evChAct[NUM_EV];
+
+// Какие события активны сейчас. Источники от приёмника появятся вместе с радио.
+void collectEvents(unsigned long now) {
+  for (int e = 0; e < NUM_EV; e++) { evAllAct[e] = false; evChAct[e] = 0; }
+  evAllAct[EV_ESTOP]    = (state == ST_ESTOP);
+  evAllAct[EV_NOLINK]   = (simMode == SIM_LOST);
+  evAllAct[EV_RESTORED] = (restoredAt != 0 && (now - restoredAt) < RESTORED_MS);
+  evAllAct[EV_HEART]    = (simMode == SIM_LINK);
+  evAllAct[EV_BATTTX]   = (batLevel >= 1);
+  if (state == ST_SAFE) {
+    for (int i = 0; i < NUM_CH; i++) if (chBad(i)) evChAct[EV_NOTCTR] |= (1 << i);
+  }
+  if (telValid) {
+    evChAct[EV_OVERLOAD] |= tel.mOvl;
+    evChAct[EV_OPEN]     |= tel.mOpen;
+    evChAct[EV_LIMIT]    |= tel.mLim;
+  }
+  // TODO радио: EV_RXALARM, EV_RXFAULT, EV_BATTRX
+}
+
+void applyMask(uint8_t* m, int i, uint8_t mask, bool owns) {
+  if (mask == MASK_DARK) { m[i] = 0; return; }
+  if (owns) m[i] = mask;
+  else if (mask) m[i] = mask;
+}
+
+// Слои (снизу вверх): обычный статус -> события от низкого приоритета к высокому.
+// Правила: E-Stop и системные события (0..3) идут на все 8 светодиодов, остальные только
+// на включённые каналы. Глобальные выключатели цвета и режим LED канала действуют на обычный статус.
+void updateLeds() {
+  if (!okMcp) return;
+  unsigned long now = millis();
+  uint8_t m[NUM_CH];
+
+  int previewEv = -1;
+  if (state == ST_MENU && menuScr == MS_EVEDIT) previewEv = evSel;
+  else if (state == ST_MENU && menuScr == MS_TEST) previewEv = testEv;
+
+  if (previewEv >= 0) {
+    // предпросмотр: событие показывается на всех светодиодах независимо от Enable
+    unsigned long t = (previewEv == EV_RESTORED) ? (now % 3000) : now;
+    uint8_t mk = evMask(previewEv, t);
+    for (int i = 0; i < NUM_CH; i++) m[i] = (mk == MASK_DARK) ? 0 : mk;
+  } else {
+    collectEvents(now);
+    for (int i = 0; i < NUM_CH; i++) {
+      m[i] = 0;
+      if (!chEn[i]) continue;
+      uint8_t md = chLed[i];
+      if (md == LED_OFF) continue;
+      if (isMoved(i)) {
+        if (ledRedOn && (md == LED_BOTH || md == LED_RED)) m[i] = 1;
+      } else {
+        if (ledGreenOn && (md == LED_BOTH || md == LED_GREEN)) m[i] = 2;
+      }
+    }
+    for (int e = NUM_EV - 1; e >= 0; e--) {
+      EvCfg c = cfgOf(e);
+      if (!c.en) continue;
+      bool owns = (e == EV_HEART) ? false : patOwns(c.pat);
+      bool isAllEvent = (e < EV_OVERLOAD) || (e > EV_NOTCTR);
+      if (isAllEvent) {
+        if (!evAllAct[e]) continue;
+        unsigned long t = (e == EV_RESTORED) ? (now - restoredAt) : now;
+        uint8_t mk = evMask(e, t);
+        bool incDisabled = (e <= EV_RXFAULT);
+        for (int i = 0; i < NUM_CH; i++) {
+          if (!chEn[i] && !incDisabled) continue;
+          applyMask(m, i, mk, owns);
+        }
+      } else {
+        uint8_t act = evChAct[e];
+        if (!act) continue;
+        uint8_t mk = evMask(e, now);
+        for (int i = 0; i < NUM_CH; i++) {
+          if (!chEn[i]) continue;
+          bool hit = c.whereAll ? true : ((act >> i) & 1);
+          if (hit) applyMask(m, i, mk, owns);
+        }
+      }
+    }
+  }
+
+  uint8_t a = 0, b = 0;
+  for (int i = 0; i < NUM_CH; i++) {
+    if (m[i] & 1) setLedBit(CH[i].redPin, a, b);
+    if (m[i] & 2) setLedBit(CH[i].greenPin, a, b);
+  }
+  if ((int)a != lastA || (int)b != lastB) {
+    mcp.writeGPIOA(a);
+    mcp.writeGPIOB(b);
+    lastA = a; lastB = b;
+  }
+}
+
+// ============ УПРАВЛЕНИЕ (то, что пойдёт в Control-пакет) ============
+// Рабочий режим: значения включённых каналов. Любое меню, калибровка, Safe Start, E-Stop: нули.
+// Исключение: экран тестирования Receiver, там тестовый джойстик работает на выбранную секцию.
+void buildControl() {
+  for (int i = 0; i < NUM_CH; i++) ctl[i] = 0;
+  if (state == ST_RUN) {
+    for (int i = 0; i < NUM_CH; i++) ctl[i] = chEn[i] ? val(i) : 0;
+  } else if (state == ST_MENU && menuScr == MS_RXEDIT && rxLinked() &&
+             rxLeverParam(rxParam)) {
+    if (!leverArmed && !isMoved(TEST_LEVER_CH)) leverArmed = true;
+    if (leverArmed) ctl[rxCh] = val(TEST_LEVER_CH);
+  }
+}
+
+// ============ ЭКРАНЫ ============
+void drawCross(int cx, int cy, int r) {
+  display.drawCircle(cx, cy, r, SH110X_WHITE);
+  display.drawCircle(cx, cy, r - 1, SH110X_WHITE);
+  int d = r / 2 + 1;
+  display.drawLine(cx - d, cy - d, cx + d, cy + d, SH110X_WHITE);
+  display.drawLine(cx - d + 1, cy - d, cx + d + 1, cy + d, SH110X_WHITE);
+  display.drawLine(cx - d, cy + d, cx + d, cy - d, SH110X_WHITE);
+  display.drawLine(cx - d + 1, cy + d, cx + d + 1, cy - d, SH110X_WHITE);
+}
+
+void startScreen() {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SH110X_WHITE);
+}
+
+// ---- постраничный вывод на OLED (SH1106) ----
+// Кадр рисуется в буфер библиотеки, затем копируется и уходит в экран по одной странице (8 строк)
+// за проход цикла. Цикл не замирает, шина остаётся на частоте I2C_CLOCK.
+static uint8_t oledFrame[SCREEN_W * SCREEN_H / 8];
+static int8_t  oledPage = -1;              // -1: передача не идёт
+static unsigned long oledT0 = 0, oledFlushUs = 0;
+#define OLED_COL_OFFSET 2                  // SH1106: 132 колонки в памяти, видимые начинаются со второй
+#define OLED_CHUNK      64                 // байт данных в одной передаче
+
+void oledCommit() {
+  memcpy(oledFrame, display.getBuffer(), sizeof(oledFrame));
+  oledPage = 0;
+  oledT0 = micros();
+}
+bool oledBusy() { return oledPage >= 0; }
+
+void oledStep() {
+  if (oledPage < 0) return;
+  uint8_t p = (uint8_t)oledPage;
+  Wire.beginTransmission(OLED_ADDR);
+  Wire.write((uint8_t)0x00);                                   // команды
+  Wire.write((uint8_t)(0xB0 + p));                             // страница
+  Wire.write((uint8_t)(OLED_COL_OFFSET & 0x0F));               // колонка, младшая часть
+  Wire.write((uint8_t)(0x10 | (OLED_COL_OFFSET >> 4)));        // колонка, старшая часть
+  Wire.endTransmission();
+  const uint8_t* src = oledFrame + (uint16_t)p * SCREEN_W;
+  for (int c = 0; c < SCREEN_W; c += OLED_CHUNK) {
+    Wire.beginTransmission(OLED_ADDR);
+    Wire.write((uint8_t)0x40);                                 // данные
+    Wire.write(src + c, (size_t)OLED_CHUNK);
+    Wire.endTransmission();
+  }
+  if (++oledPage >= SCREEN_H / 8) {
+    oledPage = -1;
+    oledFlushUs = micros() - oledT0;
+  }
+}
+
+void drawBoot() {
+  startScreen();
+  display.setCursor(0, 0);   display.print("BOOT CHECK");
+  display.setCursor(0, 14);  display.printf("MCP23017: %s", okMcp ? "ok" : "FAIL");
+  display.setCursor(0, 24);  display.printf("ADS1 0x48: %s", adsOk[0] ? "ok" : "FAIL");
+  display.setCursor(0, 34);  display.printf("ADS2 0x49: %s", adsOk[1] ? "ok" : "FAIL");
+  display.setCursor(0, 44);  display.print("Config loaded");
+  drawBattery();
+  oledCommit();
+}
+
+void drawSafe() {
+  startScreen();
+  display.setCursor(0, 0);   display.print("SAFE START");
+  display.setCursor(0, 10);  display.print("Center all controls");
+
+  bool any = false;
+  bool adsFail = false;
+  display.setCursor(0, 24);
+  display.print("Not centered:");
+  display.setCursor(0, 34);
+  for (int i = 0; i < NUM_CH; i++) {
+    if (chBad(i)) {
+      display.printf("%d ", i + 1);
+      any = true;
+      if (!adsOk[CH[i].ads]) adsFail = true;
+    }
+  }
+  if (!any) display.print("none, hold still");
+  if (adsFail) { display.setCursor(0, 44); display.print("ADS error (check I2C)"); }
+
+  drawHintText("hold MENU = menu", 56);
+  drawBattery();
+  oledCommit();
+}
+
+void drawRun1() {
+  startScreen();
+  display.setTextSize(2);
+  display.setCursor(2, 6);   display.print("LINK");
+  drawCross(92, 14, 9);
+
+  display.drawLine(0, 28, 108, 28, SH110X_WHITE);
+
+  display.setCursor(2, 34);  display.print("RX");
+  display.setTextSize(1);
+  display.setCursor(32, 38);
+  if (simMode == SIM_OFF)       display.print("NO RADIO");
+  else if (simMode == SIM_LINK) display.print("SIM: READY");
+  else                          display.print("NO SIGNAL");
+  drawCross(92, 42, 9);
+
+  drawHintText("hold MENU = menu", 56);
+  drawBattery();
+  oledCommit();
+}
+
+void printChan(int i) {
+  if (!chEn[i])               display.printf("%d: off", i + 1);
+  else if (!adsOk[CH[i].ads]) display.printf("%d: ERR", i + 1);
+  else                        display.printf("%d:%4d", i + 1, val(i));
+}
+
+void drawRun2() {
+  startScreen();
+  display.setCursor(0, 0);
+  display.print("TX CHANNELS");
+  for (int r = 0; r < 4; r++) {
+    display.setCursor(0, 11 + r * 10);
+    printChan(r);
+    display.setCursor(60, 11 + r * 10);
+    printChan(r + 4);
+  }
+  drawHintText("hold MENU = menu", 56);
+  drawBattery();
+  oledCommit();
+}
+
+// RX CHANNELS: по 9 символов на канал: номер, сторона A/B, ток (А), ШИМ со знаком, пометка ! L O
+void drawRxChannels() {
+  startScreen();
+  display.setCursor(0, 0);
+  display.print("RX CHANNELS");
+  for (int r = 0; r < 4; r++) {
+    for (int col = 0; col < 2; col++) {
+      int c = r + col * 4;
+      char buf[16];
+      if (!telValid) {
+        snprintf(buf, sizeof(buf), "%d    --", c + 1);
+      } else {
+        int pwm = tel.pwm[c];
+        bool ovl = (tel.mOvl >> c) & 1;
+        char side = (pwm != 0 || ovl) ? (((tel.side >> c) & 1) ? 'B' : 'A') : ' ';
+        char fl = ovl ? '!' : (((tel.mLim >> c) & 1) ? 'L' : (((tel.mOpen >> c) & 1) ? 'O' : ' '));
+        int ci = tel.cur[c];
+        if (ci > 99) ci = 99;
+        snprintf(buf, sizeof(buf), "%d%c%d.%d%+3d%c", c + 1, side, ci / 10, ci % 10, pwm, fl);
+      }
+      display.setCursor(col * 60, 11 + r * 10);
+      display.print(buf);
+    }
+  }
+  drawHintText("!=Ovl L=Lim O=Open", 56);
+  drawBattery();
+  oledCommit();
+}
+
+void drawLinkScreen() {
+  startScreen();
+  display.setCursor(0, 0);   display.print("LINK");
+  display.setCursor(0, 10);
+  if (simMode == SIM_LINK)      display.print("Status: OK");
+  else if (simMode == SIM_LOST) display.print("Status: NO SIGNAL");
+  else                          display.print("Status: NO RADIO");
+  display.setCursor(0, 19);
+  if (telValid) display.printf("RSSI%d SNR%.1f", rfRssi, rfSnr10 / 10.0f);
+  else          display.print("RSSI-- SNR--");
+  display.setCursor(0, 28);
+  if (telValid) {
+    uint32_t tot = rfRx + rfLost;
+    display.printf("Lost %lu (%.1f%%)", (unsigned long)rfLost, tot ? rfLost * 100.0f / tot : 0.0f);
+  } else display.print("Lost --");
+  display.setCursor(0, 37);
+  if (telValid) display.printf("%d/s Age %.1fs", rfRate, rfAgeMs / 1000.0f);
+  else          display.print("-- /s  Age --");
+  display.setCursor(0, 46);
+  if (telValid) display.printf("ID %04X TX%d RX%d", rxId, txPower, (int)rxQuery(0, 0, RXP_PWR));
+  else          display.printf("TX%ddBm", txPower);
+  drawHintText("MENU = next screen", 56);
+  drawBattery();
+  oledCommit();
+}
+
+void drawPowerScreen() {
+  static const char* reasons[4] = { "pult button", "RX button", "RX fault", "link lost" };
+  startScreen();
+  display.setCursor(0, 0);   display.print("POWER");
+  display.setCursor(0, 11);
+  if (batUsb) display.print("Pult: USB");
+  else        display.printf("Pult %.1fV %d%%", vbat, vbatPct);
+  display.setCursor(0, 21);
+  if (telValid) display.printf("RX   %.1fV", tel.vrx / 10.0f);
+  else          display.print("RX   --");
+  display.setCursor(0, 31);
+  if (telValid) {
+    int sum = 0;
+    for (int c = 0; c < NUM_CH; c++) sum += tel.cur[c];
+    display.printf("Load %d.%dA", sum / 10, sum % 10);
+  } else display.print("Load --");
+  display.setCursor(0, 41);
+  if (!telValid)       display.print("Kill: --");
+  else if (!tel.kill)  display.print("Kill: no");
+  else                 display.printf("Kill: %s", reasons[tel.reason & 3]);
+  drawHintText("MENU = next screen", 56);
+  drawBattery();
+  oledCommit();
+}
+
+void drawLogScreen() {
+  startScreen();
+  display.setCursor(0, 0);   display.print("EVENT LOG");
+  char t[28];
+  if (logN == 0) {
+    display.setCursor(0, 12);  display.print("(no events)");
+  }
+  for (int r = 0; r < LOG_SHOW && r < logN; r++) {
+    logText(logRam[r], t, sizeof(t));
+    display.setCursor(0, 11 + r * 9);
+    display.print(t);
+  }
+  drawHintText("MENU = next screen", 56);
+  drawBattery();
+  oledCommit();
+}
+
+void drawEstop() {
+  startScreen();
+  display.setTextSize(2);
+  display.setCursor(0, 4);   display.print("EMERGENCY");
+  display.setCursor(0, 22);  display.print("STOP");
+  display.setTextSize(1);
+  display.setCursor(0, 46);  display.print("Release button");
+  display.setCursor(0, 56);  display.print("then center all");
+  drawBattery();
+  oledCommit();
+}
+
+void hintLine(const char* what) {
+  char h[24];
+  snprintf(h, sizeof(h), what, MENU_NAV_CH + 1, MENU_ENTER_CH + 1);
+  drawHintText(h, 54);
+}
+
+void drawMenu() {
+  startScreen();
+  display.setCursor(0, 0);
+  switch (menuScr) {
+    case MS_MAIN:    display.print("MENU"); break;
+    case MS_TX:      display.print("TRANSMITTER"); break;
+    case MS_CAL:     display.print("CALIBRATE"); break;
+    case MS_CHLIST:  display.print("CHANNEL SETUP"); break;
+    case MS_CHEDIT:  display.printf("CH%d now:%+4d", editCh + 1, val(editCh)); break;
+    case MS_BAT:
+      if (batUsb) display.print("BATTERY (USB)");
+      else        display.printf("BATTERY %.2fV", vbat);
+      break;
+    case MS_LED:     display.print("LED & ALERTS"); break;
+    case MS_LEDSTAT: display.print("STATUS LEDS"); break;
+    case MS_EVLIST:  display.print("ALERT EVENTS"); break;
+    case MS_EVEDIT:
+      display.print(EV_NAME[evSel]);
+      if (evSel == EV_RXALARM || evSel == EV_NOLINK) display.print(" (fixed ON)");
+      break;
+    case MS_PRESET:  display.printf("PRESET: %s", presetName()); break;
+    case MS_SCREENS: display.print("SCREENS (*=start)"); break;
+    case MS_SCRITEM: display.print(SCR_NAME[scrOrder[scrSel]]); break;
+    case MS_SCRMOVE: display.print("MOVE: 3 up/down"); break;
+    case MS_POWER:   display.print("POWER"); break;
+    case MS_BIND:    display.print("BIND"); break;
+    case MS_EVLOG:   display.printf("EVENT LOG %d/%d", logN, LOG_MAX); break;
+    case MS_DBGLIST: display.print("DEBUG"); break;
+    case MS_FRTARGET: display.print("FACTORY RESET"); break;
+    case MS_RX:      display.print("RECEIVER"); break;
+    case MS_RXCH: {
+      static const char* tt[] = { "CURRENT LIMITS", "START DUTY", "MAX DUTY", "RAMPS", "CHANNELS ON/OFF" };
+      static const char* ti[] = { "CURRENT LIMITS", "START CURRENT", "MAX CURRENT", "RAMPS", "CHANNELS ON/OFF" };
+      display.print((rxCurMode() ? ti : tt)[rxTopic < 5 ? rxTopic : 0]);
+      break;
+    }
+    case MS_RXDIR: {
+      static const char* dt[] = { "LIMIT", "DUTY", "MAX DUTY", "RAMPS" };
+      static const char* di[] = { "LIMIT", "START I", "MAX I", "RAMPS" };
+      display.printf("CH%d %s", rxCh + 1, (rxCurMode() ? di : dt)[rxTopic < 4 ? rxTopic : 0]);
+      break;
+    }
+    case MS_RXGLOB:  display.print("RX GLOBAL"); break;
+    default: break;
+  }
+  int cnt = menuCount();
+  char lab[24];
+  for (int r = 0; r < MENU_ROWS; r++) {
+    int idx = menuTop + r;
+    if (idx >= cnt) break;
+    int y = 11 + r * 10;
+    menuLabel(idx, lab, sizeof(lab));
+    bool inactive = !rxLinked() && ((menuScr == MS_MAIN && idx == 1) || (menuScr == MS_POWER && idx == 1));   // без связи
+    if (idx == sel) {
+      display.fillRect(0, y - 1, 112, 10, SH110X_WHITE);
+      display.setTextColor(SH110X_BLACK);
+    } else {
+      display.setTextColor(SH110X_WHITE);
+    }
+    display.setCursor(2, y);
+    display.print(lab);
+    if (inactive) {   // зачёркнуто = недоступно
+      display.drawLine(1, y + 3, 2 + 6 * (int)strlen(lab), y + 3, idx == sel ? SH110X_BLACK : SH110X_WHITE);
+    }
+  }
+  hintLine("%d:move %d:ok/back");
+  drawBattery();
+  oledCommit();
+}
+
+void drawDz() {
+  startScreen();
+  display.setCursor(0, 0);   display.print("DEAD ZONE");
+  display.setTextSize(2);
+  display.setCursor(0, 14);  display.printf("%d", dzEdit);
+  display.setTextSize(1);
+  display.setCursor(0, 36);  display.printf("ADC counts, was %d", deadzone);
+  hintLine("%d:+/- %d:ok/cancel");
+  drawBattery();
+  oledCommit();
+}
+
+// рамка с кривой отклика и точкой текущего положения стика
+void drawCurveBox(int x0, int y0, int sz, int expo, int maxp, int stick) {
+  display.drawRect(x0, y0, sz, sz, SH110X_WHITE);
+  display.drawLine(x0 + sz / 2, y0, x0 + sz / 2, y0 + 2, SH110X_WHITE);
+  display.drawLine(x0 + sz / 2, y0 + sz - 3, x0 + sz / 2, y0 + sz - 1, SH110X_WHITE);
+  display.drawLine(x0, y0 + sz / 2, x0 + 2, y0 + sz / 2, SH110X_WHITE);
+  display.drawLine(x0 + sz - 3, y0 + sz / 2, x0 + sz - 1, y0 + sz / 2, SH110X_WHITE);
+  int span = sz - 5;
+  int px = 0, py = 0;
+  for (int k = 0; k <= 20; k++) {
+    int v = -100 + k * 10;
+    int o = applyCurve(v, expo, maxp);
+    int cx = x0 + 2 + (v + 100) * span / 200;
+    int cy = y0 + sz - 3 - (o + 100) * span / 200;
+    if (k > 0) display.drawLine(px, py, cx, cy, SH110X_WHITE);
+    px = cx; py = cy;
+  }
+  int o = applyCurve(stick, expo, maxp);
+  int dx = x0 + 2 + (stick + 100) * span / 200;
+  int dy = y0 + sz - 3 - (o + 100) * span / 200;
+  display.fillRect(dx - 1, dy - 1, 3, 3, SH110X_WHITE);
+}
+
+void drawCurveEdit() {
+  startScreen();
+  bool isExpo = (menuScr == MS_EXPO);
+  int expo = isExpo ? editInt : chExpo[editCh];
+  int mx   = isExpo ? chMaxP[editCh] : editInt;
+  int was  = isExpo ? chExpo[editCh] : chMaxP[editCh];
+  int stick = valBase(editCh);
+  display.setCursor(0, 0);   display.printf("CH%d %s", editCh + 1, isExpo ? "EXPO" : "MAX");
+  display.setTextSize(2);
+  display.setCursor(0, 14);  display.printf("%d%%", editInt);
+  display.setTextSize(1);
+  display.setCursor(0, 36);  display.printf("was %d%%", was);
+  display.setCursor(0, 45);  display.printf("out %+d", applyCurve(stick, expo, mx));
+  drawCurveBox(70, 10, 40, expo, mx, stick);
+  hintLine("%d:+/- %d:ok/cancel");
+  drawBattery();
+  oledCommit();
+}
+
+void drawBatEdit() {
+  static const char* titles[] = { "DIVIDER CAL", "FULL VOLTAGE", "EMPTY VOLTAGE", "WARN LEVEL", "CRIT LEVEL" };
+  startScreen();
+  display.setCursor(0, 0);   display.print(titles[batKind]);
+  display.setTextSize(2);
+  display.setCursor(0, 14);
+  if (batKind == BE_WARN || batKind == BE_CRIT) display.printf("%d%%", batEditI);
+  else                                          display.printf("%.2fV", batEditCv / 100.0f);
+  display.setTextSize(1);
+  switch (batKind) {
+    case BE_DIV:
+      display.setCursor(0, 34);  display.print("Type meter reading");
+      display.setCursor(0, 44);  display.printf("Pult shows %.2fV", vbat);
+      break;
+    case BE_FULL:
+      display.setCursor(0, 34);  display.print("100% at this V");
+      display.setCursor(0, 44);  display.printf("Now %.2fV", vbat);
+      break;
+    case BE_EMPTY:
+      display.setCursor(0, 34);  display.print("0% at this V");
+      display.setCursor(0, 44);  display.printf("Now %.2fV", vbat);
+      break;
+    case BE_WARN:
+    case BE_CRIT:
+      display.setCursor(0, 34);  display.print("Alert at or below");
+      display.setCursor(0, 44);  display.printf("Now %d%%", vbatPct);
+      break;
+  }
+  hintLine("%d:+/- %d:ok/cancel");
+  drawBattery();
+  oledCommit();
+}
+
+void drawTest() {
+  EvCfg c = cfgOf(testEv);
+  startScreen();
+  display.setCursor(0, 0);   display.printf("TEST ALERTS %d/%d", testEv + 1, NUM_EV);
+  display.setTextSize(2);
+  display.setCursor(0, 14);  display.print(EV_NAME[testEv]);
+  display.setTextSize(1);
+  display.setCursor(0, 36);
+  if (testEv == EV_HEART) display.printf("%s every %ds", COL_NAME[c.color], HB_SEC[c.ival]);
+  else                    display.printf("%s %s", COL_NAME[c.color], PAT_NAME[c.pat]);
+  display.setCursor(0, 45);  display.print(c.en ? "enabled" : "disabled");
+  hintLine("%d:next %d:exit");
+  drawBattery();
+  oledCommit();
+}
+
+void drawRxEdit() {
+  const RxParamDef &d = RXP[rxParam];
+  char t[28], v[14], w[14];
+  startScreen();
+  if (d.scope == PS_SOL)       snprintf(t, sizeof(t), "CH%d %s %s", rxCh + 1, rxDir ? "RET" : "EXT", d.name);
+  else if (d.scope == PS_CH)   snprintf(t, sizeof(t), "CH%d %s", rxCh + 1, d.name);
+  else                         snprintf(t, sizeof(t), "%s", d.name);
+  display.setCursor(0, 0);   display.print(t);
+  fmtParam(rxParam, rxCur, v, sizeof(v));
+  display.setTextSize(2);
+  display.setCursor(0, 11);  display.print(v);
+  display.setTextSize(1);
+  fmtParam(rxParam, rxOrig, w, sizeof(w));
+  display.setCursor(0, 30);  display.printf("was %s (RX ack)", w);
+  display.setCursor(0, 40);
+  if (rxLeverParam(rxParam)) {
+    if (!leverArmed) display.printf("Center lever CH%d!", TEST_LEVER_CH + 1);
+    else             display.printf("Lever CH%d: %+d", TEST_LEVER_CH + 1, ctl[rxCh]);
+  } else if (rxParam == RXP_PWR && rxCur > 14) {
+    display.print("check local limits");
+  } else if (rxParam == RXP_PWMFREQ) {
+    display.print("all channels");
+  } else if (rxParam == RXP_MODE) {
+    display.print("PWM=open, CURRENT=PI");
+  }
+  hintLine("%d:+/- %d:ok/cancel");
+  drawBattery();
+  oledCommit();
+}
+
+void drawRxStat() {
+  startScreen();
+  display.setCursor(0, 0);   display.print("RX STATUS (sim)");
+  display.setCursor(0, 11);  display.printf("Link: %s", rxLinked() ? "OK" : "LOST");
+  display.setCursor(0, 21);
+  if (telValid) display.printf("VBAT-RX: %.1fV", tel.vrx / 10.0f);
+  else          display.print("VBAT-RX: --");
+  display.setCursor(0, 31);
+  if (telValid) display.printf("RSSI: %d dBm", rfRssi);
+  else          display.print("RSSI: --");
+  display.setCursor(0, 41);  display.printf("Lost pkts: %lu", (unsigned long)rfLost);
+  hintLine("%d:back");
+  drawBattery();
+  oledCommit();
+}
+
+void drawDbgDesc() {
+  startScreen();
+  const DescRef &d = DESC[dbgPage];
+  for (int r = 0; r < 6; r++) {
+    int idx = dbgTop + r;
+    if (idx >= d.n) break;
+    display.setCursor(0, r * 9);
+    display.print(d.lines[idx]);
+  }
+  char h[24];
+  snprintf(h, sizeof(h), "%d:scroll %d:open", MENU_NAV_CH + 1, MENU_ENTER_CH + 1);
+  drawHintText(h, 56);
+  drawBattery();
+  oledCommit();
+}
+
+// последний ток перегрузки/КЗ для соленоида из журнала, -1 если не было
+int lastOvl(int ch, int side) {
+  for (int i = 0; i < logN; i++) {
+    const LogEv &e = logRam[i];
+    if ((e.type == LT_OVL || e.type == LT_SHORT) && e.ch == ch && e.side == side) return e.dA;
+  }
+  return -1;
+}
+
+void drawDbgPage() {
+  startScreen();
+  char h[16];
+  snprintf(h, sizeof(h), "%d:back", MENU_ENTER_CH + 1);
+  switch (dbgPage) {
+    case DP_RAW:
+      display.setCursor(0, 0);   display.print("RAW ADC 4/6");
+      for (int r = 0; r < 4; r++) {
+        display.setCursor(0, 10 + r * 9);
+        display.printf("%d:%5d", r + 1, raw[r]);
+        display.setCursor(58, 10 + r * 9);
+        display.printf("%d:%5d", r + 5, raw[r + 4]);
+      }
+      display.setCursor(0, 46);
+      display.printf("ADS8 %lums DZ%d", readUs / 1000, deadzone);
+      drawHintText(h, 56);
+      drawBattery();
+      break;
+    case DP_RADIO:
+      display.setCursor(0, 0);   display.print("RADIO 1/6");
+      display.setCursor(0, 10);  display.print(RF_FREQ_TXT);
+      display.setCursor(0, 19);
+      if (telValid) display.printf("TX%ddBm RX%ddBm", txPower, (int)rxQuery(0, 0, RXP_PWR));
+      else          display.printf("TX%ddBm RX--", txPower);
+      display.setCursor(0, 28);
+      if (telValid) display.printf("RSSI%d SNR%.1f", rfRssi, rfSnr10 / 10.0f);
+      else          display.print("RSSI-- SNR--");
+      display.setCursor(0, 37);
+      if (telValid) {
+        uint32_t tot = rfRx + rfLost;
+        display.printf("Lost %lu (%.1f%%) %d/s", (unsigned long)rfLost, tot ? rfLost * 100.0f / tot : 0.0f, rfRate);
+      } else display.print("Lost --");
+      display.setCursor(0, 46);
+      if (telValid) display.printf("Age %.1fs ID %04X", rfAgeMs / 1000.0f, rxId);
+      else          display.print("Age -- ID ----");
+      drawHintText(h, 56);
+      drawBattery();
+      break;
+    case DP_TELEM:
+      display.setCursor(0, 0);   display.print("TELEMETRY 2/6");
+      if (!telValid) {
+        display.setCursor(0, 20);  display.print("no telemetry");
+      } else {
+        display.setCursor(0, 10);
+        display.print("I");
+        for (int c = 0; c < NUM_CH; c++) display.printf("%d ", tel.cur[c]);
+        display.setCursor(0, 19);
+        display.print("P");
+        for (int c = 0; c < NUM_CH; c++) display.printf("%d ", tel.pwm[c]);
+        display.setCursor(0, 28);
+        display.printf("L%02X O%02X X%02X s%02X", tel.mLim, tel.mOvl, tel.mOpen, tel.side);
+        display.setCursor(0, 37);
+        display.printf("Vrx%.1f R%d K:%s", tel.vrx / 10.0f, tel.rssi, tel.kill ? "YES" : "no");
+      }
+      drawHintText(h, 56);
+      drawBattery();
+      break;
+    case DP_SYS: {
+      unsigned long sec = millis() / 1000UL;
+      display.setCursor(0, 0);   display.print("SYSTEM 5/6");
+      display.setCursor(0, 10);  display.printf("FW %s %s", FW_VERSION, __DATE__);
+      display.setCursor(0, 19);  display.printf("Up %02lu:%02lu:%02lu", sec / 3600, (sec / 60) % 60, sec % 60);
+      display.setCursor(0, 28);  display.printf("Temp %dC", (int)temperatureRead());
+      display.setCursor(0, 37);  display.printf("Heap %uk free", (unsigned)(ESP.getFreeHeap() / 1024));
+      display.setCursor(0, 46);  display.printf("I2C %d/4 Draw %lu+%lu", (int)okOled + (int)okMcp + (int)adsOk[0] + (int)adsOk[1], dispUs / 1000, oledFlushUs / 1000);
+      drawHintText(h, 56);
+      drawBattery();
+      break;
+    }
+    case DP_LOG: {
+      display.setCursor(0, 0);   display.print("LOG 6/6");
+      int total = slogCount < SLOG_LINES ? slogCount : SLOG_LINES;
+      int first = slogCount - total;
+      int rows = total < 5 ? total : 5;
+      for (int r = 0; r < rows; r++) {
+        int k = first + (total - rows) + r;
+        display.setCursor(0, 10 + r * 9);
+        display.print(slog[k % SLOG_LINES]);
+      }
+      drawHintText(h, 56);
+      drawBattery();
+      break;
+    }
+    case DP_LIM:
+      // таблица без заголовка и подсказки: 8 строк, канал, A(лимит, ток, перегрузка), B(лимит, ток, перегрузка)
+      for (int c = 0; c < NUM_CH; c++) {
+        char buf[28], ovl[2][8];
+        for (int sd = 0; sd < 2; sd++) {
+          int o = lastOvl(c, sd);
+          if (o < 0) snprintf(ovl[sd], sizeof(ovl[sd]), "--");
+          else       snprintf(ovl[sd], sizeof(ovl[sd]), "%02d", o > 99 ? 99 : o);
+        }
+        if (telValid) {
+          int lA = rxQuery(c, 0, RXP_LIMIT), lB = rxQuery(c, 1, RXP_LIMIT);
+          int nA = (tel.pwm[c] > 0) ? tel.cur[c] : 0;
+          int nB = (tel.pwm[c] < 0) ? tel.cur[c] : 0;
+          snprintf(buf, sizeof(buf), "%d %02d %02d %s %02d %02d %s", c + 1,
+                   lA > 99 ? 99 : lA, nA > 99 ? 99 : nA, ovl[0],
+                   lB > 99 ? 99 : lB, nB > 99 ? 99 : nB, ovl[1]);
+        } else {
+          snprintf(buf, sizeof(buf), "%d -- -- %s -- -- %s", c + 1, ovl[0], ovl[1]);
+        }
+        display.setCursor(0, c * 8);
+        display.print(buf);
+      }
+      break;
+  }
+  oledCommit();
+}
+
+void drawPinScreen() {
+  startScreen();
+  display.setCursor(0, 0);   display.print("FACTORY RESET");
+  display.setCursor(0, 11);  display.print("Enter code:");
+  display.setTextSize(2);
+  for (int i = 0; i < 4; i++) {
+    display.setCursor(8 + i * 22, 24);
+    display.printf("%d", pinDigit[i]);
+    if (i == pinPos) {
+      display.drawLine(8 + i * 22, 42, 8 + i * 22 + 11, 42, SH110X_WHITE);
+      display.drawLine(8 + i * 22, 43, 8 + i * 22 + 11, 43, SH110X_WHITE);
+    }
+  }
+  display.setTextSize(1);
+  hintLine("%d:digit %d:next/back");
+  drawBattery();
+  oledCommit();
+}
+
+void drawConfirm() {
+  startScreen();
+  switch (confAct) {
+    case CA_CLEARLOG:
+      display.setCursor(0, 0);   display.print("CLEAR LOG?");
+      display.setCursor(0, 14);  display.print("Erases the event log");
+      display.setCursor(0, 24);  display.print("(RAM and saved)");
+      break;
+    case CA_FORGET:
+      display.setCursor(0, 0);   display.print("FORGET BIND?");
+      display.setCursor(0, 14);  display.print("Back to default ID.");
+      display.setCursor(0, 24);  display.print("Bind again later.");
+      break;
+    case CA_FR_TX:
+      display.setCursor(0, 0);   display.print("RESET PULT?");
+      if (restartAt) {
+        display.setTextSize(2);
+        display.setCursor(0, 20); display.print("Resetting");
+        display.setTextSize(1);
+      } else {
+        display.setCursor(0, 14);  display.print("Erase ALL settings.");
+        display.setCursor(0, 24);  display.print("Bind ID is kept.");
+        display.setCursor(0, 34);  display.print("Pult will restart.");
+      }
+      break;
+    case CA_FR_RX:
+      display.setCursor(0, 0);   display.print("RESET RECEIVER?");
+      display.setCursor(0, 14);  display.print("Receiver settings");
+      display.setCursor(0, 24);  display.print("to defaults.");
+      display.setCursor(0, 34);  display.print("Bind ID is kept.");
+      break;
+  }
+  if (!restartAt) hintLine("%d:- %d:yes/no");
+  drawBattery();
+  oledCommit();
+}
+
+void drawBindRun() {
+  startScreen();
+  display.setCursor(0, 0);   display.print("BIND MODE");
+  if (bindPhase == 0) {
+    int left = (int)((BIND_TIMEOUT_MS - (millis() - bindStart) + 999) / 1000);
+    if (left < 0) left = 0;
+    display.setCursor(0, 11);  display.print("Hold PRG on RX ~3s");
+    display.setCursor(0, 21);  display.printf("Waiting... %ds", left);
+    display.setCursor(0, 31);  display.print("Keep pult close");
+    display.setCursor(0, 41);  display.print("No radio yet. Sim");
+    display.setCursor(0, 50);  display.print("LINK fakes success");
+  } else if (bindPhase == 1) {
+    display.setTextSize(2);
+    display.setCursor(0, 16);  display.print("BOUND!");
+    display.setTextSize(1);
+    display.setCursor(0, 40);  display.printf("ID %04X", (unsigned)(bindId & 0xFFFF));
+  } else {
+    display.setTextSize(2);
+    display.setCursor(0, 16);  display.print("TIMEOUT");
+    display.setTextSize(1);
+  }
+  drawBattery();
+  oledCommit();
+}
+
+void drawBindId() {
+  startScreen();
+  display.setCursor(0, 0);   display.print("BIND ID");
+  display.setCursor(0, 12);  display.print("Pair ID:");
+  display.setTextSize(2);
+  display.setCursor(0, 22);  display.printf("%08lX", (unsigned long)bindId);
+  display.setTextSize(1);
+  display.setCursor(0, 42);  display.printf("Short: %04X", (unsigned)(bindId & 0xFFFF));
+  display.setCursor(0, 51);  display.print(bindId == DEF_BIND_ID ? "Default ID" : "Custom (bound)");
+  drawBattery();
+  oledCommit();
+}
+
+void drawTxPwr() {
+  startScreen();
+  display.setCursor(0, 0);   display.print("TX POWER (pult)");
+  display.setTextSize(2);
+  display.setCursor(0, 12);  display.printf("%ddBm", TXP_LIST[editInt]);
+  display.setTextSize(1);
+  display.setCursor(0, 33);  display.printf("about %d mW", TXP_MW[editInt]);
+  display.setCursor(0, 42);
+  if (TXP_LIST[editInt] > 14) display.print("check local limits");
+  else                        display.printf("was %ddBm", txPower);
+  hintLine("%d:+/- %d:ok/cancel");
+  drawBattery();
+  oledCommit();
+}
+
+void drawCal() {
+  startScreen();
+  if (state == ST_CAL_C && calPhase == 0) {
+    int left = (int)((CAL_COUNT_MS - (millis() - calStart) + 999) / 1000);
+    if (left < 0) left = 0;
+    display.setCursor(0, 0);   display.print("CALIBRATE CENTER");
+    display.setCursor(0, 12);  display.print("Set ALL controls");
+    display.setCursor(0, 22);  display.print("to CENTER");
+    display.setTextSize(2);
+    display.setCursor(0, 38);  display.printf("In %ds", left);
+    display.setTextSize(1);
+  } else if (state == ST_CAL_C) {
+    display.setCursor(0, 0);   display.print("CALIBRATE CENTER");
+    display.setCursor(0, 20);  display.print("Reading center...");
+    display.setCursor(0, 32);  display.print("Do not touch!");
+  } else if (state == ST_CAL_R) {
+    int left = (int)((CAL_RANGE_MS - (millis() - calStart) + 999) / 1000);
+    if (left < 0) left = 0;
+    display.setCursor(0, 0);   display.print("CALIBRATE RANGE");
+    display.setCursor(0, 12);  display.print("Move every control");
+    display.setCursor(0, 22);  display.print("to both extremes");
+    display.setTextSize(2);
+    display.setCursor(0, 38);  display.printf("Left: %ds", left);
+    display.setTextSize(1);
+  } else if (calKind == 0) {
+    display.setCursor(0, 0);   display.print("CENTER SAVED");
+    display.setCursor(0, 16);  display.print("Center position");
+    display.setCursor(0, 26);  display.print("saved to memory");
+  } else if (calFailCount == 0) {
+    display.setCursor(0, 0);   display.print("CALIBRATION OK");
+    display.setCursor(0, 16);  display.print("Range saved");
+    display.setCursor(0, 26);  display.print("for all channels");
+  } else {
+    display.setCursor(0, 0);   display.print("CALIBRATION FAILED");
+    display.setCursor(0, 14);  display.print("Not moved: CH");
+    display.setCursor(0, 24);
+    for (int i = 0; i < NUM_CH; i++) if (!calChOk[i]) display.printf("%d ", i + 1);
+    display.setCursor(0, 38);  display.print("Others were saved");
+    display.setCursor(0, 48);  display.print("Old range kept");
+  }
+  if (state == ST_CAL_C || state == ST_CAL_R) {
+    display.setCursor(0, 56);  display.print("MENU = cancel");
+  }
+  drawBattery();
+  oledCommit();
+}
+
+void drawScreen() {
+  switch (state) {
+    case ST_BOOT:    drawBoot(); break;
+    case ST_SAFE:    drawSafe(); break;
+    case ST_RUN:
+      switch (screenNo) {
+        case SC_TX:    drawRun2(); break;
+        case SC_RX:    drawRxChannels(); break;
+        case SC_LINK:  drawLinkScreen(); break;
+        case SC_POWER: drawPowerScreen(); break;
+        case SC_LOG:   drawLogScreen(); break;
+        default:       drawRun1(); break;
+      }
+      break;
+    case ST_MENU:
+      switch (menuScr) {
+        case MS_DZ:      drawDz(); break;
+        case MS_EXPO:
+        case MS_MAXV:    drawCurveEdit(); break;
+        case MS_BATEDIT: drawBatEdit(); break;
+        case MS_TEST:    drawTest(); break;
+        case MS_RXEDIT:  drawRxEdit(); break;
+        case MS_RXSTAT:  drawRxStat(); break;
+        case MS_DBGDESC: drawDbgDesc(); break;
+        case MS_DBGPAGE: drawDbgPage(); break;
+        case MS_PIN:     drawPinScreen(); break;
+        case MS_CONFIRM: drawConfirm(); break;
+        case MS_BINDRUN: drawBindRun(); break;
+        case MS_BINDID:  drawBindId(); break;
+        case MS_TXPWR:   drawTxPwr(); break;
+        default:         drawMenu(); break;
+      }
+      break;
+    case ST_CAL_C:
+    case ST_CAL_R:
+    case ST_CAL_RES: drawCal(); break;
+    case ST_ESTOP:   drawEstop(); break;
+  }
+}
+
+// ============ ЛОГИКА КАЖДОГО ТАКТА ОПРОСА ============
+void stepLogic(unsigned long now) {
+  switch (state) {
+    case ST_SAFE: {
+      bool ok = true;
+      for (int i = 0; i < NUM_CH; i++) if (chBad(i)) ok = false;
+      if (ok) {
+        if (safeSince == 0) safeSince = now;
+        else if (now - safeSince >= SAFE_HOLD_MS) {
+          state = ST_RUN;
+          screenNo = scrStart;
+          logLine("SAFE START OK -> RUN");
+        }
+      } else {
+        safeSince = 0;
+      }
+      break;
+    }
+    case ST_MENU:
+      // связь пропала внутри раздела Receiver: несохранённое откатывается, выход на верхний уровень
+      if (isRxScreen() && !rxLinked()) {
+        rxRevertAll();
+        gotoScr(MS_MAIN, idxMain);
+        toast("Link lost");
+        logLine("RX menu: link lost, reverted unsaved");
+        break;
+      }
+      if (menuScr == MS_BINDRUN) bindTick(now);
+      navStep(now);
+      break;
+    case ST_CAL_C:   calCenterTick(now); break;
+    case ST_CAL_R:   calRangeTick(now); break;
+    case ST_CAL_RES:
+      if (now - calStart >= calResMs) {
+        state = ST_MENU;
+        gotoScr(MS_CAL, idxCal);
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+void handleMenuButton() {
+  if (estop.state) return;
+  switch (state) {
+    case ST_RUN:
+      if (btnMenu.shortEv) {
+        screenNo = scrNext((uint8_t)screenNo);
+        LOGF("SCREEN -> %s", SCR_NAME[screenNo]);
+      }
+      if (btnMenu.longEv) enterMenu();
+      break;
+    case ST_SAFE:
+      if (btnMenu.longEv) enterMenu();
+      break;
+    case ST_MENU:
+      if (btnMenu.shortEv) menuBack();
+      break;
+    case ST_CAL_C:
+    case ST_CAL_R:
+      if (btnMenu.shortEv) cancelCal();
+      break;
+    default:
+      break;
+  }
+}
+
+// ============ I2C ============
+void i2cScan() {
+  logLine("I2C scan:");
+  int found = 0;
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      LOGF("  found 0x%02X", addr);
+      found++;
+    }
+  }
+  LOGF("  total: %d (expected 4: 0x20 0x3C 0x48 0x49)", found);
+}
+
+// ============ SETUP ============
+void setup() {
+  Serial.begin(115200);
+  unsigned long t = millis();
+  while (!Serial && (millis() - t) < 1500) { }
+
+  LOGF("=== PULT FW %s (no radio, RX simulator) ===", FW_VERSION);
+
+  pinMode(BTN_MENU_PIN, INPUT_PULLUP);
+  pinMode(ESTOP_PIN, INPUT_PULLUP);   // внешний 10к к 3.3В тоже должен стоять
+  analogReadResolution(12);
+  initButton(btnMenu);
+  initButton(estop);
+
+  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.setClock(I2C_CLOCK);
+  i2cScan();
+
+  okOled = display.begin(OLED_ADDR, true);
+  LOGF("OLED: %s", okOled ? "ok" : "FAIL");
+
+  okMcp = mcp.begin_I2C(MCP_ADDR, &Wire);
+  LOGF("MCP23017: %s", okMcp ? "ok" : "FAIL");
+  if (okMcp) {
+    for (int i = 0; i < 16; i++) mcp.pinMode(i, OUTPUT);
+    mcp.writeGPIOA(0);
+    mcp.writeGPIOB(0);
+  }
+
+  adsOk[0] = ads1.begin(ADS1_ADDR, &Wire);
+  adsOk[1] = ads2.begin(ADS2_ADDR, &Wire);
+  LOGF("ADS1 0x48: %s", adsOk[0] ? "ok" : "FAIL");
+  LOGF("ADS2 0x49: %s", adsOk[1] ? "ok" : "FAIL");
+  for (int i = 0; i < 2; i++) {
+    if (adsOk[i]) {
+      adsBank[i]->setGain(GAIN_ONE);
+      adsBank[i]->setDataRate(RATE_ADS1115_860SPS);
+    }
+  }
+
+  loadConfig();
+  simInit();
+  for (int i = 0; i < NUM_CH; i++) { raw[i] = cenV[i]; ctl[i] = 0; }
+
+  batTick(millis());
+  bootStart = millis();
+  state = ST_BOOT;
+}
+
+// ============ LOOP ============
+void loop() {
+  unsigned long now = millis();
+
+  updateButton(btnMenu);
+  updateButton(estop);
+
+  if (estop.changed) {
+    LOGF("E-STOP: %s", estop.state ? "ACTIVE (pressed or wire break)" : "released");
+    if (estop.state) goEstop();
+    else if (state == ST_ESTOP) goSafe();
+  }
+  if (btnMenu.changed) {
+    LOGF("MENU button: %s", btnMenu.state ? "pressed" : "released");
+  }
+
+  if (state == ST_BOOT && (now - bootStart) >= BOOT_MS) {
+    if (estop.state) goEstop();
+    else goSafe();
+  }
+
+  handleMenuButton();
+
+  static unsigned long lastRead = 0;
+  if ((now - lastRead) >= READ_PERIOD_MS) {
+    lastRead = now;
+    readAll();
+    stepLogic(now);
+    buildControl();
+    simTelemetry(now);
+    eventsTick(now);
+    updateLeds();
+  } else {
+    updateLeds();   // чтобы ритмы мигания не зависели от периода опроса
+  }
+
+  batTick(now);
+
+  if (restartAt && (long)(now - restartAt) >= 0) ESP.restart();   // после Factory Reset
+
+  oledStep();                                  // одна страница кадра за проход цикла
+  static unsigned long lastDisp = 0;
+  if (okOled && !oledBusy() && (now - lastDisp) >= DISP_PERIOD_MS) {
+    lastDisp = now;
+    unsigned long t0 = micros();
+    drawScreen();
+    dispUs = micros() - t0;
+  }
+
+  static unsigned long lastLog = 0;
+  if (state != ST_BOOT && (now - lastLog) >= LOG_PERIOD_MS) {
+    lastLog = now;
+    Serial.printf("[%s] RAW:", stateName());
+    for (int i = 0; i < NUM_CH; i++) Serial.printf(" %6d", raw[i]);
+    Serial.print(" | VAL:");
+    for (int i = 0; i < NUM_CH; i++) Serial.printf(" %4d", val(i));
+    Serial.print(" | CTL:");
+    for (int i = 0; i < NUM_CH; i++) Serial.printf(" %4d", ctl[i]);
+    Serial.printf(" | ads8=%lums draw=%lums send=%lums\n", readUs / 1000, dispUs / 1000, oledFlushUs / 1000);
+  }
+}
