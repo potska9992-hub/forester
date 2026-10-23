@@ -1,5 +1,9 @@
 // ============================================================
 // Пульт гидрораспределителя. Журнал версий
+//  0.4 - загрузка прошивки с GitHub (меню Transmitter -> GitHub Update): пульт сам подключается к сохранённой
+//        сети, находит последнюю прошивку, показывает версию, после подтверждения (CH6) скачивает, проверяет
+//        (SHA-256, метка проекта) и прошивается. До 3 сохранённых сетей (страница Wi-Fi Update и меню
+//        Transmitter -> Wi-Fi Networks, ввод названия и пароля с пульта). Вывод в Serial убран (журнал на экране).
 //  0.3 - исправлено: Wi-Fi отключался сразу после запроса от телефона (ошибка сравнения времени)
 //  0.2 - Wi-Fi: адрес и пароль остаются на экране, пока страница не открыта (а не по первому запросу
 //        телефона); телефон получает ответ "интернет есть" и не отключается; причина выхода в сообщении
@@ -25,6 +29,9 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Update.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <mbedtls/sha256.h>
 #include <stdarg.h>
 
 // ============ ПИНЫ И АДРЕСА ============
@@ -97,7 +104,10 @@
 #define HB_FLASH_MS     100        // длительность вспышки пульса
 
 // ============ ВЕРСИЯ ПРОШИВКИ ============
-#define FW_VERSION      "0.3"
+#define FW_VERSION      "0.4"
+#define GH_REPO         "potska9992-hub/forester"   // репозиторий с готовыми прошивками
+#define GH_TAG          "pult-latest"               // релиз с последней прошивкой пульта
+#define NET_MAX         3           // сохранённых Wi-Fi сетей
 #define PROJECT_NAME    "pult"      // имя устройства внутри метки прошивки (проверка при обновлении)
 #define FACTORY_PIN     1111       // код для Factory Reset
 #define DEF_BIND_ID     0xA5C3E17BUL
@@ -159,7 +169,7 @@ Button btnMenu = { BTN_MENU_PIN, false, false, false, false, false, false, false
 Button estop   = { ESTOP_PIN,    true,  false, false, false, false, false, false, true, 0, 0 };
 
 // ============ ТИПЫ (объявлены ДО функций, иначе Arduino IDE ломает автопрототипы) ============
-enum State { ST_BOOT, ST_SAFE, ST_RUN, ST_MENU, ST_CAL_C, ST_CAL_R, ST_CAL_RES, ST_ESTOP, ST_WIFI };
+enum State { ST_BOOT, ST_SAFE, ST_RUN, ST_MENU, ST_CAL_C, ST_CAL_R, ST_CAL_RES, ST_ESTOP, ST_WIFI, ST_GH };
 enum MenuScr {
   MS_MAIN, MS_TX, MS_CAL, MS_CHLIST, MS_CHEDIT, MS_DZ,
   MS_BAT, MS_BATEDIT, MS_LED, MS_LEDSTAT, MS_EVLIST, MS_EVEDIT, MS_PRESET, MS_TEST,
@@ -168,7 +178,8 @@ enum MenuScr {
   MS_BIND, MS_BINDRUN, MS_BINDID, MS_EVLOG,
   MS_DBGLIST, MS_DBGDESC, MS_DBGPAGE,
   MS_PIN, MS_FRTARGET, MS_CONFIRM,
-  MS_RX, MS_RXCH, MS_RXDIR, MS_RXGLOB, MS_RXEDIT, MS_RXSTAT, MS_RXWIFI
+  MS_RX, MS_RXCH, MS_RXDIR, MS_RXGLOB, MS_RXEDIT, MS_RXSTAT, MS_RXWIFI,
+  MS_NETS, MS_NETPICK, MS_TEXTIN
 };
 enum ChItem { CI_TYPE, CI_REV, CI_EN, CI_EXPO, CI_MAX, CI_LED, CI_BACK };
 enum EvItem { EI_EN, EI_COLOR, EI_PAT, EI_INT, EI_WHERE, EI_SCR, EI_FIXED, EI_BACK };
@@ -178,11 +189,11 @@ struct Nav { bool armed; unsigned long since; unsigned long held; unsigned long 
 struct EvCfg { uint8_t en, color, pat, whereAll, ival, scr; };
 
 // порядок = порядок в меню: частое и важное сверху, опасное и временное внизу, Back последний
-enum TxItem { TX_CAL, TX_CHSET, TX_PWR, TX_BIND, TX_TRT, TX_SCR, TX_LED, TX_BAT, TX_LOG, TX_DBG, TX_WIFI, TX_SIM, TX_FR, TX_BACK, TX_COUNT };
+enum TxItem { TX_CAL, TX_CHSET, TX_PWR, TX_BIND, TX_TRT, TX_SCR, TX_LED, TX_BAT, TX_LOG, TX_DBG, TX_WIFI, TX_GH, TX_NETS, TX_SIM, TX_FR, TX_BACK, TX_COUNT };
 enum RxTopic { RT_LIMIT, RT_DUTY, RT_MAXD, RT_RAMP, RT_CHEN, RT_GLOB, RT_STAT, RT_WIFI, RT_BACK, RT_COUNT };
 enum ScrId { SC_MAIN, SC_TX, SC_RX, SC_LINK, SC_POWER, SC_LOG };
 enum DbgPage { DP_RADIO, DP_TELEM, DP_LIM, DP_RAW, DP_SYS, DP_LOG };
-enum ConfAct { CA_CLEARLOG, CA_FORGET, CA_FR_TX, CA_FR_RX };
+enum ConfAct { CA_CLEARLOG, CA_FORGET, CA_FR_TX, CA_FR_RX, CA_NETDEL, CA_NETALL };
 enum LogType { LT_ESTOP, LT_RXALARM, LT_NOLINK, LT_LINKOK, LT_RXFAULT, LT_LIMIT, LT_BATTTX, LT_OVL, LT_SHORT, LT_OPEN, LT_BATTRX, LT_COUNT };
 // параметры приёмника (SetConfig): SOL = на соленоид (канал x сторона A/B), CH = на канал, GLOB = общие
 enum RxParam { RXP_LIMIT, RXP_DUTY, RXP_MAXD, RXP_RAMPUP, RXP_RAMPDN, RXP_CHEN,
@@ -361,7 +372,6 @@ char slog[SLOG_LINES][24];
 int  slogCount = 0;
 
 void logLine(const char* t) {
-  Serial.println(t);
   snprintf(slog[slogCount % SLOG_LINES], sizeof(slog[0]), "%.19s", t);
   slogCount++;
 }
@@ -742,6 +752,18 @@ MenuScr menuScr = MS_MAIN;
 int     sel = 0, menuTop = 0;
 int     idxMain = 0, idxTx = 0, idxCal = 0, idxChList = 0, idxChEdit = 0, idxBat = 0;
 int     idxLed = 0, idxEvList = 0, idxEvEdit = 0, idxPreset = 0, idxRx = 0, idxRxCh = 0, idxRxDir = 0;
+int     idxNets = 0;
+// выбор сети (скан) и ввод текста с пульта
+struct NetFound { char ssid[33]; int8_t rssi; };
+NetFound pickNet[8];
+int     pickN = 0;
+bool    pickScanning = false;
+unsigned long pickT0 = 0;
+char    txtBuf[64];
+int     txtLen = 0, txtMax = 63, txtCur = 0, txtStage = 0;
+char    txtSsid[33];
+static const char TXT_SET[] = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ.-_@!?#$%&*+=/:;,~()[]{} ";
+#define TXT_N  ((int)(sizeof(TXT_SET) - 1))      // символов; дальше два служебных: DEL и OK
 int     editCh = 0;
 int     dzEdit = DEF_DEADZONE;
 int     editInt = 0;            // для Expo / Max
@@ -781,6 +803,7 @@ const char* stateName() {
     case ST_CAL_RES: return "CAL-RES";
     case ST_ESTOP:   return "ESTOP";
     case ST_WIFI:    return "WIFI";
+    case ST_GH:      return "GITHUB";
   }
   return "?";
 }
@@ -813,6 +836,75 @@ char rxWifiSsid[16] = "";
 void wifiBegin();
 void wifiStop(const char* why);
 void rxWifiBegin();
+
+// ---- сохранённые Wi-Fi сети (NVS "wifi"): до NET_MAX штук ----
+char netSsid[NET_MAX][33];
+char netPass[NET_MAX][64];
+
+void netLoad() {
+  memset(netSsid, 0, sizeof(netSsid));
+  memset(netPass, 0, sizeof(netPass));
+  prefs.begin("wifi", true);
+  for (int i = 0; i < NET_MAX; i++) {
+    char k[4];
+    snprintf(k, sizeof(k), "s%d", i); prefs.getString(k, netSsid[i], sizeof(netSsid[i]));
+    snprintf(k, sizeof(k), "p%d", i); prefs.getString(k, netPass[i], sizeof(netPass[i]));
+  }
+  prefs.end();
+}
+
+static void netStore(int i) {
+  char k[4];
+  prefs.begin("wifi", false);
+  snprintf(k, sizeof(k), "s%d", i);
+  if (netSsid[i][0]) prefs.putString(k, netSsid[i]); else prefs.remove(k);
+  snprintf(k, sizeof(k), "p%d", i);
+  if (netSsid[i][0]) prefs.putString(k, netPass[i]); else prefs.remove(k);
+  prefs.end();
+}
+
+int netCount() {
+  int c = 0;
+  for (int i = 0; i < NET_MAX; i++) if (netSsid[i][0]) c++;
+  return c;
+}
+
+// 0 = сохранено, 1 = нет места, 2 = неверные данные
+int netAdd(const char* ssid, const char* pass) {
+  if (!ssid || !ssid[0] || strlen(ssid) > 32 || strlen(pass ? pass : "") > 63) return 2;
+  int slot = -1;
+  for (int i = 0; i < NET_MAX; i++) if (strcmp(netSsid[i], ssid) == 0) slot = i;     // та же сеть: обновить пароль
+  if (slot < 0) for (int i = 0; i < NET_MAX; i++) if (!netSsid[i][0]) { slot = i; break; }
+  if (slot < 0) return 1;
+  snprintf(netSsid[slot], sizeof(netSsid[slot]), "%s", ssid);
+  snprintf(netPass[slot], sizeof(netPass[slot]), "%s", pass ? pass : "");
+  netStore(slot);
+  return 0;
+}
+
+void netDel(int i) {
+  if (i < 0 || i >= NET_MAX) return;
+  netSsid[i][0] = 0; netPass[i][0] = 0;
+  netStore(i);
+}
+
+void netClearAll() {
+  for (int i = 0; i < NET_MAX; i++) netDel(i);
+}
+
+// ---- загрузка с GitHub: состояние (реализация ниже, после wifiTick) ----
+enum GhStage { G_SCAN, G_CONN, G_API, G_ASK, G_DL, G_OK, G_ERR };
+GhStage ghStage = G_SCAN;
+char ghNet[33] = "";             // сеть, к которой подключаемся
+char ghVer[16] = "";             // версия найденной прошивки
+char ghErr[40] = "";
+char ghErr2[33] = "";
+char ghSha[65] = "";             // SHA-256 из ответа GitHub
+char ghUrl[200] = "";
+size_t ghSize = 0, ghDone = 0;
+unsigned long ghT0 = 0;
+void ghBegin();
+void ghStop(const char* why);
 
 // ============ БАТАРЕЯ ============
 float vbat = 0;                 // напряжение, показываемое на экране
@@ -1196,6 +1288,8 @@ int menuCount() {
     case MS_EVLOG:   return logN + 2;
     case MS_DBGLIST: return NUM_DP + 1;
     case MS_FRTARGET: return 3;
+    case MS_NETS:    return NET_MAX + 3;
+    case MS_NETPICK: return pickScanning ? 1 : pickN + 2;
     case MS_RX:      return RT_COUNT;
     case MS_RXCH:    return NUM_CH + 1;
     case MS_RXDIR:   return 3;
@@ -1340,12 +1434,13 @@ void startConfirm(ConfAct act, MenuScr back, int idx) {
 }
 
 void factoryResetTx() {
-  static const char* ns[] = { "joy", "chcfg", "led", "alerts", "bat", "screens", "radio", "log" };
-  for (int i = 0; i < 8; i++) {
+  static const char* ns[] = { "joy", "chcfg", "led", "alerts", "bat", "screens", "radio", "log", "wifi" };
+  for (int i = 0; i < 9; i++) {
     prefs.begin(ns[i], false);
     prefs.clear();
     prefs.end();
   }
+  memset(netSsid, 0, sizeof(netSsid)); memset(netPass, 0, sizeof(netPass));
   logLine("FACTORY RESET: pult");
   restartAt = millis() + 1500UL;      // привязка (namespace "bind") не затрагивается
 }
@@ -1365,6 +1460,18 @@ void doConfirm() {
       logLine("Bind forgotten");
       toast("Bind forgotten");
       gotoScr(confBack, confIdx);
+      break;
+    case CA_NETDEL:
+      netDel(confIdx);
+      logLine("Wi-Fi network deleted");
+      toast("Deleted");
+      gotoScr(confBack, 0);
+      break;
+    case CA_NETALL:
+      netClearAll();
+      logLine("Wi-Fi networks cleared");
+      toast("All forgotten");
+      gotoScr(confBack, 0);
       break;
     case CA_FR_TX:
       factoryResetTx();               // экран остаётся до перезагрузки
@@ -1479,6 +1586,103 @@ const DescRef DESC[NUM_DP] = {
 const uint8_t BAT_MAP[9] = { 0, 5, 6, 1, 2, 3, 4, 7, 8 };   // Cal divider, Warn, Crit, Full V, Empty V, Full=now, Empty=low, Curve, Reset
 const uint8_t LED_MAP[6] = { 3, 1, 0, 2, 4, 5 };            // Presets, Alert events, Status LEDs, Heartbeat, Test alerts, Reset alerts
 
+// ---- Wi-Fi сети с пульта: поиск, выбор, ввод названия и пароля ----
+void netScanStop() {
+  WiFi.scanDelete();
+  WiFi.mode(WIFI_OFF);
+  pickScanning = false;
+}
+
+void netAddBegin() {
+  if (netCount() >= NET_MAX) { toast("Full: delete one"); return; }
+  pickN = 0;
+  pickScanning = true;
+  pickT0 = millis();
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  WiFi.scanNetworks(true);
+  gotoScr(MS_NETPICK, 0);
+}
+
+// результат скана: уникальные видимые названия, сильные сверху (n найденных сетей -> out)
+int netCollect(int n, NetFound* out, int maxN) {
+  int cnt = 0;
+  for (int i = 0; i < n; i++) {
+    String s = WiFi.SSID(i);
+    if (s.length() == 0 || s.length() > 32) continue;
+    int r = WiFi.RSSI(i);
+    int dup = -1;
+    for (int k = 0; k < cnt; k++) if (strcmp(out[k].ssid, s.c_str()) == 0) dup = k;
+    if (dup >= 0) { if (r > out[dup].rssi) out[dup].rssi = (int8_t)r; continue; }
+    if (cnt < maxN) {
+      snprintf(out[cnt].ssid, sizeof(out[cnt].ssid), "%s", s.c_str());
+      out[cnt].rssi = (int8_t)r;
+      cnt++;
+    }
+  }
+  for (int a = 0; a < cnt; a++)
+    for (int b2 = a + 1; b2 < cnt; b2++)
+      if (out[b2].rssi > out[a].rssi) { NetFound t = out[a]; out[a] = out[b2]; out[b2] = t; }
+  return cnt;
+}
+
+void netPickTick(unsigned long now) {
+  if (!pickScanning) return;
+  int n = WiFi.scanComplete();
+  if (n == WIFI_SCAN_RUNNING) {
+    if ((now - pickT0) < 15000UL) return;
+    n = 0;                                              // слишком долго: считаем, что сетей нет
+  } else if (n < 0) {
+    n = 0;
+  }
+  pickN = netCollect(n, pickNet, 8);
+  netScanStop();
+  sel = 0; menuTop = 0;
+}
+
+void textBegin(int stage, int maxLen) {
+  txtStage = stage;
+  txtMax = maxLen;
+  txtLen = 0;
+  txtBuf[0] = 0;
+  txtCur = 0;
+  gotoScr(MS_TEXTIN, 0);
+}
+
+void textFinish() {
+  if (txtStage == 0) {                                   // название скрытой сети
+    if (txtLen == 0) { toast("Name is empty"); return; }
+    snprintf(txtSsid, sizeof(txtSsid), "%s", txtBuf);
+    textBegin(1, 63);
+    return;
+  }
+  if (txtLen > 0 && txtLen < 8) { toast("Min 8 characters"); return; }   // WPA: 8..63, пустой = открытая сеть
+  int r = netAdd(txtSsid, txtBuf);
+  logLine(r == 0 ? "Wi-Fi network saved" : "Wi-Fi network not saved");
+  toast(r == 0 ? "Saved" : (r == 1 ? "No free slot" : "Error"));
+  gotoScr(MS_NETS, 0);
+}
+
+void textStep(int a, int b, int m) {
+  const int total = TXT_N + 2;
+  if (a) {
+    int step = m < 1 ? 1 : (m > 4 ? 4 : m);
+    txtCur = ((txtCur + a * step) % total + total) % total;
+  }
+  if (b > 0) {
+    if (txtCur < TXT_N) {
+      if (txtLen < txtMax) { txtBuf[txtLen++] = TXT_SET[txtCur]; txtBuf[txtLen] = 0; }
+    } else if (txtCur == TXT_N) {
+      if (txtLen > 0) txtBuf[--txtLen] = 0;
+    } else {
+      textFinish();
+    }
+  } else if (b < 0) {
+    if (txtLen > 0) txtBuf[--txtLen] = 0;
+    else gotoScr(MS_NETS, idxNets);
+  }
+}
+
 void menuLabel(int i, char* b, size_t n) {
   static const char* mainL[] = { "Transmitter", "Receiver", "Exit" };
   static const char* calL[]  = { "Set Center", "Set Min/Max", "Dead Zone", "Back" };
@@ -1502,6 +1706,8 @@ void menuLabel(int i, char* b, size_t n) {
         case TX_LOG:   snprintf(b, n, "Event Log"); break;
         case TX_DBG:   snprintf(b, n, "Debug"); break;
         case TX_WIFI:  snprintf(b, n, "Wi-Fi Update"); break;
+        case TX_GH:    snprintf(b, n, "GitHub Update"); break;
+        case TX_NETS:  snprintf(b, n, "Wi-Fi Networks"); break;
         case TX_FR:    snprintf(b, n, "Factory Reset"); break;
         case TX_SIM:   snprintf(b, n, "Sim RX: %s", simN[simMode]); break;
         default:       snprintf(b, n, "Back"); break;
@@ -1650,6 +1856,18 @@ void menuLabel(int i, char* b, size_t n) {
       else                snprintf(b, n, "Back");
       break;
     case MS_DBGLIST: snprintf(b, n, "%s", dbgL[i]); break;
+    case MS_NETS:
+      if (i < NET_MAX)       snprintf(b, n, "%d %.14s", i + 1, netSsid[i][0] ? netSsid[i] : "(empty)");
+      else if (i == NET_MAX) snprintf(b, n, "Add network");
+      else if (i == NET_MAX + 1) snprintf(b, n, "Forget all");
+      else                   snprintf(b, n, "Back");
+      break;
+    case MS_NETPICK:
+      if (pickScanning)      snprintf(b, n, "Scanning...");
+      else if (i < pickN)    snprintf(b, n, "%.17s", pickNet[i].ssid);
+      else if (i == pickN)   snprintf(b, n, "Hidden network");
+      else                   snprintf(b, n, "Back");
+      break;
     case MS_FRTARGET: {
       static const char* fl[] = { "Transmitter", "Receiver", "Back" };
       snprintf(b, n, "%s", fl[i]);
@@ -1820,6 +2038,8 @@ void menuSelect(int i) {
         case TX_LOG:   gotoScr(MS_EVLOG, idxEvLog); break;
         case TX_DBG:   gotoScr(MS_DBGLIST, idxDbg); break;
         case TX_WIFI:  wifiBegin(); break;
+        case TX_GH:    ghBegin(); break;
+        case TX_NETS:  gotoScr(MS_NETS, idxNets); break;
         case TX_FR:    startPin(); break;
         case TX_SIM:
           simMode = (SimMode)((simMode + 1) % 3);      // откат и журнал делает eventsTick
@@ -2035,6 +2255,30 @@ void menuSelect(int i) {
       if (i < NUM_DP) { dbgPage = i; dbgTop = 0; gotoScr(MS_DBGDESC, 0); }
       else            gotoScr(MS_TX, idxTx);
       break;
+    case MS_NETS:
+      idxNets = i;
+      if (i < NET_MAX) {
+        if (netSsid[i][0]) startConfirm(CA_NETDEL, MS_NETS, i);
+        else               netAddBegin();
+      }
+      else if (i == NET_MAX)     netAddBegin();
+      else if (i == NET_MAX + 1) {
+        if (netCount() == 0) toast("Nothing saved");
+        else                 startConfirm(CA_NETALL, MS_NETS, i);
+      }
+      else gotoScr(MS_TX, idxTx);
+      break;
+    case MS_NETPICK:
+      if (pickScanning) break;
+      if (i < pickN) {
+        snprintf(txtSsid, sizeof(txtSsid), "%s", pickNet[i].ssid);
+        textBegin(1, 63);
+      } else if (i == pickN) {
+        textBegin(0, 32);
+      } else {
+        gotoScr(MS_NETS, idxNets);
+      }
+      break;
     case MS_FRTARGET:
       idxFr = i;
       if (i == 0)      startConfirm(CA_FR_TX, MS_FRTARGET, idxFr);
@@ -2063,7 +2307,10 @@ void menuBack() {
     case MS_EVLOG:
     case MS_DBGLIST:
     case MS_FRTARGET:
+    case MS_NETS:
     case MS_PIN:      gotoScr(MS_TX, idxTx); break;
+    case MS_NETPICK:  netScanStop(); gotoScr(MS_NETS, idxNets); break;
+    case MS_TEXTIN:   gotoScr(MS_NETS, idxNets); break;
     case MS_CHEDIT:   gotoScr(MS_CHLIST, idxChList); break;
     case MS_DZ:       gotoScr(MS_CAL, idxCal); break;
     case MS_BATEDIT:  gotoScr(MS_BAT, idxBat); break;
@@ -2095,14 +2342,18 @@ void menuBack() {
 
 void navStep(unsigned long now) {
   bool numeric = (menuScr == MS_DZ || menuScr == MS_EXPO || menuScr == MS_MAXV ||
-                  menuScr == MS_BATEDIT || menuScr == MS_RXEDIT || menuScr == MS_TXPWR || menuScr == MS_TRATE);
+                  menuScr == MS_BATEDIT || menuScr == MS_RXEDIT || menuScr == MS_TXPWR || menuScr == MS_TRATE ||
+                  menuScr == MS_TEXTIN);
   int a = navPoll(MENU_NAV_CH, navA, now, numeric);
   int b = navPoll(MENU_ENTER_CH, navB, now, false);
 
   if (numeric) {
     int m = navMult(navA, now);
-    if (b < 0) { menuBack(); return; }
+    if (b < 0 && menuScr != MS_TEXTIN) { menuBack(); return; }
     switch (menuScr) {
+      case MS_TEXTIN:
+        textStep(a, b, m);
+        break;
       case MS_DZ:
         if (a) dzEdit = constrain(dzEdit + a * DZ_STEP * (m > 6 ? 6 : m), DZ_MIN, DZ_MAX);
         if (b > 0) {
@@ -2249,13 +2500,10 @@ void calCenterTick(unsigned long now) {
     for (int i = 0; i < NUM_CH; i++) calSum[i] += raw[i];
     calCount++;
     if ((now - calStart) >= CAL_AVG_MS && calCount > 0) {
-      Serial.print("CAL: center =");
       for (int i = 0; i < NUM_CH; i++) {
         cenV[i] = (int16_t)(calSum[i] / calCount);
         saveCenter(i);
-        Serial.printf(" %d", cenV[i]);
       }
-      Serial.println();
       calKind = 0;
       calFailCount = 0;
       calResMs = 2500;
@@ -2337,6 +2585,9 @@ button.m:disabled{opacity:.35}
 .bar{height:14px;background:var(--t);border-radius:7px;overflow:hidden}.bar i{display:block;height:100%;width:0;background:var(--a)}
 .ok{color:var(--ok)}.bad{color:var(--b)}.wn{color:var(--w)}
 .ms{border:1px solid var(--l);border-radius:8px;padding:10px 12px;font-size:14px}
+.in{border:1px solid var(--l);border-radius:8px;padding:12px;background:var(--bg);color:var(--fg);font:16px system-ui;width:100%}
+.sb{background:none;border:1px solid var(--l);color:var(--fg);border-radius:8px;padding:8px 10px;font-size:14px;text-align:left}
+#lst{display:flex;flex-direction:column;gap:6px}
 [hidden]{display:none!important}
 </style></head><body><div class="w">
 <div class="top"><span class="pill">FORESTER</span><button class="lg" id="lg">RU/EN</button></div>
@@ -2350,19 +2601,23 @@ button.m:disabled{opacity:.35}
 <input type="file" id="f" accept=".bin">
 <div id="ck" hidden></div>
 <button class="m" id="go" disabled></button></div>
+<div class="cd" id="c4"><h2 id="t4"></h2><div id="sv"></div>
+<button class="m" id="sc"></button><div id="lst"></div>
+<input class="in" id="ss" maxlength="32" autocomplete="off"><input class="in" id="pw" maxlength="63" autocomplete="off">
+<button class="m" id="sa"></button><div class="ms" id="sm" hidden></div></div>
 <div class="cd" id="c2" hidden><h2 id="t2"></h2><div class="bar"><i id="b"></i></div>
 <div class="r"><span id="st"></span><b id="pc">0%</b></div><div class="ms" id="wm"></div></div>
 <div class="cd" id="c3" hidden><div class="ms" id="rs"></div><button class="m" id="bk"></button></div>
 </div><script>
 var T={en:{h1:'Firmware update',t0:'This device',k1:'Device',k2:'Firmware',k3:'Network',t1:'New firmware',pt:'Choose .bin file',ph:'Sketch > Export Compiled Binary',
 ck1:'Firmware for',ck2:'Size',ck3:'Version',go:'Install',t2:'Installing',up:'Uploading',vf:'Verifying and installing',wm:'Do not switch off the device and do not leave the network.',
-ok:'Installed. The device is restarting, close this page.',wr:'Wrong firmware: this file is not for this device. Nothing was changed.',er:'Error: ',bk:'Back',nf:'Not a firmware file'},
+ok:'Installed. The device is restarting, close this page.',wr:'Wrong firmware: this file is not for this device. Nothing was changed.',er:'Error: ',bk:'Back',nf:'Not a firmware file',t4:'Wi-Fi for GitHub update',n0:'No saved networks',sc:'Scan networks',scn:'Scanning...',sn:'Network name',pw:'Password (empty = open)',sa:'Save',sd:'Saved',fl:'List is full (3). Delete one.',dl:'Delete',e2:'Error'},
 ru:{h1:'Обновление прошивки',t0:'Это устройство',k1:'Устройство',k2:'Прошивка',k3:'Сеть',t1:'Новая прошивка',pt:'Выбрать файл .bin',ph:'Скетч > Экспорт бинарного файла',
 ck1:'Прошивка для',ck2:'Размер',ck3:'Версия',go:'Установить',t2:'Установка',up:'Загрузка',vf:'Проверка и установка',wm:'Не выключайте устройство и не отключайтесь от сети.',
-ok:'Установлено. Устройство перезагружается, закройте страницу.',wr:'Не та прошивка: файл не для этого устройства. Ничего не изменено.',er:'Ошибка: ',bk:'Назад',nf:'Это не файл прошивки'}};
+ok:'Установлено. Устройство перезагружается, закройте страницу.',wr:'Не та прошивка: файл не для этого устройства. Ничего не изменено.',er:'Ошибка: ',bk:'Назад',nf:'Это не файл прошивки',t4:'Wi-Fi для обновления с GitHub',n0:'Нет сохранённых сетей',sc:'Найти сети',scn:'Поиск...',sn:'Название сети',pw:'Пароль (пусто = открытая)',sa:'Сохранить',sd:'Сохранено',fl:'Список полон (3). Удалите одну.',dl:'Удалить',e2:'Ошибка'}};
 var $=function(i){return document.getElementById(i)},lang=(navigator.language||'en').slice(0,2)=='ru'?'ru':'en',D={dev:'',name:'-',ver:'-',net:'-'},F=null;
 function tx(k){return T[lang][k]}
-function ui(){var m={h1:'h1',t0:'t0',k1:'k1',k2:'k2',k3:'k3',t1:'t1',pt:'pt',ph:'ph',go:'go',t2:'t2',wm:'wm',bk:'bk'};for(var k in m)$(m[k]).textContent=tx(k);$('v1').textContent=D.name;$('v2').textContent=D.ver;$('v3').textContent=D.net;if(F)chk()}
+function ui(){var m={h1:'h1',t0:'t0',k1:'k1',k2:'k2',k3:'k3',t1:'t1',pt:'pt',ph:'ph',go:'go',t2:'t2',wm:'wm',bk:'bk',t4:'t4',sc:'sc',sa:'sa'};for(var k in m)$(m[k]).textContent=tx(k);$('ss').placeholder=tx('sn');$('pw').placeholder=tx('pw');ld();$('v1').textContent=D.name;$('v2').textContent=D.ver;$('v3').textContent=D.net;if(F)chk()}
 $('lg').onclick=function(){lang=lang=='en'?'ru':'en';ui()};
 function tag(u,d){var p='FWTAG:'+d+':',n=p.length;for(var i=0;i<u.length-n-2;i++){if(u[i]!==70)continue;var j=0;while(j<n&&u[i+j]===p.charCodeAt(j))j++;if(j===n&&u[i+n]>=48&&u[i+n]<=57){var s='';for(var k=i+n;k<i+n+12&&u[k]!==59&&u[k]!==0;k++)s+=String.fromCharCode(u[k]);return s}}return''}
 function chk(){var c=$('ck'),o='';c.hidden=false;if(F.v){o='<div class="r"><span>'+tx('ck1')+'</span><b class="ok">'+D.name+' &#10003;</b></div><div class="r"><span>'+tx('ck2')+'</span><b>'+Math.round(F.f.size/1024)+' KB</b></div><div class="r"><span>'+tx('ck3')+'</span><b class="wn">'+D.ver+' &rarr; '+F.v+'</b></div>'}else o='<div class="ms bad">'+tx(F.nf?'nf':'wr')+'</div>';c.innerHTML=o;$('go').disabled=!F.v}
@@ -2374,6 +2629,12 @@ $('go').onclick=function(){show(2);$('st').textContent=tx('up');var x=new XMLHtt
 x.upload.onprogress=function(e){if(e.lengthComputable){var p=Math.round(e.loaded/e.total*100);$('b').style.width=p+'%';$('pc').textContent=p+'%';if(p>=100)$('st').textContent=tx('vf')}};
 x.onload=function(){var r;try{r=JSON.parse(x.responseText)}catch(e){r={ok:false,err:'?'}}fin(r.ok,r.ok?tx('ok'):(r.err==='wrong'?tx('wr'):tx('er')+r.err))};
 x.onerror=function(){fin(false,tx('er')+'connection')};x.send(d)};
+function post(u,b){return fetch(u,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:b}).then(function(r){return r.json()})}
+function ld(){fetch('/nets').then(function(r){return r.json()}).then(function(j){var s=$('sv');s.textContent='';if(!j.n.length){s.textContent=tx('n0');return}j.n.forEach(function(o){var d=document.createElement('div'),a=document.createElement('b'),b=document.createElement('button');d.className='r';a.textContent=o.s;b.className='sb';b.textContent=tx('dl');b.onclick=function(){post('/netdel','i='+o.i).then(ld)};d.appendChild(a);d.appendChild(b);s.appendChild(d)})}).catch(function(){})}
+function msg(t){var m=$('sm');m.hidden=!t;m.textContent=t}
+function poll(){fetch('/scanres').then(function(r){return r.json()}).then(function(j){if(j.run){setTimeout(poll,1000);return}$('sc').disabled=false;msg('');var l=$('lst');l.textContent='';j.l.forEach(function(o){var b=document.createElement('button');b.className='sb';b.textContent=o.s+'   '+o.r+' dBm';b.onclick=function(){$('ss').value=o.s;$('pw').focus()};l.appendChild(b)})}).catch(function(){setTimeout(poll,1500)})}
+$('sc').onclick=function(){$('sc').disabled=true;msg(tx('scn'));fetch('/scan').then(poll).catch(function(){setTimeout(poll,1500)})};
+$('sa').onclick=function(){var s=$('ss').value;if(!s)return;post('/netadd','s='+encodeURIComponent(s)+'&p='+encodeURIComponent($('pw').value)).then(function(j){msg(j.ok?tx('sd'):(j.err==='full'?tx('fl'):tx('e2')));if(j.ok){$('pw').value='';ld()}}).catch(function(){msg(tx('e2'))})};
 ui();show(1);fetch('/info').then(function(r){return r.json()}).then(function(j){D=j;ui()}).catch(function(){});
 </script></body></html>
 )HTML";
@@ -2445,6 +2706,70 @@ static void wifiOkApple() { server.send(200, "text/html", "<HTML><HEAD><TITLE>Su
 static void wifiOkMsft() { server.send(200, "text/plain", "Microsoft Connect Test"); }
 static void wifiOkNcsi() { server.send(200, "text/plain", "Microsoft NCSI"); }
 
+static void jsonEsc(const char* in, char* out, size_t n) {   // экранирование для JSON-строки
+  size_t k = 0;
+  for (; *in && k + 7 < n; in++) {
+    unsigned char c = (unsigned char)*in;
+    if (c == '"' || c == '\\') { out[k++] = '\\'; out[k++] = (char)c; }
+    else if (c >= 0x20)        { out[k++] = (char)c; }
+  }
+  out[k] = 0;
+}
+
+static void wifiNets() {                       // GET /nets: сохранённые сети
+  wifiAct = millis();
+  String j = "{\"max\":" + String(NET_MAX) + ",\"n\":[";
+  bool first = true;
+  for (int i = 0; i < NET_MAX; i++) {
+    if (!netSsid[i][0]) continue;
+    char e[80];
+    jsonEsc(netSsid[i], e, sizeof(e));
+    if (!first) j += ",";
+    first = false;
+    j += "{\"i\":" + String(i) + ",\"s\":\"" + e + "\"}";
+  }
+  j += "]}";
+  server.send(200, "application/json", j.c_str());
+}
+
+static void wifiScanStart() {                  // GET /scan: поиск сетей (фоновый)
+  wifiAct = millis();
+  WiFi.scanDelete();
+  WiFi.scanNetworks(true);
+  server.send(200, "application/json", "{\"run\":true}");
+}
+
+static void wifiScanRes() {                    // GET /scanres: результат поиска
+  wifiAct = millis();
+  int n = WiFi.scanComplete();
+  if (n == WIFI_SCAN_RUNNING) { server.send(200, "application/json", "{\"run\":true}"); return; }
+  NetFound f[12];
+  int c = (n > 0) ? netCollect(n, f, 12) : 0;
+  WiFi.scanDelete();
+  String j = "{\"run\":false,\"l\":[";
+  for (int i = 0; i < c; i++) {
+    char e[80];
+    jsonEsc(f[i].ssid, e, sizeof(e));
+    if (i) j += ",";
+    j += "{\"s\":\"" + String(e) + "\",\"r\":" + String((int)f[i].rssi) + "}";
+  }
+  j += "]}";
+  server.send(200, "application/json", j.c_str());
+}
+
+static void wifiNetAdd() {                     // POST /netadd (s, p)
+  wifiAct = millis();
+  int r = netAdd(server.arg("s").c_str(), server.arg("p").c_str());
+  if (r == 0) server.send(200, "application/json", "{\"ok\":true}");
+  else        server.send(200, "application/json", r == 1 ? "{\"ok\":false,\"err\":\"full\"}" : "{\"ok\":false,\"err\":\"bad\"}");
+}
+
+static void wifiNetDel() {                     // POST /netdel (i)
+  wifiAct = millis();
+  netDel((int)server.arg("i").toInt());
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
 static void wifiRedirect() {                  // проверки интернета телефоном -> переход на страницу
   server.sendHeader("Location", "http://" WIFI_ADDR "/", true);
   server.send(302, "text/plain", "");
@@ -2505,13 +2830,18 @@ void wifiBegin() {
   snprintf(wifiSsid, sizeof(wifiSsid), "PULT-%02X%02X", (unsigned)((mac >> 32) & 0xFF), (unsigned)((mac >> 40) & 0xFF));
   snprintf(scanPre, sizeof(scanPre), "FWTAG:%s:", PROJECT_NAME);
   scanPreLen = strlen(scanPre);
-  WiFi.mode(WIFI_AP);
+  WiFi.mode(WIFI_AP_STA);                       // STA нужен только для поиска сетей на странице
   WiFi.softAP(wifiSsid, WIFI_PASS);
   WiFi.setTxPower(WIFI_POWER_11dBm);
   if (!wifiRoutes) {
     server.on("/", HTTP_GET, wifiRoot);
     server.on("/info", HTTP_GET, wifiInfo);
     server.on("/update", HTTP_POST, wifiUpdateDone, wifiUpload);
+    server.on("/nets", HTTP_GET, wifiNets);
+    server.on("/scan", HTTP_GET, wifiScanStart);
+    server.on("/scanres", HTTP_GET, wifiScanRes);
+    server.on("/netadd", HTTP_POST, wifiNetAdd);
+    server.on("/netdel", HTTP_POST, wifiNetDel);
     server.on("/generate_204", HTTP_GET, wifiOk204);
     server.on("/gen_204", HTTP_GET, wifiOk204);
     server.on("/hotspot-detect.html", HTTP_GET, wifiOkApple);
@@ -2554,6 +2884,241 @@ void wifiTick(unsigned long now) {
     if ((long)(now - wifiT0) >= (long)WIFI_NOCONN_MS) wifiStop("no phone");
   } else if ((long)(now - wifiAct) >= (long)WIFI_IDLE_MS) {
     wifiStop("idle");
+  }
+}
+
+// ============ ЗАГРУЗКА ПРОШИВКИ С GITHUB ============
+// Пульт подключается к сохранённой сети, читает описание последнего релиза (имя файла, размер, SHA-256),
+// после подтверждения (CH6) скачивает файл прямо в раздел обновления и проверяет его.
+// Шифрование: сертификат сервера пока не проверяется (setInsecure), целостность файла держится на SHA-256
+// из ответа GitHub и метке проекта внутри файла.
+static uint8_t ghBuf[1024];
+static bool    ghBegan = false;      // Update.begin уже вызван
+
+static void ghFrame() {              // нарисовать и вытолкнуть кадр перед долгим блокирующим шагом
+  if (!okOled) return;
+  unsigned long t0 = millis();
+  drawScreen();
+  while (oledBusy() && (millis() - t0) < 300) oledStep();
+}
+
+static void ghFail(const char* m, const char* m2 = "") {
+  snprintf(ghErr, sizeof(ghErr), "%s", m);
+  snprintf(ghErr2, sizeof(ghErr2), "%s", m2);
+  if (ghBegan) { Update.abort(); ghBegan = false; }
+  WiFi.disconnect();
+  ghStage = G_ERR;
+  ghT0 = millis();
+  LOGF("GitHub: %s %s", m, m2);
+}
+
+void ghStop(const char* why) {
+  if (ghBegan) { Update.abort(); ghBegan = false; }
+  WiFi.scanDelete();
+  WiFi.disconnect();
+  WiFi.mode(WIFI_OFF);
+  state = ST_MENU;
+  gotoScr(MS_TX, idxTx);
+  navReset();
+  LOGF("GitHub Update: off (%s)", why);
+  if (strcmp(why, "declined") == 0) toast("Cancelled");
+  else { char tb[20]; snprintf(tb, sizeof(tb), "Wi-Fi off: %.8s", why); toast(tb); }
+  if (estop.state) goEstop();
+}
+
+void ghBegin() {
+  if (batLevel >= 1 && !batUsb) { toast("Battery low"); return; }
+  state = ST_GH;
+  ghErr[0] = ghErr2[0] = 0; ghNet[0] = 0; ghVer[0] = 0; ghSha[0] = 0; ghUrl[0] = 0;
+  ghSize = ghDone = 0; ghBegan = false;
+  ghT0 = millis();
+  navReset();
+  if (netCount() == 0) { ghStage = G_ERR; snprintf(ghErr, sizeof(ghErr), "No saved network"); snprintf(ghErr2, sizeof(ghErr2), "Add: Wi-Fi Networks"); return; }
+  ghStage = G_SCAN;
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  WiFi.scanNetworks(true);
+  LOGF("GitHub Update: start");
+}
+
+// ответ GitHub: ищем файл "pult_<версия>.bin" (не *_full.bin), берём размер, SHA-256 и адрес скачивания
+static bool ghParse(const String& body) {
+  int pos = 0;
+  while (true) {
+    int a = body.indexOf("\"name\":\"" PROJECT_NAME "_", pos);
+    if (a < 0) return false;
+    int nb = a + 8;
+    int ne = body.indexOf('"', nb);
+    if (ne < 0) return false;
+    pos = ne;
+    String nm = body.substring(nb, ne);
+    if (!nm.endsWith(".bin") || nm.indexOf("_full") >= 0) continue;
+    String ver = nm.substring(strlen(PROJECT_NAME) + 1, nm.length() - 4);
+    if (ver.length() == 0 || ver.length() >= sizeof(ghVer)) continue;
+    int sz = body.indexOf("\"size\":", ne);
+    int dg = body.indexOf("\"digest\":\"sha256:", ne);
+    int ur = body.indexOf("\"browser_download_url\":\"", ne);
+    if (sz < 0 || dg < 0 || ur < 0) continue;
+    long size = body.substring(sz + 7).toInt();
+    String sha = body.substring(dg + 17, dg + 17 + 64);
+    int ue = body.indexOf('"', ur + 24);
+    if (size <= 0 || sha.length() != 64 || ue < 0) continue;
+    String url = body.substring(ur + 24, ue);
+    if (!url.startsWith("https://") || url.length() >= sizeof(ghUrl)) continue;
+    snprintf(ghVer, sizeof(ghVer), "%s", ver.c_str());
+    snprintf(ghSha, sizeof(ghSha), "%s", sha.c_str());
+    snprintf(ghUrl, sizeof(ghUrl), "%s", url.c_str());
+    ghSize = (size_t)size;
+    return true;
+  }
+}
+
+static void ghCheck() {
+  ghFrame();
+  WiFiClientSecure cl;
+  cl.setInsecure();
+  HTTPClient http;
+  http.setUserAgent("FORESTER-pult");
+  http.addHeader("Accept", "application/vnd.github+json");
+  http.setTimeout(10000);
+  if (!http.begin(cl, "https://api.github.com/repos/" GH_REPO "/releases/tags/" GH_TAG)) { ghFail("GitHub not reachable"); return; }
+  int code = http.GET();
+  if (code <= 0)                 { http.end(); ghFail("GitHub not reachable"); return; }
+  if (code == 404)               { http.end(); ghFail("Release not found", "Is the repo public?"); return; }
+  if (code == 403 || code == 429){ http.end(); ghFail("GitHub busy", "Try again later"); return; }
+  if (code != 200)               { http.end(); char t[24]; snprintf(t, sizeof(t), "GitHub error %d", code); ghFail(t); return; }
+  String body = http.getString();
+  http.end();
+  if (!ghParse(body)) { ghFail("No firmware found", "in the release"); return; }
+  LOGF("GitHub: found %s %u B", ghVer, (unsigned)ghSize);
+  ghStage = G_ASK;
+  ghT0 = millis();
+  navReset();
+}
+
+static bool ghChunk(const uint8_t* b, size_t n, mbedtls_sha256_context* sha) {
+  upScan(b, n, false);
+  mbedtls_sha256_update(sha, b, n);
+  if (Update.write((uint8_t*)b, n) != n) { ghFail("Write error", Update.errorString()); return false; }
+  ghDone += n;
+  return true;
+}
+
+static void ghDownload() {
+  ghStage = G_DL;
+  ghDone = 0;
+  upFound = false; upVer[0] = 0; scanTailLen = 0;
+  snprintf(scanPre, sizeof(scanPre), "FWTAG:%s:", PROJECT_NAME);
+  scanPreLen = strlen(scanPre);
+  ghFrame();
+  WiFiClientSecure cl;
+  cl.setInsecure();
+  HTTPClient http;
+  http.setUserAgent("FORESTER-pult");
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.setTimeout(15000);
+  if (!http.begin(cl, ghUrl)) { ghFail("Download failed"); return; }
+  int code = http.GET();
+  if (code != 200) { http.end(); char t[24]; snprintf(t, sizeof(t), "Download error %d", code); ghFail(code <= 0 ? "Download failed" : t); return; }
+  int len = http.getSize();
+  if (len > 0 && (size_t)len != ghSize) { http.end(); ghFail("Size mismatch"); return; }
+  WiFiClient* st = http.getStreamPtr();
+  mbedtls_sha256_context sha;
+  mbedtls_sha256_init(&sha);
+  mbedtls_sha256_starts(&sha, 0);
+  bool ok = true;
+  // первые 64 байта: проверка заголовка образа ESP32-S3, затем начало записи
+  uint8_t hdr[64];
+  if (st->readBytes(hdr, sizeof(hdr)) != sizeof(hdr)) { ok = false; ghFail("Download failed"); }
+  else if (hdr[0] != 0xE9 || (hdr[12] | (hdr[13] << 8)) != 9) { ok = false; ghFail("Not an ESP32-S3 image"); }
+  else if (!Update.begin(ghSize)) { ok = false; ghFail("Update error", Update.errorString()); }
+  else {
+    ghBegan = true;
+    ok = ghChunk(hdr, sizeof(hdr), &sha);
+  }
+  unsigned long last = millis();
+  while (ok && ghDone < ghSize) {
+    size_t av = st->available();
+    if (av == 0) {
+      if (!http.connected() || (millis() - last) > 15000UL) { ok = false; ghFail("Download failed"); break; }
+      wifiServiceDisplay();
+      yield();
+      continue;
+    }
+    size_t want = ghSize - ghDone;
+    if (want > sizeof(ghBuf)) want = sizeof(ghBuf);
+    if (want > av) want = av;
+    size_t n = st->readBytes(ghBuf, want);
+    if (n == 0) continue;
+    last = millis();
+    ok = ghChunk(ghBuf, n, &sha);
+    wifiServiceDisplay();
+  }
+  http.end();
+  uint8_t dig[32];
+  mbedtls_sha256_finish(&sha, dig);
+  mbedtls_sha256_free(&sha);
+  if (!ok) return;
+  ghFrame();                                                  // показать "Verifying"
+  upScan(nullptr, 0, true);
+  char hex[65];
+  for (int i = 0; i < 32; i++) snprintf(hex + i * 2, 3, "%02x", dig[i]);
+  if (ghDone != ghSize)                       { ghFail("Download failed"); return; }
+  if (strcasecmp(hex, ghSha) != 0)            { ghFail("Checksum error", "Nothing changed"); return; }
+  if (!upFound)                               { ghFail("Wrong firmware", "Nothing changed"); return; }
+  if (!Update.end(true))                      { ghFail("Update error", Update.errorString()); return; }
+  ghBegan = false;
+  ghStage = G_OK;
+  restartAt = millis() + 2500UL;
+  LOGF("GitHub Update: installed %s", upVer);
+}
+
+void ghTick(unsigned long now) {
+  if (state != ST_GH) return;
+  if (estop.state && ghStage != G_DL && ghStage != G_OK) { ghStop("E-Stop"); return; }
+  switch (ghStage) {
+    case G_SCAN: {
+      int n = WiFi.scanComplete();
+      if (n == WIFI_SCAN_RUNNING) { if ((now - ghT0) > 15000UL) ghFail("Scan failed"); break; }
+      if (n < 0) { ghFail("Scan failed"); break; }
+      int best = -1, bestR = -1000;
+      for (int i = 0; i < n; i++) {
+        String sd = WiFi.SSID(i);
+        int r = WiFi.RSSI(i);
+        for (int k = 0; k < NET_MAX; k++)
+          if (netSsid[k][0] && sd == netSsid[k] && r > bestR) { best = k; bestR = r; }
+      }
+      WiFi.scanDelete();
+      if (best < 0) { ghFail("No saved network", "in range"); break; }
+      snprintf(ghNet, sizeof(ghNet), "%s", netSsid[best]);
+      WiFi.begin(netSsid[best], netPass[best][0] ? netPass[best] : nullptr);
+      ghStage = G_CONN;
+      ghT0 = now;
+      break;
+    }
+    case G_CONN: {
+      wl_status_t st = WiFi.status();
+      if (st == WL_CONNECTED)                    { ghStage = G_API; ghT0 = now; }
+      else if (st == WL_CONNECT_FAILED)          ghFail("Wrong password", ghNet);
+      else if ((now - ghT0) > 20000UL)           ghFail("Can't connect to", ghNet);
+      break;
+    }
+    case G_API:
+      ghCheck();                                 // блокирующий шаг: экран нарисован внутри
+      break;
+    case G_ASK: {
+      int b = navPoll(MENU_ENTER_CH, navB, now, false);
+      if (b > 0)       ghDownload();
+      else if (b < 0)  ghStop("declined");
+      else if ((now - ghT0) > 120000UL) ghStop("timeout");
+      break;
+    }
+    case G_DL:
+    case G_OK:
+      break;
+    case G_ERR:
+      if ((now - ghT0) > 30000UL) ghStop("timeout");
+      break;
   }
 }
 
@@ -3148,6 +3713,57 @@ void drawRxWifi() {
   oledCommit();
 }
 
+void hintLine(const char* what);
+void drawGh() {
+  startScreen();
+  display.setCursor(0, 0);   display.print("GITHUB UPDATE");
+  switch (ghStage) {
+    case G_SCAN:
+      display.setCursor(0, 16);  display.print("Looking for networks");
+      display.setCursor(0, 28);  display.print("saved in the pult...");
+      drawHintText("MENU = cancel", 56);
+      break;
+    case G_CONN:
+      display.setCursor(0, 16);  display.print("Connecting to");
+      display.setCursor(0, 28);  display.printf("%.21s", ghNet);
+      drawHintText("MENU = cancel", 56);
+      break;
+    case G_API:
+      display.setCursor(0, 16);  display.printf("%.21s", ghNet);
+      display.setCursor(0, 28);  display.print("Connected");
+      display.setCursor(0, 40);  display.print("Checking GitHub...");
+      break;
+    case G_ASK:
+      display.setCursor(0, 14);  display.printf("%s %s", PROJECT_NAME, ghVer);
+      display.setCursor(0, 24);  display.printf("now %s", FW_VERSION);
+      display.setCursor(0, 34);  display.printf("%u KB  %s", (unsigned)(ghSize / 1024), strcmp(ghVer, FW_VERSION) == 0 ? "SAME" : "new");
+      hintLine("%d:- %d:yes/no");
+      break;
+    case G_DL: {
+      bool ver = ghSize && ghDone >= ghSize;
+      int pct = ghSize ? (int)((uint64_t)ghDone * 100 / ghSize) : 0;
+      display.setCursor(0, 14);  display.print(ver ? "Verifying..." : "Downloading");
+      display.drawRect(0, 26, SCREEN_W, 12, SH110X_WHITE);
+      display.fillRect(2, 28, (SCREEN_W - 4) * pct / 100, 8, SH110X_WHITE);
+      display.setCursor(0, 42);  display.printf("%d%%  %u/%u KB", pct, (unsigned)(ghDone / 1024), (unsigned)(ghSize / 1024));
+      display.setCursor(0, 56);  display.print("do not switch off");
+      break;
+    }
+    case G_OK:
+      display.setCursor(0, 14);  display.print("Installed");
+      display.setCursor(0, 26);  display.printf("version %s", upVer);
+      display.setCursor(0, 42);  display.print("Restarting...");
+      break;
+    case G_ERR:
+      display.setCursor(0, 14);  display.print(ghErr);
+      display.setCursor(0, 26);  display.printf("%.21s", ghErr2);
+      drawHintText("MENU = exit", 56);
+      break;
+  }
+  drawBattery();
+  oledCommit();
+}
+
 void hintLine(const char* what) {
   char h[24];
   snprintf(h, sizeof(h), what, MENU_NAV_CH + 1, MENU_ENTER_CH + 1);
@@ -3183,6 +3799,8 @@ void drawMenu() {
     case MS_EVLOG:   display.printf("EVENT LOG %d/%d", logN, LOG_MAX); break;
     case MS_DBGLIST: display.print("DEBUG"); break;
     case MS_FRTARGET: display.print("FACTORY RESET"); break;
+    case MS_NETS:    display.printf("WI-FI NETWORKS %d/%d", netCount(), NET_MAX); break;
+    case MS_NETPICK: display.print("SELECT NETWORK"); break;
     case MS_RX:      display.print("RECEIVER"); break;
     case MS_RXCH: {
       static const char* tt[] = { "CURRENT LIMITS", "START DUTY", "MAX DUTY", "RAMPS", "CHANNELS ON/OFF" };
@@ -3527,6 +4145,42 @@ void drawPinScreen() {
   oledCommit();
 }
 
+void drawText() {
+  startScreen();
+  display.setCursor(0, 0);
+  if (txtStage == 0) display.print("HIDDEN NETWORK NAME");
+  else               display.printf("PASS: %.14s", txtSsid);
+  // введённый текст: последние 20 символов и курсор
+  char line[24];
+  int from = txtLen > 20 ? txtLen - 20 : 0;
+  snprintf(line, sizeof(line), "%s_", txtBuf + from);
+  display.setCursor(0, 14);  display.print(line);
+  display.setCursor(104, 0); display.printf("%d", txtLen);
+  // выбранный символ крупно, соседние мелко
+  const int total = TXT_N + 2;
+  for (int k = -2; k <= 2; k++) {
+    int idx = ((txtCur + k) % total + total) % total;
+    char t[5];
+    if (idx < TXT_N)       snprintf(t, sizeof(t), "%c", TXT_SET[idx] == ' ' ? '_' : TXT_SET[idx]);
+    else if (idx == TXT_N) snprintf(t, sizeof(t), "DEL");
+    else                   snprintf(t, sizeof(t), "OK");
+    if (k == 0) {
+      display.setTextSize(2);
+      display.fillRect(46, 28, 36, 18, SH110X_WHITE);
+      display.setTextColor(SH110X_BLACK);
+      display.setCursor(64 - (int)strlen(t) * 6, 30); display.print(t);
+      display.setTextSize(1);
+      display.setTextColor(SH110X_WHITE);
+    } else {
+      display.setCursor(64 + k * 22 - (k > 0 ? 0 : 0) - (int)strlen(t) * 3 + (k > 0 ? 6 : -6), 34);
+      display.print(t);
+    }
+  }
+  hintLine("%d:char %d:ok/del");
+  drawBattery();
+  oledCommit();
+}
+
 void drawConfirm() {
   startScreen();
   switch (confAct) {
@@ -3551,6 +4205,17 @@ void drawConfirm() {
         display.setCursor(0, 24);  display.print("Bind ID is kept.");
         display.setCursor(0, 34);  display.print("Pult will restart.");
       }
+      break;
+    case CA_NETDEL:
+      display.setCursor(0, 0);   display.print("DELETE NETWORK?");
+      display.setCursor(0, 14);  display.printf("%.21s", netSsid[confIdx < NET_MAX ? confIdx : 0]);
+      display.setCursor(0, 24);  display.print("Name and password");
+      display.setCursor(0, 34);  display.print("are erased.");
+      break;
+    case CA_NETALL:
+      display.setCursor(0, 0);   display.print("FORGET ALL WI-FI?");
+      display.setCursor(0, 14);  display.print("All saved networks");
+      display.setCursor(0, 24);  display.print("are erased.");
       break;
     case CA_FR_RX:
       display.setCursor(0, 0);   display.print("RESET RECEIVER?");
@@ -3706,6 +4371,7 @@ void drawScreen() {
         case MS_DBGPAGE: drawDbgPage(); break;
         case MS_PIN:     drawPinScreen(); break;
         case MS_CONFIRM: drawConfirm(); break;
+        case MS_TEXTIN:  drawText(); break;
         case MS_BINDRUN: drawBindRun(); break;
         case MS_BINDID:  drawBindId(); break;
         case MS_TXPWR:   drawTxPwr(); break;
@@ -3718,6 +4384,7 @@ void drawScreen() {
     case ST_CAL_RES: drawCal(); break;
     case ST_ESTOP:   drawEstop(); break;
     case ST_WIFI:    drawWifi(); break;
+    case ST_GH:      drawGh(); break;
   }
 }
 
@@ -3750,6 +4417,7 @@ void stepLogic(unsigned long now) {
       }
       if (menuScr == MS_BINDRUN) bindTick(now);
       if (menuScr == MS_RXWIFI) rxWifiTick(now);
+      if (menuScr == MS_NETPICK) netPickTick(now);
       navStep(now);
       break;
     case ST_CAL_C:   calCenterTick(now); break;
@@ -3784,6 +4452,9 @@ void handleMenuButton() {
     case ST_WIFI:
       if (btnMenu.shortEv && !upActive) wifiStop("button");
       break;
+    case ST_GH:
+      if (btnMenu.shortEv && ghStage != G_DL && ghStage != G_OK) ghStop(ghStage == G_ASK ? "declined" : "button");
+      break;
     case ST_CAL_C:
     case ST_CAL_R:
       if (btnMenu.shortEv) cancelCal();
@@ -3809,10 +4480,6 @@ void i2cScan() {
 
 // ============ SETUP ============
 void setup() {
-  Serial.begin(115200);
-  unsigned long t = millis();
-  while (!Serial && (millis() - t) < 1500) { }
-
   LOGF("=== PULT FW %s (no radio, RX simulator) ===", FW_VERSION);
 
   pinMode(BTN_MENU_PIN, INPUT_PULLUP);
@@ -3848,6 +4515,7 @@ void setup() {
   }
 
   loadConfig();
+  netLoad();
   simInit();
   for (int i = 0; i < NUM_CH; i++) { raw[i] = cenV[i]; ctl[i] = 0; }
 
@@ -3865,7 +4533,7 @@ void loop() {
 
   if (estop.changed) {
     LOGF("E-STOP: %s", estop.state ? "ACTIVE (pressed or wire break)" : "released");
-    if (estop.state) { if (state != ST_WIFI) goEstop(); }       // в режиме Wi-Fi это делает wifiTick
+    if (estop.state) { if (state != ST_WIFI && state != ST_GH) goEstop(); }   // в режимах Wi-Fi это делают wifiTick / ghTick
     else if (state == ST_ESTOP) goSafe();
   }
   if (btnMenu.changed) {
@@ -3879,6 +4547,7 @@ void loop() {
 
   handleMenuButton();
   wifiTick(now);
+  ghTick(now);
 
   static unsigned long lastRead = 0;
   if ((now - lastRead) >= READ_PERIOD_MS) {
@@ -3907,15 +4576,4 @@ void loop() {
     dispUs = micros() - t0;
   }
 
-  static unsigned long lastLog = 0;
-  if (state != ST_BOOT && (now - lastLog) >= LOG_PERIOD_MS) {
-    lastLog = now;
-    Serial.printf("[%s] RAW:", stateName());
-    for (int i = 0; i < NUM_CH; i++) Serial.printf(" %6d", raw[i]);
-    Serial.print(" | VAL:");
-    for (int i = 0; i < NUM_CH; i++) Serial.printf(" %4d", val(i));
-    Serial.print(" | CTL:");
-    for (int i = 0; i < NUM_CH; i++) Serial.printf(" %4d", ctl[i]);
-    Serial.printf(" | ads8=%lums draw=%lums send=%lums\n", readUs / 1000, dispUs / 1000, oledFlushUs / 1000);
-  }
 }
