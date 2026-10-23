@@ -187,6 +187,7 @@ enum BatKind { BE_DIV, BE_FULL, BE_EMPTY, BE_WARN, BE_CRIT };
 enum SimMode { SIM_OFF, SIM_LINK, SIM_LOST };
 struct Nav { bool armed; unsigned long since; unsigned long held; unsigned long last; int dir; };
 struct EvCfg { uint8_t en, color, pat, whereAll, ival, scr; };
+struct NetFound { char ssid[33]; int8_t rssi; };      // найденная Wi-Fi сеть (тип выше функций: Arduino делает прототипы)
 
 // порядок = порядок в меню: частое и важное сверху, опасное и временное внизу, Back последний
 enum TxItem { TX_CAL, TX_CHSET, TX_PWR, TX_BIND, TX_TRT, TX_SCR, TX_LED, TX_BAT, TX_LOG, TX_DBG, TX_WIFI, TX_GH, TX_NETS, TX_SIM, TX_FR, TX_BACK, TX_COUNT };
@@ -754,7 +755,6 @@ int     idxMain = 0, idxTx = 0, idxCal = 0, idxChList = 0, idxChEdit = 0, idxBat
 int     idxLed = 0, idxEvList = 0, idxEvEdit = 0, idxPreset = 0, idxRx = 0, idxRxCh = 0, idxRxDir = 0;
 int     idxNets = 0;
 // выбор сети (скан) и ввод текста с пульта
-struct NetFound { char ssid[33]; int8_t rssi; };
 NetFound pickNet[8];
 int     pickN = 0;
 bool    pickScanning = false;
