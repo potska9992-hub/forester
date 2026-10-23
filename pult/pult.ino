@@ -1,5 +1,13 @@
 // ============================================================
 // Пульт гидрораспределителя. Журнал версий
+//  0.3 - исправлено: Wi-Fi отключался сразу после запроса от телефона (ошибка сравнения времени)
+//  0.2 - Wi-Fi: адрес и пароль остаются на экране, пока страница не открыта (а не по первому запросу
+//        телефона); телефон получает ответ "интернет есть" и не отключается; причина выхода в сообщении
+//  0.1 - Wi-Fi Update: обновление прошивки с телефона (меню Transmitter -> Wi-Fi Update), пункт
+//        Receiver -> Wi-Fi Update (работает с радио, пока имитация). Нумерация: пока радио нет,
+//        версии 0.x; 1.0 будет вместе с радио. Содержит все изменения 1.2.
+//  1.2 - заставка FORESTER (2 с), экран тревог в рабочем режиме (у каждого события пункт Screen),
+//        Max Duty по умолчанию 60 %, настройка частоты телеметрии TELEM RATE (1..10, по умолчанию 3)
 //  1.1 - экран выводится по одной странице за проход цикла (цикл больше не замирает на 30 мс),
 //        шина I2C больше не падает до 100 кГц после каждого кадра, меню отсортированы
 //        по важности (Back / Exit всегда внизу), нумерация версий 1.x
@@ -14,6 +22,9 @@
 #include <Adafruit_MCP23X17.h>
 #include <Adafruit_ADS1X15.h>
 #include <esp_system.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Update.h>
 #include <stdarg.h>
 
 // ============ ПИНЫ И АДРЕСА ============
@@ -67,6 +78,16 @@
 #define DISP_PERIOD_MS  150
 #define LOG_PERIOD_MS   1000
 #define BOOT_MS         1500
+#define SPLASH_MS       2000       // заставка FORESTER перед Boot check
+#define ALERT_MIN_MS    2000       // короткое событие на экране тревог держится не меньше
+#define ALERT_SLOT_MS   2000       // при нескольких событиях каждое показывается столько
+#define WIFI_PASS       "88888888"      // пароль точки доступа (фиксированный)
+#define WIFI_ADDR       "192.168.4.1"
+#define WIFI_NOCONN_MS  120000UL        // 2 мин, если телефон не подключился
+#define WIFI_IDLE_MS    300000UL        // 5 мин без действий, если телефон подключён
+#define TELEM_RATE_MIN  1
+#define TELEM_RATE_MAX  10
+#define TELEM_RATE_DEF  3          // запросов телеметрии в секунду
 #define CAL_COUNT_MS    5000       // отсчёт перед записью центра
 #define CAL_AVG_MS      500
 #define CAL_RANGE_MS    10000
@@ -76,7 +97,8 @@
 #define HB_FLASH_MS     100        // длительность вспышки пульса
 
 // ============ ВЕРСИЯ ПРОШИВКИ ============
-#define FW_VERSION      "1.1"
+#define FW_VERSION      "0.3"
+#define PROJECT_NAME    "pult"      // имя устройства внутри метки прошивки (проверка при обновлении)
 #define FACTORY_PIN     1111       // код для Factory Reset
 #define DEF_BIND_ID     0xA5C3E17BUL
 #define BIND_TIMEOUT_MS 60000UL
@@ -137,27 +159,27 @@ Button btnMenu = { BTN_MENU_PIN, false, false, false, false, false, false, false
 Button estop   = { ESTOP_PIN,    true,  false, false, false, false, false, false, true, 0, 0 };
 
 // ============ ТИПЫ (объявлены ДО функций, иначе Arduino IDE ломает автопрототипы) ============
-enum State { ST_BOOT, ST_SAFE, ST_RUN, ST_MENU, ST_CAL_C, ST_CAL_R, ST_CAL_RES, ST_ESTOP };
+enum State { ST_BOOT, ST_SAFE, ST_RUN, ST_MENU, ST_CAL_C, ST_CAL_R, ST_CAL_RES, ST_ESTOP, ST_WIFI };
 enum MenuScr {
   MS_MAIN, MS_TX, MS_CAL, MS_CHLIST, MS_CHEDIT, MS_DZ,
   MS_BAT, MS_BATEDIT, MS_LED, MS_LEDSTAT, MS_EVLIST, MS_EVEDIT, MS_PRESET, MS_TEST,
   MS_EXPO, MS_MAXV,
-  MS_SCREENS, MS_SCRITEM, MS_SCRMOVE, MS_POWER, MS_TXPWR,
+  MS_SCREENS, MS_SCRITEM, MS_SCRMOVE, MS_POWER, MS_TXPWR, MS_TRATE,
   MS_BIND, MS_BINDRUN, MS_BINDID, MS_EVLOG,
   MS_DBGLIST, MS_DBGDESC, MS_DBGPAGE,
   MS_PIN, MS_FRTARGET, MS_CONFIRM,
-  MS_RX, MS_RXCH, MS_RXDIR, MS_RXGLOB, MS_RXEDIT, MS_RXSTAT
+  MS_RX, MS_RXCH, MS_RXDIR, MS_RXGLOB, MS_RXEDIT, MS_RXSTAT, MS_RXWIFI
 };
 enum ChItem { CI_TYPE, CI_REV, CI_EN, CI_EXPO, CI_MAX, CI_LED, CI_BACK };
-enum EvItem { EI_EN, EI_COLOR, EI_PAT, EI_INT, EI_WHERE, EI_FIXED, EI_BACK };
+enum EvItem { EI_EN, EI_COLOR, EI_PAT, EI_INT, EI_WHERE, EI_SCR, EI_FIXED, EI_BACK };
 enum BatKind { BE_DIV, BE_FULL, BE_EMPTY, BE_WARN, BE_CRIT };
 enum SimMode { SIM_OFF, SIM_LINK, SIM_LOST };
 struct Nav { bool armed; unsigned long since; unsigned long held; unsigned long last; int dir; };
-struct EvCfg { uint8_t en, color, pat, whereAll, ival; };
+struct EvCfg { uint8_t en, color, pat, whereAll, ival, scr; };
 
 // порядок = порядок в меню: частое и важное сверху, опасное и временное внизу, Back последний
-enum TxItem { TX_CAL, TX_CHSET, TX_PWR, TX_BIND, TX_SCR, TX_LED, TX_BAT, TX_LOG, TX_DBG, TX_SIM, TX_FR, TX_BACK, TX_COUNT };
-enum RxTopic { RT_LIMIT, RT_DUTY, RT_MAXD, RT_RAMP, RT_CHEN, RT_GLOB, RT_STAT, RT_BACK, RT_COUNT };
+enum TxItem { TX_CAL, TX_CHSET, TX_PWR, TX_BIND, TX_TRT, TX_SCR, TX_LED, TX_BAT, TX_LOG, TX_DBG, TX_WIFI, TX_SIM, TX_FR, TX_BACK, TX_COUNT };
+enum RxTopic { RT_LIMIT, RT_DUTY, RT_MAXD, RT_RAMP, RT_CHEN, RT_GLOB, RT_STAT, RT_WIFI, RT_BACK, RT_COUNT };
 enum ScrId { SC_MAIN, SC_TX, SC_RX, SC_LINK, SC_POWER, SC_LOG };
 enum DbgPage { DP_RADIO, DP_TELEM, DP_LIM, DP_RAW, DP_SYS, DP_LOG };
 enum ConfAct { CA_CLEARLOG, CA_FORGET, CA_FR_TX, CA_FR_RX };
@@ -182,7 +204,7 @@ struct Telem {
 const RxParamDef RXP[NUM_RXP] = {
   { "LIMIT",     PS_SOL,    5,  100,  1,  20, F_AMP   },   // 0.5..10.0 А, по умолчанию 2.0 А
   { "DUTY",      PS_SOL,    0,  100,  1,  30, F_PCT   },   // стартовый ШИМ
-  { "MAX DUTY",  PS_SOL,   10,  100,  1, 100, F_PCT   },
+  { "MAX DUTY",  PS_SOL,   10,  100,  1,  60, F_PCT   },   // по умолчанию 60 %
   { "RAMP UP",   PS_CH,     0, 2000, 50, 200, F_MS    },
   { "RAMP DN",   PS_CH,     0, 2000, 50, 200, F_MS    },
   { "ENABLE",    PS_CH,     0,    1,  1,   1, F_ONOFF },
@@ -258,20 +280,20 @@ void updateButton(Button &b) {
 #define LED_OFF   3
 const uint8_t DEF_TYPE[NUM_CH] = { T_JOY, T_JOY, T_SW3, T_JOY, T_JOY, T_SW3, T_JOY, T_JOY };
 
-// Стандартные настройки событий (пресет Standard)   en color pat        whereAll ival
+// Стандартные настройки событий (пресет Standard)   en color pat        whereAll ival scr
 const EvCfg DEF_EV[NUM_EV] = {
-  { 1, COL_RED,   PAT_FAST,   1, 0 },   // 0  E-Stop пульта (фиксировано)
-  { 1, COL_RED,   PAT_FAST,   1, 0 },   // 1  аварийная кнопка приёмника
-  { 1, COL_AMBER, PAT_SLOW,   1, 0 },   // 2  нет связи
-  { 1, COL_RED,   PAT_ALT,    1, 0 },   // 3  неисправность приёмника
-  { 1, COL_RED,   PAT_FAST,   0, 0 },   // 4  перегрузка секции
-  { 1, COL_AMBER, PAT_FAST,   0, 0 },   // 5  обрыв соленоида
-  { 1, COL_RED,   PAT_SLOW,   0, 0 },   // 6  лимит тока достигнут
-  { 1, COL_RED,   PAT_SLOW,   0, 0 },   // 7  Safe Start: канал не в центре
-  { 1, COL_GREEN, PAT_PULSE,  1, 0 },   // 8  связь восстановлена
-  { 1, COL_GREEN, PAT_PULSE,  1, 2 },   // 9  пульс (ival 2 = 5 с)
-  { 0, COL_AMBER, PAT_DOUBLE, 1, 0 },   // 10 батарея пульта (по умолчанию выключено)
-  { 1, COL_AMBER, PAT_DOUBLE, 1, 0 }    // 11 батарея приёмника
+  { 1, COL_RED,   PAT_FAST,   1, 0, 0 },   // 0  E-Stop пульта (фиксировано, свой экран)
+  { 1, COL_RED,   PAT_FAST,   1, 0, 1 },   // 1  аварийная кнопка приёмника
+  { 1, COL_AMBER, PAT_SLOW,   1, 0, 1 },   // 2  нет связи
+  { 1, COL_RED,   PAT_ALT,    1, 0, 1 },   // 3  неисправность приёмника
+  { 1, COL_RED,   PAT_FAST,   0, 0, 1 },   // 4  перегрузка секции
+  { 1, COL_AMBER, PAT_FAST,   0, 0, 1 },   // 5  обрыв соленоида
+  { 1, COL_RED,   PAT_SLOW,   0, 0, 0 },   // 6  лимит тока достигнут
+  { 1, COL_RED,   PAT_SLOW,   0, 0, 0 },   // 7  Safe Start: канал не в центре (свой экран)
+  { 1, COL_GREEN, PAT_PULSE,  1, 0, 0 },   // 8  связь восстановлена
+  { 1, COL_GREEN, PAT_PULSE,  1, 2, 0 },   // 9  пульс (ival 2 = 5 с)
+  { 0, COL_AMBER, PAT_DOUBLE, 1, 0, 0 },   // 10 батарея пульта (по умолчанию выключено)
+  { 1, COL_AMBER, PAT_DOUBLE, 1, 0, 0 }    // 11 батарея приёмника
 };
 const char* EV_NAME[NUM_EV] = {
   "E-Stop pult", "RX alarm btn", "No link", "RX fault", "Overload", "Open circuit",
@@ -310,20 +332,25 @@ const char* SCR_NAME[NUM_SCR] = { "Main", "TX channels", "RX channels", "Link", 
 const uint8_t  TXP_LIST[8] = { 2, 5, 8, 10, 14, 17, 20, 22 };
 const uint16_t TXP_MW[8]   = { 2, 3, 6, 10, 25, 50, 100, 158 };
 uint8_t  txPower = TX_PWR_DEF;
+uint8_t  telemRate = TELEM_RATE_DEF;   // запросов телеметрии в секунду (пульт -> приёмник), 1..10
 uint32_t bindId = DEF_BIND_ID;
 
 void keyOf(char* k, size_t n, char p, int i) { snprintf(k, n, "%c%d", p, i); }
 
-uint16_t packEv(const EvCfg &c) {
-  return (uint16_t)((c.en & 1) | ((c.color & 3) << 1) | ((c.pat & 7) << 3) | ((c.whereAll & 1) << 6) | ((c.ival & 3) << 7));
+// Бит 9 хранит отличие Screen от значения по умолчанию: старые записи (бит 0) автоматически
+// получают стандартное значение Screen, миграция не нужна.
+uint16_t packEv(const EvCfg &c, int e) {
+  uint16_t d = (c.scr != DEF_EV[e].scr) ? 1 : 0;
+  return (uint16_t)((c.en & 1) | ((c.color & 3) << 1) | ((c.pat & 7) << 3) | ((c.whereAll & 1) << 6) | ((c.ival & 3) << 7) | (d << 9));
 }
-EvCfg unpackEv(uint16_t v) {
+EvCfg unpackEv(uint16_t v, int e) {
   EvCfg c;
   c.en = v & 1;
   c.color = (v >> 1) & 3;
   c.pat = (v >> 3) & 7;
   c.whereAll = (v >> 6) & 1;
   c.ival = (v >> 7) & 3;
+  c.scr = ((v >> 9) & 1) ? (DEF_EV[e].scr ? 0 : 1) : DEF_EV[e].scr;
   if (c.color > COL_AMBER) c.color = COL_AMBER;
   if (c.pat > PAT_ALT) c.pat = PAT_STEADY;
   return c;
@@ -494,6 +521,7 @@ void loadScreens() {
 void saveRadio() {
   prefs.begin("radio", false);
   prefs.putUChar("txp", txPower);
+  prefs.putUChar("trt", telemRate);
   prefs.end();
 }
 
@@ -538,7 +566,7 @@ void loadConfig() {
   for (int e = 0; e < NUM_EV; e++) {
     snprintf(k, sizeof(k), "e%d", e);
     uint16_t v = prefs.getUShort(k, 0xFFFF);
-    ev[e] = (v == 0xFFFF) ? DEF_EV[e] : unpackEv(v);
+    ev[e] = (v == 0xFFFF) ? DEF_EV[e] : unpackEv(v, e);
   }
   prefs.end();
 
@@ -559,7 +587,9 @@ void loadConfig() {
 
   prefs.begin("radio", false);
   uint8_t tp = prefs.getUChar("txp", TX_PWR_DEF);
+  uint8_t tr = prefs.getUChar("trt", TELEM_RATE_DEF);
   prefs.end();
+  telemRate = (tr < TELEM_RATE_MIN || tr > TELEM_RATE_MAX) ? TELEM_RATE_DEF : tr;
   txPower = TX_PWR_DEF;
   for (int i = 0; i < 8; i++) if (TXP_LIST[i] == tp) txPower = tp;
 
@@ -617,7 +647,7 @@ void saveEv(int e) {
   char k[8];
   snprintf(k, sizeof(k), "e%d", e);
   prefs.begin("alerts", false);
-  prefs.putUShort(k, packEv(ev[e]));
+  prefs.putUShort(k, packEv(ev[e], e));
   prefs.end();
 }
 
@@ -750,6 +780,7 @@ const char* stateName() {
     case ST_CAL_R:   return "CAL-R";
     case ST_CAL_RES: return "CAL-RES";
     case ST_ESTOP:   return "ESTOP";
+    case ST_WIFI:    return "WIFI";
   }
   return "?";
 }
@@ -764,6 +795,24 @@ void toast(const char* t) {
   toastUntil = millis() + TOAST_MS;
 }
 bool toastActive() { return (long)(toastUntil - millis()) > 0; }
+
+// ---- Wi-Fi Update: состояние (реализация ниже, после goSafe) ----
+bool wifiUp = false;             // точка доступа включена (state == ST_WIFI)
+bool wifiEver = false;           // телефон хотя бы раз подключился
+bool wifiPage = false;           // страница открыта (после этого адрес и пароль убираются с экрана)
+unsigned long wifiT0 = 0, wifiAct = 0;
+bool upActive = false;           // идёт приём файла прошивки
+bool upOk = false;
+char upErr[48] = "";
+char upVer[16] = "";
+size_t upTotal = 0, upDone = 0;
+char wifiSsid[16] = "";
+uint8_t rxWifiSt = 0;            // Wi-Fi приёмника: 0 выкл, 1 запрос отправлен, 2 приёмник ответил
+unsigned long rxWifiAt = 0;
+char rxWifiSsid[16] = "";
+void wifiBegin();
+void wifiStop(const char* why);
+void rxWifiBegin();
 
 // ============ БАТАРЕЯ ============
 float vbat = 0;                 // напряжение, показываемое на экране
@@ -983,7 +1032,7 @@ bool leverArmed = false;           // тестовый джойстик разр
 
 bool isRxScreen() {
   return menuScr == MS_RX || menuScr == MS_RXCH || menuScr == MS_RXDIR || menuScr == MS_RXGLOB ||
-         menuScr == MS_RXEDIT || menuScr == MS_RXSTAT;
+         menuScr == MS_RXEDIT || menuScr == MS_RXSTAT || menuScr == MS_RXWIFI;
 }
 
 // все включённые каналы, кроме тумблеров навигации и тестового джойстика, в центре
@@ -1121,6 +1170,7 @@ int evItems(int e, uint8_t* ids) {
   if (e == EV_HEART) ids[n++] = EI_INT;
   else               ids[n++] = EI_PAT;
   if (e >= EV_OVERLOAD && e <= EV_NOTCTR) ids[n++] = EI_WHERE;
+  if (e != EV_NOTCTR && e != EV_HEART) ids[n++] = EI_SCR;       // у E-Stop и Safe Start свои экраны
   ids[n++] = EI_BACK;
   return n;
 }
@@ -1205,7 +1255,7 @@ const char* presetName() {
       EvCfg c = ev[e];
       if (e == EV_RXALARM || e == EV_NOLINK) c.en = t[e].en;
       if (c.en != t[e].en || c.color != t[e].color || c.pat != t[e].pat ||
-          c.whereAll != t[e].whereAll || c.ival != t[e].ival) same = false;
+          c.whereAll != t[e].whereAll || c.ival != t[e].ival || c.scr != t[e].scr) same = false;
     }
     if (same) return names[p];
   }
@@ -1435,7 +1485,7 @@ void menuLabel(int i, char* b, size_t n) {
   static const char* ledM[]  = { "Both", "Red", "Green", "Off" };
   static const char* simN[]  = { "OFF", "LINK", "LOST" };
   static const char* ledL[]  = { "Status LEDs", "Alert events", "Heartbeat", "Presets", "Test alerts", "Reset alerts", "Back" };
-  static const char* rxL[]   = { "Current Limits", "Start Duty", "Max Duty", "Ramps", "Channels On/Off", "Global", "RX Status", "Back" };
+  static const char* rxL[]   = { "Current Limits", "Start Duty", "Max Duty", "Ramps", "Channels On/Off", "Global", "RX Status", "Wi-Fi Update", "Back" };
   static const char* dbgL[]  = { "Radio", "Telemetry", "Limits", "RAW ADC", "System", "Log", "Back" };
   switch (menuScr) {
     case MS_MAIN: snprintf(b, n, "%s", mainL[i]); break;
@@ -1448,8 +1498,10 @@ void menuLabel(int i, char* b, size_t n) {
         case TX_SCR:   snprintf(b, n, "Screens"); break;
         case TX_PWR:   snprintf(b, n, "Power"); break;
         case TX_BIND:  snprintf(b, n, "Bind"); break;
+        case TX_TRT:   snprintf(b, n, "Telem rate %d/s", telemRate); break;
         case TX_LOG:   snprintf(b, n, "Event Log"); break;
         case TX_DBG:   snprintf(b, n, "Debug"); break;
+        case TX_WIFI:  snprintf(b, n, "Wi-Fi Update"); break;
         case TX_FR:    snprintf(b, n, "Factory Reset"); break;
         case TX_SIM:   snprintf(b, n, "Sim RX: %s", simN[simMode]); break;
         default:       snprintf(b, n, "Back"); break;
@@ -1516,6 +1568,7 @@ void menuLabel(int i, char* b, size_t n) {
         case EI_PAT:   snprintf(b, n, "Pattern: %s", PAT_NAME[c.pat]); break;
         case EI_INT:   snprintf(b, n, "Every: %d s", HB_SEC[c.ival]); break;
         case EI_WHERE: snprintf(b, n, "Where: %s", c.whereAll ? "All" : "Channel"); break;
+        case EI_SCR:   snprintf(b, n, "Screen: %s", c.scr ? "ON" : "OFF"); break;
         case EI_FIXED: snprintf(b, n, "Fixed: red fast"); break;
         default:       snprintf(b, n, "Back"); break;
       }
@@ -1763,8 +1816,10 @@ void menuSelect(int i) {
         case TX_SCR:   gotoScr(MS_SCREENS, idxScr); break;
         case TX_PWR:   gotoScr(MS_POWER, idxPower); break;
         case TX_BIND:  gotoScr(MS_BIND, idxBind); break;
+        case TX_TRT:   editInt = telemRate; gotoScr(MS_TRATE, 0); break;
         case TX_LOG:   gotoScr(MS_EVLOG, idxEvLog); break;
         case TX_DBG:   gotoScr(MS_DBGLIST, idxDbg); break;
+        case TX_WIFI:  wifiBegin(); break;
         case TX_FR:    startPin(); break;
         case TX_SIM:
           simMode = (SimMode)((simMode + 1) % 3);      // откат и журнал делает eventsTick
@@ -1893,6 +1948,7 @@ void menuSelect(int i) {
         case EI_PAT:   c.pat = (c.pat + 1) % 6; saveEv(evSel); break;
         case EI_INT:   c.ival = (c.ival + 1) % 4; saveEv(evSel); break;
         case EI_WHERE: c.whereAll = !c.whereAll; saveEv(evSel); break;
+        case EI_SCR:   c.scr = !c.scr; saveEv(evSel); break;
         case EI_FIXED: break;
         default:
           if (evFromLed) gotoScr(MS_LED, idxLed);
@@ -1911,6 +1967,11 @@ void menuSelect(int i) {
       rxTopic = i;
       if (i == RT_GLOB)      gotoScr(MS_RXGLOB, idxRxGlob);
       else if (i == RT_STAT) gotoScr(MS_RXSTAT, 0);
+      else if (i == RT_WIFI) {
+        if (!rxLinked())            toast("RX not connected");
+        else if (!othersCentered()) toast("Center controls");
+        else                        rxWifiBegin();
+      }
       else if (i == RT_BACK) gotoScr(MS_MAIN, idxMain);
       else                   gotoScr(MS_RXCH, idxRxCh);
       break;
@@ -2016,6 +2077,7 @@ void menuBack() {
     case MS_SCRITEM:  gotoScr(MS_SCREENS, idxScr); break;
     case MS_SCRMOVE:  saveScreens(); gotoScr(MS_SCRITEM, 0); break;
     case MS_TXPWR:    gotoScr(MS_POWER, idxPower); break;
+    case MS_TRATE:    gotoScr(MS_TX, idxTx); break;
     case MS_BINDRUN:
     case MS_BINDID:   gotoScr(MS_BIND, idxBind); break;
     case MS_DBGDESC:
@@ -2027,12 +2089,13 @@ void menuBack() {
     case MS_RXGLOB:   gotoScr(MS_RX, idxRx); break;
     case MS_RXEDIT:   rxEditCancel(); break;
     case MS_RXSTAT:   gotoScr(MS_RX, idxRx); break;
+    case MS_RXWIFI:   rxWifiSt = 0; gotoScr(MS_RX, idxRx); break;
   }
 }
 
 void navStep(unsigned long now) {
   bool numeric = (menuScr == MS_DZ || menuScr == MS_EXPO || menuScr == MS_MAXV ||
-                  menuScr == MS_BATEDIT || menuScr == MS_RXEDIT || menuScr == MS_TXPWR);
+                  menuScr == MS_BATEDIT || menuScr == MS_RXEDIT || menuScr == MS_TXPWR || menuScr == MS_TRATE);
   int a = navPoll(MENU_NAV_CH, navA, now, numeric);
   int b = navPoll(MENU_ENTER_CH, navB, now, false);
 
@@ -2088,6 +2151,16 @@ void navStep(unsigned long now) {
           gotoScr(MS_POWER, idxPower);
         }
         break;
+      case MS_TRATE:
+        if (a) editInt = constrain(editInt + a, TELEM_RATE_MIN, TELEM_RATE_MAX);
+        if (b > 0) {
+          telemRate = editInt;
+          saveRadio();
+          LOGF("Telemetry rate -> %d/s", telemRate);
+          toast("Saved");
+          gotoScr(MS_TX, idxTx);
+        }
+        break;
       default:
         break;
     }
@@ -2097,6 +2170,7 @@ void navStep(unsigned long now) {
   switch (menuScr) {
     case MS_DBGPAGE:
     case MS_RXSTAT:
+    case MS_RXWIFI:
     case MS_BINDID:
       if (b) menuBack();
       return;
@@ -2235,6 +2309,275 @@ void goSafe() {
   logLine("STATE: SAFE START (set all controls to center)");
 }
 
+// ============ WI-FI UPDATE (обновление прошивки с телефона) ============
+void drawScreen();
+void oledStep();
+bool oledBusy();
+
+// Метка прошивки: страница и пульт ищут её внутри файла, так определяется, для какого устройства файл
+static const char FW_TAG[] __attribute__((used)) = "FWTAG:" PROJECT_NAME ":" FW_VERSION ";";
+
+static const char WIFI_PAGE[] PROGMEM = R"HTML(<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>FORESTER</title><style>
+:root{--bg:#f1f2ef;--c:#fff;--fg:#14181a;--m:#586166;--l:#d6dad5;--a:#1f5d3a;--af:#fff;--ok:#1f5d3a;--w:#a8480f;--b:#b3261e;--t:#e2e5e0}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1213;--c:#171b1d;--fg:#eceeed;--m:#9aa3a8;--l:#2a3033;--a:#5fbf86;--af:#07130c;--ok:#5fbf86;--w:#e5904f;--b:#ff8d84;--t:#262c2f;color-scheme:dark}}
+*{box-sizing:border-box}body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,sans-serif}
+.w{max-width:460px;margin:0 auto;display:flex;flex-direction:column;gap:12px}
+.top{display:flex;justify-content:space-between;align-items:center}
+.pill{background:#000;color:#fff;border-radius:999px;padding:5px 16px;font-weight:800;letter-spacing:.06em}
+.lg{background:none;border:1px solid var(--l);color:var(--m);border-radius:8px;padding:6px 10px;font-size:13px}
+h1{font-size:24px;margin:2px 0}
+.cd{background:var(--c);border:1px solid var(--l);border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:10px}
+h2{margin:0;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--m)}
+.r{display:flex;justify-content:space-between;gap:12px;font-size:14px}.r b{font-family:ui-monospace,monospace;font-weight:500;text-align:right;overflow-wrap:anywhere}
+.pk{display:block;border:2px dashed var(--l);border-radius:10px;padding:18px 12px;text-align:center;cursor:pointer}
+.pk span{display:block;color:var(--m);font-size:14px}
+input[type=file]{position:absolute;width:1px;height:1px;opacity:0}
+button.m{background:var(--a);color:var(--af);border:0;border-radius:10px;padding:14px;font:700 16px system-ui;min-height:48px}
+button.m:disabled{opacity:.35}
+.bar{height:14px;background:var(--t);border-radius:7px;overflow:hidden}.bar i{display:block;height:100%;width:0;background:var(--a)}
+.ok{color:var(--ok)}.bad{color:var(--b)}.wn{color:var(--w)}
+.ms{border:1px solid var(--l);border-radius:8px;padding:10px 12px;font-size:14px}
+[hidden]{display:none!important}
+</style></head><body><div class="w">
+<div class="top"><span class="pill">FORESTER</span><button class="lg" id="lg">RU/EN</button></div>
+<h1 id="h1"></h1>
+<div class="cd"><h2 id="t0"></h2>
+<div class="r"><span id="k1"></span><b id="v1">-</b></div>
+<div class="r"><span id="k2"></span><b id="v2">-</b></div>
+<div class="r"><span id="k3"></span><b id="v3">-</b></div></div>
+<div class="cd" id="c1"><h2 id="t1"></h2>
+<label class="pk" for="f"><b id="pt"></b><span id="ph"></span></label>
+<input type="file" id="f" accept=".bin">
+<div id="ck" hidden></div>
+<button class="m" id="go" disabled></button></div>
+<div class="cd" id="c2" hidden><h2 id="t2"></h2><div class="bar"><i id="b"></i></div>
+<div class="r"><span id="st"></span><b id="pc">0%</b></div><div class="ms" id="wm"></div></div>
+<div class="cd" id="c3" hidden><div class="ms" id="rs"></div><button class="m" id="bk"></button></div>
+</div><script>
+var T={en:{h1:'Firmware update',t0:'This device',k1:'Device',k2:'Firmware',k3:'Network',t1:'New firmware',pt:'Choose .bin file',ph:'Sketch > Export Compiled Binary',
+ck1:'Firmware for',ck2:'Size',ck3:'Version',go:'Install',t2:'Installing',up:'Uploading',vf:'Verifying and installing',wm:'Do not switch off the device and do not leave the network.',
+ok:'Installed. The device is restarting, close this page.',wr:'Wrong firmware: this file is not for this device. Nothing was changed.',er:'Error: ',bk:'Back',nf:'Not a firmware file'},
+ru:{h1:'Обновление прошивки',t0:'Это устройство',k1:'Устройство',k2:'Прошивка',k3:'Сеть',t1:'Новая прошивка',pt:'Выбрать файл .bin',ph:'Скетч > Экспорт бинарного файла',
+ck1:'Прошивка для',ck2:'Размер',ck3:'Версия',go:'Установить',t2:'Установка',up:'Загрузка',vf:'Проверка и установка',wm:'Не выключайте устройство и не отключайтесь от сети.',
+ok:'Установлено. Устройство перезагружается, закройте страницу.',wr:'Не та прошивка: файл не для этого устройства. Ничего не изменено.',er:'Ошибка: ',bk:'Назад',nf:'Это не файл прошивки'}};
+var $=function(i){return document.getElementById(i)},lang=(navigator.language||'en').slice(0,2)=='ru'?'ru':'en',D={dev:'',name:'-',ver:'-',net:'-'},F=null;
+function tx(k){return T[lang][k]}
+function ui(){var m={h1:'h1',t0:'t0',k1:'k1',k2:'k2',k3:'k3',t1:'t1',pt:'pt',ph:'ph',go:'go',t2:'t2',wm:'wm',bk:'bk'};for(var k in m)$(m[k]).textContent=tx(k);$('v1').textContent=D.name;$('v2').textContent=D.ver;$('v3').textContent=D.net;if(F)chk()}
+$('lg').onclick=function(){lang=lang=='en'?'ru':'en';ui()};
+function tag(u,d){var p='FWTAG:'+d+':',n=p.length;for(var i=0;i<u.length-n-2;i++){if(u[i]!==70)continue;var j=0;while(j<n&&u[i+j]===p.charCodeAt(j))j++;if(j===n&&u[i+n]>=48&&u[i+n]<=57){var s='';for(var k=i+n;k<i+n+12&&u[k]!==59&&u[k]!==0;k++)s+=String.fromCharCode(u[k]);return s}}return''}
+function chk(){var c=$('ck'),o='';c.hidden=false;if(F.v){o='<div class="r"><span>'+tx('ck1')+'</span><b class="ok">'+D.name+' &#10003;</b></div><div class="r"><span>'+tx('ck2')+'</span><b>'+Math.round(F.f.size/1024)+' KB</b></div><div class="r"><span>'+tx('ck3')+'</span><b class="wn">'+D.ver+' &rarr; '+F.v+'</b></div>'}else o='<div class="ms bad">'+tx(F.nf?'nf':'wr')+'</div>';c.innerHTML=o;$('go').disabled=!F.v}
+$('f').onchange=function(){var f=this.files[0];if(!f)return;$('pt').textContent=f.name;var r=new FileReader();r.onload=function(){var u=new Uint8Array(r.result),img=u[0]===233;F={f:f,v:img?tag(u,D.dev):'',nf:!img};chk()};r.readAsArrayBuffer(f)};
+function show(a){$('c1').hidden=a!=1;$('c2').hidden=a!=2;$('c3').hidden=a!=3}
+function fin(ok,m){show(3);$('rs').className='ms '+(ok?'ok':'bad');$('rs').textContent=m;$('bk').hidden=ok}
+$('bk').onclick=function(){show(1)};
+$('go').onclick=function(){show(2);$('st').textContent=tx('up');var x=new XMLHttpRequest(),d=new FormData();d.append('f',F.f,'fw.bin');x.open('POST','/update?size='+F.f.size);
+x.upload.onprogress=function(e){if(e.lengthComputable){var p=Math.round(e.loaded/e.total*100);$('b').style.width=p+'%';$('pc').textContent=p+'%';if(p>=100)$('st').textContent=tx('vf')}};
+x.onload=function(){var r;try{r=JSON.parse(x.responseText)}catch(e){r={ok:false,err:'?'}}fin(r.ok,r.ok?tx('ok'):(r.err==='wrong'?tx('wr'):tx('er')+r.err))};
+x.onerror=function(){fin(false,tx('er')+'connection')};x.send(d)};
+ui();show(1);fetch('/info').then(function(r){return r.json()}).then(function(j){D=j;ui()}).catch(function(){});
+</script></body></html>
+)HTML";
+
+WebServer server(80);
+static char    scanPre[24];
+static size_t  scanPreLen = 0;
+static uint8_t scanBuf[1536 + 64];
+static uint8_t scanTail[48];
+static size_t  scanTailLen = 0;
+static bool    upChecked = false, upFound = false;
+static bool    wifiRoutes = false;
+
+static void upFail(const char* msg) {
+  snprintf(upErr, sizeof(upErr), "%s", msg);
+  Update.abort();
+}
+
+// Ищет в потоке байт метку "FWTAG:pult:<версия>;" (может оказаться на стыке двух блоков)
+static void upScan(const uint8_t* d, size_t n, bool last) {
+  if (upFound) return;
+  const size_t need = scanPreLen + 12;
+  size_t carry = scanTailLen;
+  if (carry + n > sizeof(scanBuf)) n = sizeof(scanBuf) - carry;
+  memcpy(scanBuf, scanTail, carry);
+  memcpy(scanBuf + carry, d, n);
+  size_t tot = carry + n;
+  size_t lim = 0;
+  if (last) lim = (tot > scanPreLen) ? tot - scanPreLen : 0;
+  else      lim = (tot >= need) ? tot - need + 1 : 0;
+  for (size_t i = 0; i < lim && !upFound; i++) {
+    if (scanBuf[i] != 'F' || memcmp(scanBuf + i, scanPre, scanPreLen) != 0) continue;
+    uint8_t c = scanBuf[i + scanPreLen];
+    if (c < '0' || c > '9') continue;
+    size_t k = 0, j = i + scanPreLen;
+    while (j < tot && scanBuf[j] != ';' && scanBuf[j] != 0 && k < sizeof(upVer) - 1) upVer[k++] = (char)scanBuf[j++];
+    upVer[k] = 0;
+    if (j < tot && scanBuf[j] == ';') upFound = true;
+  }
+  size_t keep = need - 1;
+  if (keep > tot) keep = tot;
+  memcpy(scanTail, scanBuf + tot - keep, keep);
+  scanTailLen = keep;
+}
+
+static void wifiServiceDisplay() {            // экран и страницы остаются живыми, пока идёт приём файла
+  oledStep();
+  static unsigned long lastD = 0;
+  unsigned long now = millis();
+  if (okOled && !oledBusy() && (now - lastD) >= DISP_PERIOD_MS) { lastD = now; drawScreen(); }
+}
+
+static void wifiRoot() {
+  wifiAct = millis();
+  server.send_P(200, "text/html; charset=utf-8", WIFI_PAGE);
+}
+
+static void wifiInfo() {            // запрашивает скрипт страницы: страница реально открылась
+  wifiPage = true;
+  wifiAct = millis();
+  char b[160];
+  snprintf(b, sizeof(b), "{\"dev\":\"%s\",\"name\":\"PULT\",\"ver\":\"%s\",\"net\":\"%s\"}", PROJECT_NAME, FW_VERSION, wifiSsid);
+  server.send(200, "application/json", b);
+}
+
+// Проверки интернета: отвечаем "интернет есть", чтобы телефон не отключался от сети без интернета
+static void wifiOk204() { server.send(204, "text/plain", ""); }
+static void wifiOkApple() { server.send(200, "text/html", "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>"); }
+static void wifiOkMsft() { server.send(200, "text/plain", "Microsoft Connect Test"); }
+static void wifiOkNcsi() { server.send(200, "text/plain", "Microsoft NCSI"); }
+
+static void wifiRedirect() {                  // проверки интернета телефоном -> переход на страницу
+  server.sendHeader("Location", "http://" WIFI_ADDR "/", true);
+  server.send(302, "text/plain", "");
+}
+
+static void wifiUpload() {
+  HTTPUpload& up = server.upload();
+  wifiAct = millis();
+  if (up.status == UPLOAD_FILE_START) {
+    upActive = true; upOk = false; upChecked = false; upFound = false;
+    upErr[0] = 0; upVer[0] = 0; upDone = 0; scanTailLen = 0;
+    upTotal = (size_t)server.arg("size").toInt();
+    logLine("Wi-Fi Update: upload started");
+  } else if (up.status == UPLOAD_FILE_WRITE) {
+    if (upErr[0]) return;
+    if (!upChecked) {
+      const uint8_t* b = up.buf;
+      if (up.currentSize < 64 || b[0] != 0xE9 || (b[12] | (b[13] << 8)) != 9) { upFail("not an ESP32-S3 image"); return; }
+      if (!Update.begin(upTotal ? upTotal : UPDATE_SIZE_UNKNOWN)) { upFail(Update.errorString()); return; }
+      upChecked = true;
+    }
+    upScan(up.buf, up.currentSize, false);
+    if (Update.write(up.buf, up.currentSize) != up.currentSize) { upFail(Update.errorString()); return; }
+    upDone += up.currentSize;
+    wifiServiceDisplay();
+  } else if (up.status == UPLOAD_FILE_END) {
+    if (!upErr[0]) {
+      upScan(nullptr, 0, true);
+      if (!upChecked)       upFail("empty file");
+      else if (!upFound)    { upFail("wrong"); }
+      else if (Update.end(true)) { upOk = true; }
+      else                  upFail(Update.errorString());
+    }
+    upActive = false;
+    LOGF("Wi-Fi Update: upload end, %s %s", upOk ? "OK" : "FAIL", upOk ? upVer : upErr);
+  } else if (up.status == UPLOAD_FILE_ABORTED) {
+    if (upChecked) Update.abort();
+    upActive = false;
+    snprintf(upErr, sizeof(upErr), "aborted");
+  }
+}
+
+static void wifiUpdateDone() {
+  wifiAct = millis();
+  char b[96];
+  if (upOk) {
+    server.send(200, "application/json", "{\"ok\":true}");
+    restartAt = millis() + 2500UL;
+  } else {
+    snprintf(b, sizeof(b), "{\"ok\":false,\"err\":\"%s\"}", upErr[0] ? upErr : "unknown");
+    server.send(200, "application/json", b);
+  }
+}
+
+void wifiBegin() {
+  if (batLevel >= 1 && !batUsb) { toast("Battery low"); return; }
+  uint64_t mac = ESP.getEfuseMac();
+  snprintf(wifiSsid, sizeof(wifiSsid), "PULT-%02X%02X", (unsigned)((mac >> 32) & 0xFF), (unsigned)((mac >> 40) & 0xFF));
+  snprintf(scanPre, sizeof(scanPre), "FWTAG:%s:", PROJECT_NAME);
+  scanPreLen = strlen(scanPre);
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(wifiSsid, WIFI_PASS);
+  WiFi.setTxPower(WIFI_POWER_11dBm);
+  if (!wifiRoutes) {
+    server.on("/", HTTP_GET, wifiRoot);
+    server.on("/info", HTTP_GET, wifiInfo);
+    server.on("/update", HTTP_POST, wifiUpdateDone, wifiUpload);
+    server.on("/generate_204", HTTP_GET, wifiOk204);
+    server.on("/gen_204", HTTP_GET, wifiOk204);
+    server.on("/hotspot-detect.html", HTTP_GET, wifiOkApple);
+    server.on("/library/test/success.html", HTTP_GET, wifiOkApple);
+    server.on("/connecttest.txt", HTTP_GET, wifiOkMsft);
+    server.on("/ncsi.txt", HTTP_GET, wifiOkNcsi);
+    server.onNotFound(wifiRedirect);
+    wifiRoutes = true;
+  }
+  server.begin();
+  wifiUp = true; wifiEver = false; wifiPage = false;
+  upActive = false; upOk = false; upErr[0] = 0; upVer[0] = 0;
+  wifiT0 = millis(); wifiAct = wifiT0;
+  state = ST_WIFI;
+  navReset();
+  LOGF("Wi-Fi Update: on, net %s, pass %s, %s", wifiSsid, WIFI_PASS, WIFI_ADDR);
+}
+
+void wifiStop(const char* why) {
+  server.stop();
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_OFF);
+  wifiUp = false;
+  state = ST_MENU;
+  gotoScr(MS_TX, idxTx);
+  navReset();
+  LOGF("Wi-Fi Update: off (%s)", why);
+  char tb[20]; snprintf(tb, sizeof(tb), "Wi-Fi off: %.8s", why); toast(tb);
+  if (estop.state) goEstop();
+}
+
+void wifiTick(unsigned long now) {
+  if (state != ST_WIFI) return;
+  server.handleClient();
+  now = millis();                                           // handleClient мог обновить wifiAct позже, чем "now" из начала цикла
+  if (upActive) { wifiAct = now; return; }                 // во время приёма файла выхода и таймаутов нет
+  if (estop.state) { wifiStop("E-Stop"); return; }
+  if (WiFi.softAPgetStationNum() > 0 && !wifiEver) { wifiEver = true; wifiAct = now; }
+  if (!wifiEver) {
+    if ((long)(now - wifiT0) >= (long)WIFI_NOCONN_MS) wifiStop("no phone");
+  } else if ((long)(now - wifiAct) >= (long)WIFI_IDLE_MS) {
+    wifiStop("idle");
+  }
+}
+
+// Wi-Fi приёмника: с радио пульт отправит команду, приёмник ответит суффиксом имени сети.
+// Пока радио нет, ответ имитируется.
+void rxWifiBegin() {
+  rxWifiSt = 1;
+  rxWifiAt = millis();
+  rxWifiSsid[0] = 0;
+  gotoScr(MS_RXWIFI, 0);
+  logLine("RX Wi-Fi Update: requested (simulated)");
+}
+
+void rxWifiTick(unsigned long now) {
+  if (rxWifiSt == 1 && (now - rxWifiAt) >= 800) {
+    rxWifiSt = 2; rxWifiAt = now;
+    snprintf(rxWifiSsid, sizeof(rxWifiSsid), "RX-SIM1");
+  } else if (rxWifiSt == 2 && (now - rxWifiAt) >= WIFI_NOCONN_MS) {
+    rxWifiSt = 0;
+    toast("RX Wi-Fi closed");
+    gotoScr(MS_RX, idxRx);
+  }
+}
+
 // ============ СВЕТОДИОДЫ И СОБЫТИЯ ============
 int lastA = -1, lastB = -1;
 
@@ -2295,6 +2638,53 @@ void collectEvents(unsigned long now) {
     evChAct[EV_LIMIT]    |= tel.mLim;
   }
   // TODO радио: EV_RXALARM, EV_RXFAULT, EV_BATTRX
+}
+
+// ============ ЭКРАН ТРЕВОГ (только рабочий режим) ============
+// Событие с включёнными Enable и Screen заменяет экран крупной надписью, пока оно активно (не менее
+// ALERT_MIN_MS). Несколько событий показываются по очереди, порядок: от самого серьёзного.
+#define AL_SLOTS 9                       // 0..7: канал, 8: событие «на всё»
+#define AL_ALL   8
+static const uint8_t AL_ORDER[] = { EV_RXALARM, EV_NOLINK, EV_RXFAULT, EV_OVERLOAD, EV_OPEN, EV_LIMIT, EV_BATTRX, EV_BATTTX, EV_RESTORED };
+#define AL_N (int)(sizeof(AL_ORDER) / sizeof(AL_ORDER[0]))
+unsigned long alHold[NUM_EV][AL_SLOTS];
+bool alPrev[NUM_EV][AL_SLOTS];
+int  alShown = -1;                       // e * 16 + слот, -1: тревоги нет
+int  alIdx = 0, alCnt = 0;               // номер показанной и сколько всего
+unsigned long alShownAt = 0;
+
+bool alPerChannel(int e) { return e == EV_OVERLOAD || e == EV_OPEN || e == EV_LIMIT; }
+
+void alertTick(unsigned long now) {
+  if (state != ST_RUN) { alShown = -1; alCnt = 0; return; }
+  collectEvents(now);
+  uint8_t list[AL_N * AL_SLOTS];
+  int n = 0;
+  for (int k = 0; k < AL_N; k++) {
+    int e = AL_ORDER[k];
+    EvCfg c = cfgOf(e);
+    bool on = c.en && c.scr;
+    for (int sl = 0; sl < AL_SLOTS; sl++) {
+      bool act;
+      if (alPerChannel(e)) act = (sl < NUM_CH) && ((evChAct[e] >> sl) & 1);
+      else                 act = (sl == AL_ALL) && evAllAct[e];
+      if (act && !alPrev[e][sl]) alHold[e][sl] = now + ALERT_MIN_MS;
+      alPrev[e][sl] = act;
+      if (on && (act || (long)(alHold[e][sl] - now) > 0)) list[n++] = (uint8_t)(e * 16 + sl);
+    }
+  }
+  alCnt = n;
+  if (n == 0) { alShown = -1; return; }
+  int idx = -1;
+  for (int i = 0; i < n; i++) if (list[i] == alShown) idx = i;
+  if (idx < 0) {                          // первое показание или текущее ушло
+    alShown = list[0]; alShownAt = now; alIdx = 0;
+  } else if (n > 1 && (now - alShownAt) >= ALERT_SLOT_MS) {
+    idx = (idx + 1) % n;
+    alShown = list[idx]; alShownAt = now; alIdx = idx;
+  } else {
+    alIdx = idx;
+  }
 }
 
 void applyMask(uint8_t* m, int i, uint8_t mask, bool owns) {
@@ -2439,6 +2829,47 @@ void oledStep() {
     oledPage = -1;
     oledFlushUs = micros() - oledT0;
   }
+}
+
+// ---- заставка FORESTER ----
+#define LOGO_W 124
+#define LOGO_H 27
+static const uint8_t LOGO_BMP[] PROGMEM = {
+  0x00, 0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xE0, 0x00,
+  0x01, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00,
+  0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x00,
+  0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+  0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80,
+  0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80,
+  0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,
+  0x40, 0x0F, 0xFC, 0x3F, 0x83, 0xFF, 0x0F, 0xFC, 0x7F, 0x0F, 0xFC, 0xFF, 0xCF, 0xFC, 0x00, 0x20,
+  0x40, 0x0F, 0xFC, 0x7F, 0xC3, 0xFF, 0x8F, 0xF8, 0xFF, 0x8F, 0xFC, 0xFF, 0xCF, 0xFE, 0x00, 0x20,
+  0x40, 0x0E, 0x00, 0xF0, 0xE3, 0x83, 0x8C, 0x00, 0xE1, 0xC0, 0xC0, 0xE0, 0x0E, 0x0E, 0x00, 0x20,
+  0x80, 0x0E, 0x00, 0xE0, 0x73, 0x81, 0x8C, 0x00, 0xC0, 0xC0, 0xC0, 0xE0, 0x0E, 0x06, 0x00, 0x10,
+  0x80, 0x0E, 0x00, 0xC0, 0x73, 0x83, 0x8C, 0x00, 0xE0, 0x00, 0xC0, 0xE0, 0x0E, 0x0E, 0x00, 0x10,
+  0x80, 0x0F, 0x01, 0xC0, 0x73, 0x87, 0x8F, 0xF8, 0xFE, 0x00, 0xC0, 0xFF, 0x8E, 0x1E, 0x00, 0x10,
+  0x80, 0x0F, 0xF9, 0xC0, 0x73, 0xFF, 0x0F, 0xF8, 0x3F, 0x80, 0xC0, 0xFF, 0x8F, 0xFC, 0x00, 0x10,
+  0x80, 0x0F, 0xF9, 0xC0, 0x73, 0xFE, 0x0E, 0x00, 0x07, 0xC0, 0xC0, 0xE0, 0x0F, 0xF8, 0x00, 0x10,
+  0x80, 0x0E, 0x00, 0xC0, 0x73, 0x87, 0x0C, 0x00, 0x01, 0xC0, 0xC0, 0xC0, 0x0E, 0x1C, 0x00, 0x10,
+  0x80, 0x0E, 0x00, 0xE0, 0x73, 0x83, 0x0C, 0x01, 0xC0, 0xC0, 0xC0, 0xE0, 0x0E, 0x0C, 0x00, 0x10,
+  0x40, 0x0E, 0x00, 0xF0, 0xE3, 0x83, 0x8C, 0x00, 0xE1, 0xC0, 0xC0, 0xE0, 0x0E, 0x0E, 0x00, 0x20,
+  0x40, 0x0E, 0x00, 0x7F, 0xC3, 0x83, 0x8F, 0xFC, 0xFF, 0xC0, 0xC0, 0xFF, 0xCE, 0x0E, 0x00, 0x20,
+  0x40, 0x0E, 0x00, 0x3F, 0x83, 0x81, 0xCF, 0xFC, 0x7F, 0x80, 0xC0, 0xFF, 0xCE, 0x07, 0x00, 0x20,
+  0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40,
+  0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80,
+  0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80,
+  0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+  0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x00,
+  0x01, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x00,
+  0x00, 0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xE0, 0x00,
+};
+
+void drawSplash() {
+  startScreen();
+  display.drawBitmap((SCREEN_W - LOGO_W) / 2, 10, LOGO_BMP, LOGO_W, LOGO_H, SH110X_WHITE);
+  display.setCursor((SCREEN_W - 18 * 6) / 2, 44);
+  display.print("FORESTRY EQUIPMENT");
+  oledCommit();
 }
 
 void drawBoot() {
@@ -2624,6 +3055,95 @@ void drawEstop() {
   display.setTextSize(1);
   display.setCursor(0, 46);  display.print("Release button");
   display.setCursor(0, 56);  display.print("then center all");
+  drawBattery();
+  oledCommit();
+}
+
+void drawAlert() {
+  int e = alShown >> 4, sl = alShown & 15;
+  const char* title = "";
+  const char* hint = "";
+  char l1[28] = "", l2[28] = "";
+  char side = ((tel.side >> (sl & 7)) & 1) ? 'B' : 'A';
+  int cur = (sl < NUM_CH) ? tel.cur[sl] : 0;
+  switch (e) {
+    case EV_RXALARM:  title = "RX ALARM";  snprintf(l1, sizeof(l1), "Alarm button on RX"); snprintf(l2, sizeof(l2), "Outputs stopped"); break;
+    case EV_NOLINK:   title = "NO LINK";   snprintf(l1, sizeof(l1), "No signal from RX"); snprintf(l2, sizeof(l2), "Controls locked"); break;
+    case EV_RXFAULT:  title = "RX FAULT";  snprintf(l1, sizeof(l1), "Receiver fault"); snprintf(l2, sizeof(l2), "Check receiver"); break;
+    case EV_OVERLOAD: title = "OVERLOAD";  snprintf(l1, sizeof(l1), "CH%d %c  %d.%dA", sl + 1, side, cur / 10, cur % 10); hint = "Center lever to reset"; break;
+    case EV_OPEN:     title = "OPEN COIL"; snprintf(l1, sizeof(l1), "CH%d %c", sl + 1, side); hint = "Check solenoid wiring"; break;
+    case EV_LIMIT:    title = "CUR LIMIT"; snprintf(l1, sizeof(l1), "CH%d %c  %d.%dA", sl + 1, side, cur / 10, cur % 10); hint = "Current is limited"; break;
+    case EV_RESTORED: title = "LINK BACK"; snprintf(l1, sizeof(l1), "Link restored"); break;
+    case EV_BATTTX:   title = "TX BATT";   snprintf(l1, sizeof(l1), "Pult battery %d%%", vbatPct); hint = batLevel >= 2 ? "Critical, charge now" : "Charge soon"; break;
+    case EV_BATTRX:   title = "RX BATT";   snprintf(l1, sizeof(l1), "Receiver supply low"); break;
+    default: break;
+  }
+  startScreen();
+  display.fillRect(0, 0, SCREEN_W, 18, SH110X_WHITE);
+  display.setTextColor(SH110X_BLACK);
+  display.setTextSize(2);
+  display.setCursor(2, 2);   display.print(title);
+  display.setTextColor(SH110X_WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, 24);  display.print(l1);
+  display.setCursor(0, 36);  display.print(l2);
+  if (alCnt > 1) { display.setCursor(104, 36); display.printf("%d/%d", alIdx + 1, alCnt); }
+  display.setCursor(0, 54);  display.print(hint);
+  oledCommit();
+}
+
+void drawWifi() {
+  startScreen();
+  display.setCursor(0, 0);   display.print("WI-FI UPDATE");
+  unsigned long now = millis();
+  if (upActive) {
+    int pct = upTotal ? (int)((upDone * 100UL) / upTotal) : 0;
+    if (pct > 99) pct = 99;
+    display.setCursor(0, 14);  display.print("Receiving firmware");
+    display.drawRect(0, 28, SCREEN_W, 12, SH110X_WHITE);
+    display.fillRect(2, 30, (SCREEN_W - 4) * pct / 100, 8, SH110X_WHITE);
+    display.setCursor(0, 46);  display.printf("%d%%", pct);
+    display.setCursor(0, 56);  display.print("do not switch off");
+  } else if (upOk) {
+    display.setCursor(0, 14);  display.print("Installed");
+    display.setCursor(0, 26);  display.printf("version %s", upVer);
+    display.setCursor(0, 42);  display.print("Restarting...");
+  } else if (upErr[0]) {
+    display.setCursor(0, 14);  display.print("Update failed");
+    display.setCursor(0, 26);  display.print(upErr);
+    drawHintText("MENU = exit", 56);
+  } else if (!wifiPage) {
+    display.setCursor(0, 12);  display.printf("Net:  %s", wifiSsid);
+    display.setCursor(0, 22);  display.print("Pass: " WIFI_PASS);
+    display.setCursor(0, 32);  display.print("Open: " WIFI_ADDR);
+    display.setCursor(0, 44);  display.print(wifiEver ? "Phone connected" : "Waiting for phone");
+    long left = (long)((wifiEver ? WIFI_IDLE_MS : WIFI_NOCONN_MS) - (now - (wifiEver ? wifiAct : wifiT0)) ) / 1000;
+    if (left < 0) left = 0;
+    display.setCursor(0, 56);  display.printf("MENU=exit  %ld:%02ld", left / 60, left % 60);
+  } else {
+    long left = (long)(WIFI_IDLE_MS - (now - wifiAct)) / 1000;
+    if (left < 0) left = 0;
+    display.setCursor(0, 14);  display.print("Page open");
+    display.setCursor(0, 26);  display.print("Choose the file on the phone");
+    display.setCursor(0, 44);  display.printf("idle exit %ld:%02ld", left / 60, left % 60);
+    drawHintText("MENU = exit", 56);
+  }
+  drawBattery();
+  oledCommit();
+}
+
+void drawRxWifi() {
+  startScreen();
+  display.setCursor(0, 0);   display.print("RECEIVER WI-FI");
+  if (rxWifiSt == 1) {
+    display.setCursor(0, 20);  display.print("Asking receiver...");
+  } else {
+    display.setCursor(0, 12);  display.printf("Net:  %s", rxWifiSsid);
+    display.setCursor(0, 22);  display.print("Pass: " WIFI_PASS);
+    display.setCursor(0, 32);  display.print("Open: " WIFI_ADDR);
+    display.setCursor(0, 44);  display.print("Receiver outputs off");
+  }
+  drawHintText("MENU = exit", 56);
   drawBattery();
   oledCommit();
 }
@@ -3097,6 +3617,19 @@ void drawTxPwr() {
   oledCommit();
 }
 
+void drawTRate() {
+  startScreen();
+  display.setCursor(0, 0);   display.print("TELEMETRY RATE");
+  display.setTextSize(2);
+  display.setCursor(0, 12);  display.printf("%d/s", editInt);
+  display.setTextSize(1);
+  display.setCursor(0, 33);  display.print("RX replies on request");
+  display.setCursor(0, 42);  display.printf("was %d/s, default %d/s", telemRate, TELEM_RATE_DEF);
+  hintLine("%d:+/- %d:ok/cancel");
+  drawBattery();
+  oledCommit();
+}
+
 void drawCal() {
   startScreen();
   if (state == ST_CAL_C && calPhase == 0) {
@@ -3146,9 +3679,10 @@ void drawCal() {
 
 void drawScreen() {
   switch (state) {
-    case ST_BOOT:    drawBoot(); break;
+    case ST_BOOT:    if ((millis() - bootStart) < SPLASH_MS) drawSplash(); else drawBoot(); break;
     case ST_SAFE:    drawSafe(); break;
     case ST_RUN:
+      if (alShown >= 0) { drawAlert(); break; }
       switch (screenNo) {
         case SC_TX:    drawRun2(); break;
         case SC_RX:    drawRxChannels(); break;
@@ -3167,6 +3701,7 @@ void drawScreen() {
         case MS_TEST:    drawTest(); break;
         case MS_RXEDIT:  drawRxEdit(); break;
         case MS_RXSTAT:  drawRxStat(); break;
+        case MS_RXWIFI:  drawRxWifi(); break;
         case MS_DBGDESC: drawDbgDesc(); break;
         case MS_DBGPAGE: drawDbgPage(); break;
         case MS_PIN:     drawPinScreen(); break;
@@ -3174,6 +3709,7 @@ void drawScreen() {
         case MS_BINDRUN: drawBindRun(); break;
         case MS_BINDID:  drawBindId(); break;
         case MS_TXPWR:   drawTxPwr(); break;
+        case MS_TRATE:   drawTRate(); break;
         default:         drawMenu(); break;
       }
       break;
@@ -3181,6 +3717,7 @@ void drawScreen() {
     case ST_CAL_R:
     case ST_CAL_RES: drawCal(); break;
     case ST_ESTOP:   drawEstop(); break;
+    case ST_WIFI:    drawWifi(); break;
   }
 }
 
@@ -3212,6 +3749,7 @@ void stepLogic(unsigned long now) {
         break;
       }
       if (menuScr == MS_BINDRUN) bindTick(now);
+      if (menuScr == MS_RXWIFI) rxWifiTick(now);
       navStep(now);
       break;
     case ST_CAL_C:   calCenterTick(now); break;
@@ -3242,6 +3780,9 @@ void handleMenuButton() {
       break;
     case ST_MENU:
       if (btnMenu.shortEv) menuBack();
+      break;
+    case ST_WIFI:
+      if (btnMenu.shortEv && !upActive) wifiStop("button");
       break;
     case ST_CAL_C:
     case ST_CAL_R:
@@ -3324,19 +3865,20 @@ void loop() {
 
   if (estop.changed) {
     LOGF("E-STOP: %s", estop.state ? "ACTIVE (pressed or wire break)" : "released");
-    if (estop.state) goEstop();
+    if (estop.state) { if (state != ST_WIFI) goEstop(); }       // в режиме Wi-Fi это делает wifiTick
     else if (state == ST_ESTOP) goSafe();
   }
   if (btnMenu.changed) {
     LOGF("MENU button: %s", btnMenu.state ? "pressed" : "released");
   }
 
-  if (state == ST_BOOT && (now - bootStart) >= BOOT_MS) {
+  if (state == ST_BOOT && (now - bootStart) >= (SPLASH_MS + BOOT_MS)) {
     if (estop.state) goEstop();
     else goSafe();
   }
 
   handleMenuButton();
+  wifiTick(now);
 
   static unsigned long lastRead = 0;
   if ((now - lastRead) >= READ_PERIOD_MS) {
@@ -3350,6 +3892,7 @@ void loop() {
   } else {
     updateLeds();   // чтобы ритмы мигания не зависели от периода опроса
   }
+  alertTick(now);
 
   batTick(now);
 
