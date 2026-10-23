@@ -80,6 +80,7 @@ jobs:
           echo "VER=$VER" >> "$GITHUB_ENV"
           BIN="out/$DEV/$DEV.ino.bin"
           test -f "$BIN" || { echo "No .bin produced"; exit 1; }
+          grep -aq "FWTAG:$DEV:$VER;" "$BIN" || { echo "Firmware tag FWTAG:$DEV:$VER; is missing in the binary (linker dropped it)"; exit 1; }
           SIZE=$(stat -c %s "$BIN")
           PROG=$(grep -m1 'Sketch uses' "out/$DEV.build.log" || true)
           RAM=$(grep -m1 'Global variables use' "out/$DEV.build.log" || true)
