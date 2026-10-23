@@ -7,6 +7,16 @@
 
 Папки:
 
-- `pult/` прошивка пульта
+- `pult/` прошивка пульта (`pult.ino`, список библиотек `libs.txt`)
 - `receiver/` прошивка приёмника (позже)
 - `docs/` концепт и протокол связи
+
+## Сборка .bin
+
+Actions -> Build firmware -> Run workflow -> выбрать pult или receiver.
+
+- Готовый файл: раздел Releases (`pult-latest`, `receiver-latest`): `pult_<версия>.bin` для обновления по Wi-Fi, `..._full.bin` для заливки по USB.
+- Сводка по памяти: страница запуска.
+- Полный лог: ветка `build-logs` (`pult_build.log`, `pult_summary.md`).
+
+Версия ядра ESP32 и библиотек зафиксированы (core 3.3.11, плата `heltec_wireless_stick_lite_V3`).

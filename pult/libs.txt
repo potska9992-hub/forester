@@ -1,0 +1,6 @@
+# Библиотеки пульта (версии как в Arduino IDE у владельца)
+Adafruit BusIO@1.17.4
+Adafruit GFX Library@1.12.6
+Adafruit SH110X@2.1.15
+Adafruit MCP23017 Arduino Library@2.3.2
+Adafruit ADS1X15@2.6.2

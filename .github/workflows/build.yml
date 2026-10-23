@@ -1,0 +1,128 @@
+name: Build firmware
+
+# Запуск вручную: Actions -> Build firmware -> Run workflow -> выбрать устройство.
+# Готовый .bin появляется в разделе Releases (pult-latest / receiver-latest),
+# сводка по памяти на странице запуска, полный лог в ветке build-logs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      device:
+        description: "Which firmware to build"
+        type: choice
+        options:
+          - pult
+          - receiver
+        default: pult
+
+permissions:
+  contents: write
+
+env:
+  CORE: esp32:esp32
+  CORE_VERSION: "3.3.11"
+  FQBN: esp32:esp32:heltec_wireless_stick_lite_V3
+  INDEX_URL: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      DEV: ${{ inputs.device }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check sketch
+        run: |
+          test -f "$DEV/$DEV.ino" || { echo "Missing $DEV/$DEV.ino"; exit 1; }
+          test -f "$DEV/libs.txt" || { echo "Missing $DEV/libs.txt"; exit 1; }
+
+      - name: Setup arduino-cli
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Cache ESP32 core
+        uses: actions/cache@v4
+        with:
+          path: ~/.arduino15
+          key: arduino15-esp32-${{ env.CORE_VERSION }}
+
+      - name: Install ESP32 core
+        run: |
+          arduino-cli core update-index --additional-urls "$INDEX_URL"
+          arduino-cli core install "$CORE@$CORE_VERSION" --additional-urls "$INDEX_URL"
+
+      - name: Install libraries
+        run: |
+          while IFS= read -r lib; do
+            [ -z "$lib" ] && continue
+            case "$lib" in \#*) continue ;; esac
+            arduino-cli lib install --no-deps "$lib"
+          done < "$DEV/libs.txt"
+
+      - name: Compile
+        run: |
+          set -o pipefail
+          mkdir -p out
+          {
+            echo "Build: $(date -u +%Y-%m-%dT%H:%M:%SZ)  commit ${GITHUB_SHA::7}"
+            echo "FQBN: $FQBN"
+            arduino-cli core list
+            arduino-cli lib list
+            echo "-----"
+          } > "out/$DEV.build.log"
+          arduino-cli compile --fqbn "$FQBN" --output-dir "out/$DEV" --warnings default "$DEV" 2>&1 | tee -a "out/$DEV.build.log"
+
+      - name: Summary
+        run: |
+          VER=$(grep -m1 '#define FW_VERSION' "$DEV/$DEV.ino" | sed 's/.*"\(.*\)".*/\1/')
+          echo "VER=$VER" >> "$GITHUB_ENV"
+          BIN="out/$DEV/$DEV.ino.bin"
+          test -f "$BIN" || { echo "No .bin produced"; exit 1; }
+          SIZE=$(stat -c %s "$BIN")
+          PROG=$(grep -m1 'Sketch uses' "out/$DEV.build.log" || true)
+          RAM=$(grep -m1 'Global variables use' "out/$DEV.build.log" || true)
+          PCT=$(echo "$PROG" | sed -n 's/.*(\([0-9]*\)%).*/\1/p')
+          {
+            echo "# $DEV firmware $VER"
+            echo ""
+            echo "- File: \`$DEV.ino.bin\`, $SIZE bytes"
+            echo "- $PROG"
+            echo "- $RAM"
+            echo "- Core esp32 $CORE_VERSION, board $FQBN"
+            echo "- Commit ${GITHUB_SHA::7}"
+            if [ "${PCT:-0}" -ge 80 ]; then echo "- WARNING: program uses ${PCT}% of the app slot"; fi
+          } | tee "out/${DEV}_summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Publish release (latest bin)
+        run: |
+          cp "out/$DEV/$DEV.ino.bin" "out/${DEV}_${VER}.bin"
+          FILES="out/${DEV}_${VER}.bin"
+          if [ -f "out/$DEV/$DEV.ino.merged.bin" ]; then
+            cp "out/$DEV/$DEV.ino.merged.bin" "out/${DEV}_${VER}_full.bin"
+            FILES="$FILES out/${DEV}_${VER}_full.bin"
+          fi
+          gh release delete "$DEV-latest" --yes --cleanup-tag || true
+          gh release create "$DEV-latest" $FILES --title "$DEV $VER" --notes-file "out/${DEV}_summary.md" --target "$GITHUB_SHA"
+
+      - name: Save logs to build-logs branch
+        if: always()
+        run: |
+          URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          rm -rf logs
+          if git ls-remote --exit-code --heads "$URL" build-logs >/dev/null 2>&1; then
+            git clone --depth 1 --branch build-logs "$URL" logs
+          else
+            mkdir logs
+            git -C logs init -q -b build-logs
+            git -C logs remote add origin "$URL"
+          fi
+          cp "out/$DEV.build.log" "logs/${DEV}_build.log" 2>/dev/null || true
+          cp "out/${DEV}_summary.md" "logs/${DEV}_summary.md" 2>/dev/null || true
+          cd logs
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A
+          git commit -m "Build log: $DEV" || echo "nothing to commit"
+          git push origin build-logs
