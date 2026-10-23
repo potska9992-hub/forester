@@ -1,4 +1,4 @@
-Build: 2026-10-23T11:06:53Z  commit 53e142e
+Build: 2026-10-23T16:47:04Z  commit 27b5ae2
 FQBN: esp32:esp32:heltec_wireless_stick_lite_V3
 ID          Installed Latest Name
 esp32:esp32 3.3.11    3.3.12 esp32
@@ -11,5 +11,28 @@ Adafruit MCP23017 Arduino Library 2.3.2     -            user     -
 Adafruit SH110X                   2.1.15    -            user     -
 
 -----
-Sketch uses 1000592 bytes (29%) of program storage space. Maximum is 3342336 bytes.
-Global variables use 54056 bytes (16%) of dynamic memory, leaving 273624 bytes for local variables. Maximum is 327680 bytes.
+/home/runner/work/forester/forester/pult/pult.ino:1608:23: error: 'NetFound' has not been declared
+ 1608 | int netCollect(int n, NetFound* out, int maxN) {
+      |                       ^~~~~~~~
+
+[92mUsed library[0m                      [92mVersion[0m [90mPath[0m
+[93mWire[0m                              3.3.11  [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/Wire[0m
+[93mPreferences[0m                       3.3.11  [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/Preferences[0m
+[93mAdafruit GFX Library[0m              1.12.6  [90m/home/runner/Arduino/libraries/Adafruit_GFX_Library[0m
+[93mAdafruit BusIO[0m                    1.17.4  [90m/home/runner/Arduino/libraries/Adafruit_BusIO[0m
+[93mSPI[0m                               3.3.11  [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/SPI[0m
+[93mAdafruit SH110X[0m                   2.1.15  [90m/home/runner/Arduino/libraries/Adafruit_SH110X[0m
+[93mAdafruit MCP23017 Arduino Library[0m 2.3.2   [90m/home/runner/Arduino/libraries/Adafruit_MCP23017_Arduino_Library[0m
+[93mAdafruit ADS1X15[0m                  2.6.2   [90m/home/runner/Arduino/libraries/Adafruit_ADS1X15[0m
+[93mWiFi[0m                              3.3.11  [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/WiFi[0m
+[93mNetworking[0m                        3.3.11  [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/Network[0m
+[93mWebServer[0m                         3.3.11  [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/WebServer[0m
+[93mFS[0m                                3.3.11  [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/FS[0m
+[93mUpdate[0m                            3.3.11  [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/Update[0m
+[93mHTTPClient[0m                        3.3.11  [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/HTTPClient[0m
+[93mNetworkClientSecure[0m               3.3.11  [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/NetworkClientSecure[0m
+[93mHash[0m                              3.3.11  [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/Hash[0m
+
+[92mUsed platform[0m [92mVersion[0m [90mPath[0m
+[93mesp32:esp32[0m   3.3.11  [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/3.3.11[0m
+Error during build: exit status 1
