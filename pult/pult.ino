@@ -1,5 +1,9 @@
 // ============================================================
 // Пульт гидрораспределителя. Журнал версий
+//  0.3 - игра Dino (главное меню: Transmitter, Receiver, Dino, Exit; CH3 прыжок/присесть, CH6 "+" старт, "-" и MENU выход,
+//        при проигрыше один раз вспышка красных светодиодов, рекорд в памяти); Receiver -> Wi-Fi вкладка (Phone update,
+//        GitHub update - пока имитация, сети берутся из пульта); из LED & Alerts убран пункт Heartbeat (настройка осталась
+//        в Alert events); единое правило CH6: "+" подтвердить, "-" отмена, на экранах без подтверждения выходит только "-"
 //  0.2 - (нумерация начата заново, до этого было 0.1..0.7) Wi-Fi: код причины отказа подключения (неверный пароль,
 //        сеть не найдена и т.д.), длина сохранённого пароля на экране проверки, ожидание подключения 30 с;
 //        полоса загрузки больше не заходит на значок батареи
@@ -92,6 +96,7 @@
 #define DEBOUNCE_MS     30
 #define READ_PERIOD_MS  20
 #define DISP_PERIOD_MS  150
+#define GAME_FRAME_MS   50         // кадры игры Dino (20 к/с)
 #define LOG_PERIOD_MS   1000
 #define BOOT_MS         1500
 #define SPLASH_MS       2000       // заставка FORESTER перед Boot check
@@ -113,7 +118,7 @@
 #define HB_FLASH_MS     100        // длительность вспышки пульса
 
 // ============ ВЕРСИЯ ПРОШИВКИ ============
-#define FW_VERSION      "0.2"
+#define FW_VERSION      "0.3"
 #define PBAR_W          108             // ширина полосы загрузки (значок батареи справа)
 #define GH_REPO         "potska9992-hub/forester"   // репозиторий с готовыми прошивками
 #define GH_TAG          "pult-latest"               // релиз с последней прошивкой пульта
@@ -189,7 +194,7 @@ enum MenuScr {
   MS_DBGLIST, MS_DBGDESC, MS_DBGPAGE,
   MS_PIN, MS_FRTARGET, MS_CONFIRM,
   MS_RX, MS_RXCH, MS_RXDIR, MS_RXGLOB, MS_RXEDIT, MS_RXSTAT, MS_RXWIFI,
-  MS_NETS, MS_NETPICK, MS_TEXTIN, MS_WIFI, MS_NETACT
+  MS_NETS, MS_NETPICK, MS_TEXTIN, MS_WIFI, MS_NETACT, MS_RXWIFIM, MS_GAME
 };
 enum ChItem { CI_TYPE, CI_REV, CI_EN, CI_EXPO, CI_MAX, CI_LED, CI_BACK };
 enum EvItem { EI_EN, EI_COLOR, EI_PAT, EI_INT, EI_WHERE, EI_SCR, EI_FIXED, EI_BACK };
@@ -203,6 +208,7 @@ struct NetFound { char ssid[33]; int8_t rssi; };      // найденная Wi-F
 enum TxItem { TX_CAL, TX_CHSET, TX_PWR, TX_BIND, TX_TRT, TX_SCR, TX_LED, TX_BAT, TX_LOG, TX_DBG, TX_WIFI, TX_SIM, TX_FR, TX_BACK, TX_COUNT };
 enum RxTopic { RT_LIMIT, RT_DUTY, RT_MAXD, RT_RAMP, RT_CHEN, RT_GLOB, RT_STAT, RT_WIFI, RT_BACK, RT_COUNT };
 enum WifiItem { WF_PHONE, WF_GH, WF_NETS, WF_BACK, WF_COUNT };
+enum RxWifiItem { RW_PHONE, RW_GH, RW_BACK, RW_COUNT };
 enum ScrId { SC_MAIN, SC_TX, SC_RX, SC_LINK, SC_POWER, SC_LOG };
 enum DbgPage { DP_RADIO, DP_TELEM, DP_LIM, DP_RAW, DP_SYS, DP_LOG };
 enum ConfAct { CA_CLEARLOG, CA_FORGET, CA_FR_TX, CA_FR_RX, CA_NETDEL, CA_NETALL };
@@ -763,7 +769,7 @@ State   state = ST_BOOT;
 MenuScr menuScr = MS_MAIN;
 int     sel = 0, menuTop = 0;
 int     idxMain = 0, idxTx = 0, idxCal = 0, idxChList = 0, idxChEdit = 0, idxBat = 0;
-int     idxLed = 0, idxEvList = 0, idxEvEdit = 0, idxPreset = 0, idxRx = 0, idxRxCh = 0, idxRxDir = 0;
+int     idxLed = 0, idxEvList = 0, idxEvEdit = 0, idxPreset = 0, idxRx = 0, idxRxWifi = 0, idxRxCh = 0, idxRxDir = 0;
 int     idxNets = 0, idxWifi = 0, netSlot = 0;
 // выбор сети (скан) и ввод текста с пульта
 NetFound pickNet[8];
@@ -782,6 +788,7 @@ int     batKind = BE_DIV;
 int     batEditCv = 0;          // сотые доли вольта
 int     batEditI = 0;           // проценты
 int     evSel = 0;              // выбранное событие в LED & Alerts
+unsigned long gameFlashUntil = 0;   // до этого момента все красные светодиоды горят (проигрыш в игре)
 bool    evFromLed = false;      // открыто ярлыком Heartbeat -> назад в LED & Alerts
 int     testEv = 0;             // событие на экране Test alerts
 int     screenNo = 0;
@@ -841,12 +848,16 @@ char upErr[48] = "";
 char upVer[16] = "";
 size_t upTotal = 0, upDone = 0;
 char wifiSsid[16] = "";
+uint8_t rxWifiMode = 0;          // 0 с телефона, 1 GitHub (имитация)
 uint8_t rxWifiSt = 0;            // Wi-Fi приёмника: 0 выкл, 1 запрос отправлен, 2 приёмник ответил
 unsigned long rxWifiAt = 0;
 char rxWifiSsid[16] = "";
 void wifiBegin();
 void wifiStop(const char* why);
-void rxWifiBegin();
+void rxWifiBegin(int mode);
+void gameEnter();
+void gameStep(unsigned long now, int b);
+bool gameOn();
 
 // ---- сохранённые Wi-Fi сети (NVS "wifi"): до NET_MAX штук ----
 char netSsid[NET_MAX][33];
@@ -1145,7 +1156,7 @@ bool leverArmed = false;           // тестовый джойстик разр
 
 bool isRxScreen() {
   return menuScr == MS_RX || menuScr == MS_RXCH || menuScr == MS_RXDIR || menuScr == MS_RXGLOB ||
-         menuScr == MS_RXEDIT || menuScr == MS_RXSTAT || menuScr == MS_RXWIFI;
+         menuScr == MS_RXEDIT || menuScr == MS_RXSTAT || menuScr == MS_RXWIFI || menuScr == MS_RXWIFIM;
 }
 
 // все включённые каналы, кроме тумблеров навигации и тестового джойстика, в центре
@@ -1290,13 +1301,13 @@ int evItems(int e, uint8_t* ids) {
 
 int menuCount() {
   switch (menuScr) {
-    case MS_MAIN:    return 3;
+    case MS_MAIN:    return 4;
     case MS_TX:      return TX_COUNT;
     case MS_CAL:     return 4;
     case MS_CHLIST:  return NUM_CH + 1;
     case MS_CHEDIT:  { uint8_t ids[8]; return chItems(editCh, ids); }
     case MS_BAT:     return 10;
-    case MS_LED:     return 7;
+    case MS_LED:     return 6;
     case MS_LEDSTAT: return 3;
     case MS_EVLIST:  return NUM_EV + 1;
     case MS_EVEDIT:  { uint8_t ids[8]; return evItems(evSel, ids); }
@@ -1314,6 +1325,7 @@ int menuCount() {
     case MS_NETACT:  return 3;
     case MS_NETPICK: return pickScanning ? 1 : pickN + 2;
     case MS_RX:      return RT_COUNT;
+    case MS_RXWIFIM: return RW_COUNT;
     case MS_RXCH:    return NUM_CH + 1;
     case MS_RXDIR:   return 3;
     case MS_RXGLOB:  return 7;
@@ -1457,8 +1469,8 @@ void startConfirm(ConfAct act, MenuScr back, int idx) {
 }
 
 void factoryResetTx() {
-  static const char* ns[] = { "joy", "chcfg", "led", "alerts", "bat", "screens", "radio", "log", "wifi" };
-  for (int i = 0; i < 9; i++) {
+  static const char* ns[] = { "joy", "chcfg", "led", "alerts", "bat", "screens", "radio", "log", "wifi", "game" };
+  for (int i = 0; i < 10; i++) {
     prefs.begin(ns[i], false);
     prefs.clear();
     prefs.end();
@@ -1607,7 +1619,6 @@ const DescRef DESC[NUM_DP] = {
 
 // порядок пунктов в меню -> внутренний номер пункта (чтобы не переписывать обработчики)
 const uint8_t BAT_MAP[9] = { 0, 5, 6, 1, 2, 3, 4, 7, 8 };   // Cal divider, Warn, Crit, Full V, Empty V, Full=now, Empty=low, Curve, Reset
-const uint8_t LED_MAP[6] = { 3, 1, 0, 2, 4, 5 };            // Presets, Alert events, Status LEDs, Heartbeat, Test alerts, Reset alerts
 
 // ---- Wi-Fi сети с пульта: поиск, выбор, ввод названия и пароля ----
 void netScanStop() {
@@ -1710,15 +1721,16 @@ void textStep(int a, int b, int m) {
 }
 
 void menuLabel(int i, char* b, size_t n) {
-  static const char* mainL[] = { "Transmitter", "Receiver", "Exit" };
+  static const char* mainL[] = { "Transmitter", "Receiver", "Dino", "Exit" };
   static const char* calL[]  = { "Set Center", "Set Min/Max", "Dead Zone", "Back" };
   static const char* ledM[]  = { "Both", "Red", "Green", "Off" };
   static const char* simN[]  = { "OFF", "LINK", "LOST" };
-  static const char* ledL[]  = { "Status LEDs", "Alert events", "Heartbeat", "Presets", "Test alerts", "Reset alerts", "Back" };
-  static const char* rxL[]   = { "Current Limits", "Start Duty", "Max Duty", "Ramps", "Channels On/Off", "Global", "RX Status", "Wi-Fi Update", "Back" };
+  static const char* ledL[]  = { "Presets", "Alert events", "Status LEDs", "Test alerts", "Reset alerts", "Back" };
+  static const char* rxL[]   = { "Current Limits", "Start Duty", "Max Duty", "Ramps", "Channels On/Off", "Global", "RX Status", "Wi-Fi", "Back" };
   static const char* dbgL[]  = { "Radio", "Telemetry", "Limits", "RAW ADC", "System", "Log", "Back" };
   switch (menuScr) {
     case MS_MAIN: snprintf(b, n, "%s", mainL[i]); break;
+    case MS_RXWIFIM: { static const char* rwL[] = { "Phone update", "GitHub update", "Back" }; snprintf(b, n, "%s", rwL[i < 3 ? i : 2]); break; }
     case MS_TX:
       switch (i) {
         case TX_CAL:   snprintf(b, n, "Calibrate"); break;
@@ -1777,7 +1789,7 @@ void menuLabel(int i, char* b, size_t n) {
         default: snprintf(b, n, "Back"); break;
       }
       break;
-    case MS_LED:     snprintf(b, n, "%s", ledL[i < 6 ? LED_MAP[i] : 6]); break;
+    case MS_LED:     snprintf(b, n, "%s", ledL[i < 6 ? i : 5]); break;
     case MS_LEDSTAT:
       if (i == 0)      snprintf(b, n, "Green LEDs: %s", ledGreenOn ? "ON" : "OFF");
       else if (i == 1) snprintf(b, n, "Red LEDs: %s", ledRedOn ? "ON" : "OFF");
@@ -2056,6 +2068,7 @@ void menuSelect(int i) {
       idxMain = i;
       if (i == 0)      gotoScr(MS_TX, idxTx);
       else if (i == 1) enterReceiver();
+      else if (i == 2) { gameEnter(); gotoScr(MS_GAME, 0); }
       else             exitMenu();
       break;
     case MS_TX:
@@ -2163,13 +2176,12 @@ void menuSelect(int i) {
       break;
     case MS_LED:
       idxLed = i;
-      switch (i < 6 ? LED_MAP[i] : i) {
-        case 0: gotoScr(MS_LEDSTAT, 0); break;
+      switch (i) {
+        case 0: gotoScr(MS_PRESET, idxPreset); break;
         case 1: evFromLed = false; gotoScr(MS_EVLIST, idxEvList); break;
-        case 2: evFromLed = true; evSel = EV_HEART; idxEvEdit = 0; gotoScr(MS_EVEDIT, 0); break;
-        case 3: gotoScr(MS_PRESET, idxPreset); break;
-        case 4: testEv = 0; gotoScr(MS_TEST, 0); break;
-        case 5:
+        case 2: gotoScr(MS_LEDSTAT, 0); break;
+        case 3: testEv = 0; gotoScr(MS_TEST, 0); break;
+        case 4:
           for (int e = 0; e < NUM_EV; e++) ev[e] = DEF_EV[e];
           ledGreenOn = true; ledRedOn = true;
           saveAllEv(); saveLedCfg();
@@ -2219,13 +2231,17 @@ void menuSelect(int i) {
       rxTopic = i;
       if (i == RT_GLOB)      gotoScr(MS_RXGLOB, idxRxGlob);
       else if (i == RT_STAT) gotoScr(MS_RXSTAT, 0);
-      else if (i == RT_WIFI) {
-        if (!rxLinked())            toast("RX not connected");
-        else if (!othersCentered()) toast("Center controls");
-        else                        rxWifiBegin();
-      }
+      else if (i == RT_WIFI) gotoScr(MS_RXWIFIM, idxRxWifi);
       else if (i == RT_BACK) gotoScr(MS_MAIN, idxMain);
       else                   gotoScr(MS_RXCH, idxRxCh);
+      break;
+    case MS_RXWIFIM:
+      idxRxWifi = i;
+      if (i == RW_BACK)           gotoScr(MS_RX, idxRx);
+      else if (!rxLinked())       toast("RX not connected");
+      else if (!othersCentered()) toast("Center controls");
+      else if (i == RW_GH && netCount() == 0) toast("No saved network");
+      else                        rxWifiBegin(i == RW_GH ? 1 : 0);
       break;
     case MS_RXCH:
       idxRxCh = i;
@@ -2382,7 +2398,9 @@ void menuBack() {
     case MS_RXGLOB:   gotoScr(MS_RX, idxRx); break;
     case MS_RXEDIT:   rxEditCancel(); break;
     case MS_RXSTAT:   gotoScr(MS_RX, idxRx); break;
-    case MS_RXWIFI:   rxWifiSt = 0; gotoScr(MS_RX, idxRx); break;
+    case MS_RXWIFI:   rxWifiSt = 0; gotoScr(MS_RXWIFIM, idxRxWifi); break;
+    case MS_RXWIFIM:  gotoScr(MS_RX, idxRx); break;
+    case MS_GAME:     gotoScr(MS_MAIN, idxMain); break;
   }
 }
 
@@ -2469,14 +2487,17 @@ void navStep(unsigned long now) {
     case MS_RXSTAT:
     case MS_RXWIFI:
     case MS_BINDID:
-      if (b) menuBack();
+      if (b < 0) menuBack();                     // нечего подтверждать: выходит только "-"
+      return;
+    case MS_GAME:
+      gameStep(now, b);
       return;
     case MS_BINDRUN:
       if (b < 0) menuBack();
       return;
     case MS_TEST:
       if (a) testEv = (testEv + a + NUM_EV) % NUM_EV;
-      if (b) menuBack();
+      if (b < 0) menuBack();
       return;
     case MS_DBGDESC: {
       int total = DESC[dbgPage].n;
@@ -2924,7 +2945,7 @@ void wifiTick(unsigned long now) {
   server.handleClient();
   now = millis();                                           // handleClient мог обновить wifiAct позже, чем "now" из начала цикла
   if (upActive) { wifiAct = now; return; }                 // во время приёма файла выхода и таймаутов нет
-  if (navPoll(MENU_ENTER_CH, navB, now, false) != 0) { wifiStop("lever"); return; }   // CH6 в любую сторону = выход
+  if (navPoll(MENU_ENTER_CH, navB, now, false) < 0) { wifiStop("lever"); return; }   // CH6 "-" = выход
   if (estop.state) { wifiStop("E-Stop"); return; }
   if (WiFi.softAPgetStationNum() > 0 && !wifiEver) { wifiEver = true; wifiAct = now; }
   if (!wifiEver) {
@@ -3145,7 +3166,7 @@ void ghTick(unsigned long now) {
   if (state != ST_GH) return;
   if (estop.state && ghStage != G_DL && ghStage != G_OK) { ghStop("E-Stop"); return; }
   int nb = (ghStage == G_DL || ghStage == G_OK || ghStage == G_API) ? 0 : navPoll(MENU_ENTER_CH, navB, now, false);
-  if (nb != 0 && ghStage != G_ASK) { ghStop(ghStage == G_SCAN || ghStage == G_CONN ? "cancel" : "exit"); return; }   // CH6 = выход / отмена
+  if (nb < 0 && ghStage != G_ASK) { ghStop(ghStage == G_SCAN || ghStage == G_CONN ? "cancel" : "exit"); return; }   // CH6 = выход / отмена
   switch (ghStage) {
     case G_SCAN: {
       int n = WiFi.scanComplete();
@@ -3225,22 +3246,25 @@ void ghTick(unsigned long now) {
 
 // Wi-Fi приёмника: с радио пульт отправит команду, приёмник ответит суффиксом имени сети.
 // Пока радио нет, ответ имитируется.
-void rxWifiBegin() {
+void rxWifiBegin(int mode) {
+  rxWifiMode = mode;
   rxWifiSt = 1;
   rxWifiAt = millis();
   rxWifiSsid[0] = 0;
   gotoScr(MS_RXWIFI, 0);
-  logLine("RX Wi-Fi Update: requested (simulated)");
+  logLine(mode ? "RX GitHub update: requested (simulated)" : "RX Wi-Fi Update: requested (simulated)");
 }
 
 void rxWifiTick(unsigned long now) {
   if (rxWifiSt == 1 && (now - rxWifiAt) >= 800) {
     rxWifiSt = 2; rxWifiAt = now;
     snprintf(rxWifiSsid, sizeof(rxWifiSsid), "RX-SIM1");
-  } else if (rxWifiSt == 2 && (now - rxWifiAt) >= WIFI_NOCONN_MS) {
+  } else if (rxWifiMode == 1 && rxWifiSt >= 2 && rxWifiSt < 5 && (now - rxWifiAt) >= 1200) {
+    rxWifiSt++; rxWifiAt = now;                  // имитация этапов: сети -> подключение -> проверка GitHub -> конец
+  } else if (rxWifiSt >= 2 && (now - rxWifiAt) >= (rxWifiMode ? 20000UL : WIFI_NOCONN_MS)) {
     rxWifiSt = 0;
     toast("RX Wi-Fi closed");
-    gotoScr(MS_RX, idxRx);
+    gotoScr(MS_RXWIFIM, idxRxWifi);
   }
 }
 
@@ -3416,6 +3440,11 @@ void updateLeds() {
     }
   }
 
+  if (gameFlashUntil && (long)(gameFlashUntil - now) > 0) {      // проигрыш в игре: все красные один раз
+    for (int i = 0; i < NUM_CH; i++) m[i] = 1;
+  } else if (gameFlashUntil) {
+    gameFlashUntil = 0;
+  }
   uint8_t a = 0, b = 0;
   for (int i = 0; i < NUM_CH; i++) {
     if (m[i] & 1) setLedBit(CH[i].redPin, a, b);
@@ -3806,9 +3835,14 @@ void drawWifi() {
 
 void drawRxWifi() {
   startScreen();
-  display.setCursor(0, 0);   display.print("RECEIVER WI-FI");
+  display.setCursor(0, 0);   display.print(rxWifiMode ? "RECEIVER GITHUB" : "RECEIVER WI-FI");
   if (rxWifiSt == 1) {
     display.setCursor(0, 20);  display.print("Asking receiver...");
+  } else if (rxWifiMode == 1) {
+    static const char* st[] = { "", "", "Sending networks", "Receiver connecting", "Receiver checks GitHub", "Simulation: no radio" };
+    display.setCursor(0, 16);  display.printf("%d saved networks", netCount());
+    display.setCursor(0, 28);  display.print(st[rxWifiSt < 6 ? rxWifiSt : 5]);
+    display.setCursor(0, 40);  display.print(rxWifiSt >= 5 ? "works with radio 1.0" : "Receiver outputs off");
   } else {
     display.setCursor(0, 12);  display.printf("Net:  %s", rxWifiSsid);
     display.setCursor(0, 22);  display.print("Pass: " WIFI_PASS);
@@ -3817,6 +3851,184 @@ void drawRxWifi() {
   }
   exitHint("exit", 56);
   drawBattery();
+  oledCommit();
+}
+
+// ============ ИГРА DINO ============
+// Запускается из главного меню (выходы приёмника в нуле). CH3: вверх прыжок, вниз присесть (знак меняется GAME_JUMP_SIGN).
+// CH6: "+" старт и повтор, "-" выход в любой момент; MENU тоже выходит. Индикация: только один раз все красные при проигрыше.
+#define GAME_JUMP_SIGN  (-1)
+#define GAME_GROUND     58
+#define GAME_G          1500.0f
+#define GAME_JUMP_V     330.0f
+enum GameSt { GS_READY, GS_PLAY, GS_OVER };
+struct GObs { float x; uint8_t kind; bool on; };      // 0 малый кактус, 1 большой, 2 двойной, 3 птица (присесть), 4 птица высоко
+const int GOBS_N = 3;
+GObs gObs[GOBS_N];
+uint8_t  gameSt = GS_READY;
+float    gSpeed = 80, gH = 0, gV = 0, gDist = 0, gNext = 0;
+bool     gDuck = false;
+uint16_t gScore = 0, gHi = 0;
+unsigned long gLast = 0, gT0 = 0;
+uint32_t gRnd = 12345;
+
+bool gameOn() { return state == ST_MENU && menuScr == MS_GAME; }
+
+static uint32_t gameRand(uint32_t n) { gRnd = gRnd * 1664525UL + 1013904223UL; return (gRnd >> 8) % n; }
+
+void gameEnter() {
+  prefs.begin("game", true);
+  gHi = prefs.getUShort("hi", 0);
+  prefs.end();
+  gameSt = GS_READY;
+  gLast = millis();
+  gRnd ^= millis();
+}
+
+static void gameBegin(unsigned long now) {
+  gameSt = GS_PLAY;
+  gSpeed = 80; gH = 0; gV = 0; gDist = 0; gScore = 0; gDuck = false;
+  gNext = 90;
+  for (int i = 0; i < GOBS_N; i++) gObs[i].on = false;
+  gLast = now; gT0 = now;
+}
+
+static void gameBox(const GObs& o, float& w, float& base, float& h) {
+  switch (o.kind) {
+    case 0:  w = 6;  base = 0;  h = 12; break;
+    case 1:  w = 8;  base = 0;  h = 18; break;
+    case 2:  w = 16; base = 0;  h = 12; break;
+    case 3:  w = 14; base = 11; h = 8;  break;
+    default: w = 14; base = 26; h = 8;  break;
+  }
+}
+
+static bool gameHit() {
+  float dw = gDuck ? 16 : 12, dh = gDuck ? 9 : 16;
+  float dx0 = 12, dx1 = 10 + dw - 2, dy0 = gH, dy1 = gH + dh - 2;
+  for (int i = 0; i < GOBS_N; i++) {
+    if (!gObs[i].on) continue;
+    float w, base, h; gameBox(gObs[i], w, base, h);
+    float ox0 = gObs[i].x + 2, ox1 = gObs[i].x + w - 2, oy0 = base, oy1 = base + h - 2;
+    if (ox0 < dx1 && ox1 > dx0 && oy0 < dy1 && oy1 > dy0) return true;
+  }
+  return false;
+}
+
+void gameStep(unsigned long now, int b) {
+  if (b < 0) { menuBack(); return; }                         // CH6 "-" = выход в любой момент
+  if (gameSt != GS_PLAY) {
+    if (b > 0) gameBegin(now);
+    gLast = now;
+    return;
+  }
+  unsigned long el = now - gLast;
+  if (el < 15) return;
+  if (el > 100) el = 100;
+  gLast = now;
+  float dt = el / 1000.0f;
+  int lev = valBase(MENU_NAV_CH) * GAME_JUMP_SIGN;           // > 0 вверх
+  bool up = lev >= NAV_ON, down = lev <= -NAV_ON;
+  bool air = gH > 0.01f || gV > 0.01f;
+  if (up && !air) { gV = GAME_JUMP_V; air = true; }
+  gDuck = down && !air;
+  if (air) {
+    gV -= GAME_G * (down ? 2.0f : 1.0f) * dt;
+    gH += gV * dt;
+    if (gH <= 0) { gH = 0; gV = 0; }
+  }
+  gSpeed = 80.0f + (now - gT0) / 1000.0f * 4.0f;
+  if (gSpeed > 220) gSpeed = 220;
+  gDist += gSpeed * dt;
+  gScore = (uint16_t)(gDist / 8.0f);
+  gNext -= gSpeed * dt;
+  for (int i = 0; i < GOBS_N; i++) {
+    if (!gObs[i].on) continue;
+    gObs[i].x -= gSpeed * dt;
+    if (gObs[i].x < -20) gObs[i].on = false;
+  }
+  if (gNext <= 0) {
+    for (int i = 0; i < GOBS_N; i++) if (!gObs[i].on) {
+      uint8_t k = gameRand(3);
+      if (gScore >= 200 && gameRand(3) == 0) k = 3 + gameRand(2);
+      gObs[i].kind = k; gObs[i].x = 128; gObs[i].on = true;
+      break;
+    }
+    gNext = gSpeed * 0.5f + 30 + gameRand(60);
+  }
+  if (gameHit()) {
+    gameSt = GS_OVER;
+    gameFlashUntil = now + 300;
+    if (gScore > gHi) {
+      gHi = gScore;
+      prefs.begin("game", false);
+      prefs.putUShort("hi", gHi);
+      prefs.end();
+    }
+    LOGF("Dino: game over, score %u", (unsigned)gScore);
+  }
+}
+
+static void gDrawDino(int x, int yb, bool duck, bool step) {
+  const uint16_t W = SH110X_WHITE, K = SH110X_BLACK;
+  if (!duck) {
+    int y = yb - 16;
+    display.fillRect(x + 6, y, 8, 6, W);
+    display.drawPixel(x + 11, y + 1, K);
+    display.fillRect(x + 2, y + 6, 9, 6, W);
+    display.fillRect(x, y + 7, 3, 3, W);
+    display.fillRect(x + 10, y + 8, 3, 2, W);
+    display.fillRect(x + 3, y + 12, 2, step ? 4 : 2, W);
+    display.fillRect(x + 8, y + 12, 2, step ? 2 : 4, W);
+  } else {
+    int y = yb - 9;
+    display.fillRect(x + 8, y, 9, 5, W);
+    display.drawPixel(x + 13, y + 1, K);
+    display.fillRect(x, y + 2, 10, 5, W);
+    display.fillRect(x + 2, y + 7, 2, step ? 2 : 1, W);
+    display.fillRect(x + 7, y + 7, 2, step ? 1 : 2, W);
+  }
+}
+
+static void gDrawObs(const GObs& o, int yb, bool flap) {
+  const uint16_t W = SH110X_WHITE;
+  int x = (int)o.x;
+  switch (o.kind) {
+    case 0: display.fillRect(x + 2, yb - 12, 3, 12, W); display.fillRect(x, yb - 8, 2, 3, W); display.fillRect(x + 5, yb - 9, 2, 3, W); break;
+    case 1: display.fillRect(x + 3, yb - 18, 3, 18, W); display.fillRect(x, yb - 12, 3, 3, W); display.fillRect(x + 6, yb - 13, 2, 3, W); break;
+    case 2: display.fillRect(x + 2, yb - 12, 3, 12, W); display.fillRect(x + 10, yb - 10, 3, 10, W); display.fillRect(x, yb - 8, 2, 3, W); display.fillRect(x + 13, yb - 7, 2, 3, W); break;
+    default: {
+      int by = yb - (o.kind == 3 ? 19 : 34);
+      display.fillRect(x + 3, by + 3, 8, 3, W);
+      display.fillRect(x, by + 4, 3, 1, W);
+      display.fillRect(x + 11, by + 2, 3, 2, W);
+      if (flap) display.fillRect(x + 5, by, 4, 3, W); else display.fillRect(x + 5, by + 6, 4, 2, W);
+    }
+  }
+}
+
+void drawGame() {
+  startScreen();
+  unsigned long now = millis();
+  bool step = ((now / 140) & 1) != 0;
+  display.drawFastHLine(0, GAME_GROUND, SCREEN_W, SH110X_WHITE);
+  for (int i = 0; i < 6; i++) {                                  // бугорки земли едут назад
+    int gx = (int)(((i * 23) - (long)(gDist * 1.0f)) % 140);
+    if (gx < 0) gx += 140;
+    display.drawPixel(gx - 6, GAME_GROUND + 2 + (i & 1), SH110X_WHITE);
+  }
+  int dy = GAME_GROUND - (int)gH;
+  gDrawDino(10, dy, gDuck, gameSt == GS_PLAY && gH <= 0 && step);
+  for (int i = 0; i < GOBS_N; i++) if (gObs[i].on) gDrawObs(gObs[i], GAME_GROUND, step);
+  display.setCursor(50, 0);
+  display.printf("HI%05u %05u", (unsigned)gHi, (unsigned)gScore);
+  if (gameSt == GS_READY) {
+    display.setCursor(30, 18); display.print("DINO");
+    display.setCursor(0, 30);  display.printf("%d+ start  %d- exit", MENU_ENTER_CH + 1, MENU_ENTER_CH + 1);
+  } else if (gameSt == GS_OVER) {
+    display.setCursor(30, 18); display.print("GAME OVER");
+    display.setCursor(0, 30);  display.printf("%d+ again  %d- exit", MENU_ENTER_CH + 1, MENU_ENTER_CH + 1);
+  }
   oledCommit();
 }
 
@@ -3919,6 +4131,7 @@ void drawMenu() {
     case MS_NETS:    display.printf("NETWORKS %d/%d", netCount(), NET_MAX); break;
     case MS_NETPICK: display.print("SELECT NETWORK"); break;
     case MS_RX:      display.print("RECEIVER"); break;
+    case MS_RXWIFIM: display.print("RECEIVER WI-FI"); break;
     case MS_RXCH: {
       static const char* tt[] = { "CURRENT LIMITS", "START DUTY", "MAX DUTY", "RAMPS", "CHANNELS ON/OFF" };
       static const char* ti[] = { "CURRENT LIMITS", "START CURRENT", "MAX CURRENT", "RAMPS", "CHANNELS ON/OFF" };
@@ -4489,6 +4702,7 @@ void drawScreen() {
         case MS_PIN:     drawPinScreen(); break;
         case MS_CONFIRM: drawConfirm(); break;
         case MS_TEXTIN:  drawText(); break;
+        case MS_GAME:    drawGame(); break;
         case MS_BINDRUN: drawBindRun(); break;
         case MS_BINDID:  drawBindId(); break;
         case MS_TXPWR:   drawTxPwr(); break;
@@ -4687,7 +4901,7 @@ void loop() {
 
   oledStep();                                  // одна страница кадра за проход цикла
   static unsigned long lastDisp = 0;
-  if (okOled && !oledBusy() && (now - lastDisp) >= DISP_PERIOD_MS) {
+  if (okOled && !oledBusy() && (now - lastDisp) >= (gameOn() ? GAME_FRAME_MS : DISP_PERIOD_MS)) {
     lastDisp = now;
     unsigned long t0 = micros();
     drawScreen();
