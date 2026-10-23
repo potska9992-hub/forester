@@ -202,6 +202,7 @@ enum BatKind { BE_DIV, BE_FULL, BE_EMPTY, BE_WARN, BE_CRIT };
 enum SimMode { SIM_OFF, SIM_LINK, SIM_LOST };
 struct Nav { bool armed; unsigned long since; unsigned long held; unsigned long last; int dir; };
 struct EvCfg { uint8_t en, color, pat, whereAll, ival, scr; };
+struct GObs { float x; uint8_t kind; bool on; };      // 0 малый кактус, 1 большой, 2 двойной, 3 птица (присесть), 4 птица высоко   // тип выше функций (Arduino делает прототипы)
 struct NetFound { char ssid[33]; int8_t rssi; };      // найденная Wi-Fi сеть (тип выше функций: Arduino делает прототипы)
 
 // порядок = порядок в меню: частое и важное сверху, опасное и временное внизу, Back последний
@@ -3862,7 +3863,6 @@ void drawRxWifi() {
 #define GAME_G          1500.0f
 #define GAME_JUMP_V     330.0f
 enum GameSt { GS_READY, GS_PLAY, GS_OVER };
-struct GObs { float x; uint8_t kind; bool on; };      // 0 малый кактус, 1 большой, 2 двойной, 3 птица (присесть), 4 птица высоко
 const int GOBS_N = 3;
 GObs gObs[GOBS_N];
 uint8_t  gameSt = GS_READY;
