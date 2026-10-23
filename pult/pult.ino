@@ -1,5 +1,7 @@
 // ============================================================
 // Пульт гидрораспределителя. Журнал версий
+//  0.6 - Wi-Fi собран в одну вкладку меню (Transmitter -> Wi-Fi: Phone update, GitHub update, Networks); у сохранённой
+//        сети пункты Test connection и Delete; после ввода сети с пульта подключение проверяется сразу
 //  0.5 - исправлено: метка прошивки FWTAG выбрасывалась линкером из файла, поэтому страница и пульт считали
 //        любой файл "не той прошивкой" (теперь на метку есть ссылка из кода, сборка на GitHub проверяет её наличие)
 //  0.4 - загрузка прошивки с GitHub (меню Transmitter -> GitHub Update): пульт сам подключается к сохранённой
@@ -106,7 +108,7 @@
 #define HB_FLASH_MS     100        // длительность вспышки пульса
 
 // ============ ВЕРСИЯ ПРОШИВКИ ============
-#define FW_VERSION      "0.5"
+#define FW_VERSION      "0.6"
 #define GH_REPO         "potska9992-hub/forester"   // репозиторий с готовыми прошивками
 #define GH_TAG          "pult-latest"               // релиз с последней прошивкой пульта
 #define NET_MAX         3           // сохранённых Wi-Fi сетей
@@ -181,7 +183,7 @@ enum MenuScr {
   MS_DBGLIST, MS_DBGDESC, MS_DBGPAGE,
   MS_PIN, MS_FRTARGET, MS_CONFIRM,
   MS_RX, MS_RXCH, MS_RXDIR, MS_RXGLOB, MS_RXEDIT, MS_RXSTAT, MS_RXWIFI,
-  MS_NETS, MS_NETPICK, MS_TEXTIN
+  MS_NETS, MS_NETPICK, MS_TEXTIN, MS_WIFI, MS_NETACT
 };
 enum ChItem { CI_TYPE, CI_REV, CI_EN, CI_EXPO, CI_MAX, CI_LED, CI_BACK };
 enum EvItem { EI_EN, EI_COLOR, EI_PAT, EI_INT, EI_WHERE, EI_SCR, EI_FIXED, EI_BACK };
@@ -192,8 +194,9 @@ struct EvCfg { uint8_t en, color, pat, whereAll, ival, scr; };
 struct NetFound { char ssid[33]; int8_t rssi; };      // найденная Wi-Fi сеть (тип выше функций: Arduino делает прототипы)
 
 // порядок = порядок в меню: частое и важное сверху, опасное и временное внизу, Back последний
-enum TxItem { TX_CAL, TX_CHSET, TX_PWR, TX_BIND, TX_TRT, TX_SCR, TX_LED, TX_BAT, TX_LOG, TX_DBG, TX_WIFI, TX_GH, TX_NETS, TX_SIM, TX_FR, TX_BACK, TX_COUNT };
+enum TxItem { TX_CAL, TX_CHSET, TX_PWR, TX_BIND, TX_TRT, TX_SCR, TX_LED, TX_BAT, TX_LOG, TX_DBG, TX_WIFI, TX_SIM, TX_FR, TX_BACK, TX_COUNT };
 enum RxTopic { RT_LIMIT, RT_DUTY, RT_MAXD, RT_RAMP, RT_CHEN, RT_GLOB, RT_STAT, RT_WIFI, RT_BACK, RT_COUNT };
+enum WifiItem { WF_PHONE, WF_GH, WF_NETS, WF_BACK, WF_COUNT };
 enum ScrId { SC_MAIN, SC_TX, SC_RX, SC_LINK, SC_POWER, SC_LOG };
 enum DbgPage { DP_RADIO, DP_TELEM, DP_LIM, DP_RAW, DP_SYS, DP_LOG };
 enum ConfAct { CA_CLEARLOG, CA_FORGET, CA_FR_TX, CA_FR_RX, CA_NETDEL, CA_NETALL };
@@ -755,7 +758,7 @@ MenuScr menuScr = MS_MAIN;
 int     sel = 0, menuTop = 0;
 int     idxMain = 0, idxTx = 0, idxCal = 0, idxChList = 0, idxChEdit = 0, idxBat = 0;
 int     idxLed = 0, idxEvList = 0, idxEvEdit = 0, idxPreset = 0, idxRx = 0, idxRxCh = 0, idxRxDir = 0;
-int     idxNets = 0;
+int     idxNets = 0, idxWifi = 0, netSlot = 0;
 // выбор сети (скан) и ввод текста с пульта
 NetFound pickNet[8];
 int     pickN = 0;
@@ -895,17 +898,24 @@ void netClearAll() {
 }
 
 // ---- загрузка с GitHub: состояние (реализация ниже, после wifiTick) ----
-enum GhStage { G_SCAN, G_CONN, G_API, G_ASK, G_DL, G_OK, G_ERR };
+enum GhStage { G_SCAN, G_CONN, G_API, G_ASK, G_DL, G_OK, G_ERR, G_TEST };
 GhStage ghStage = G_SCAN;
 char ghNet[33] = "";             // сеть, к которой подключаемся
 char ghVer[16] = "";             // версия найденной прошивки
 char ghErr[40] = "";
 char ghErr2[33] = "";
+int  ghTestSlot = -1;            // >= 0: только проверка подключения к этой сохранённой сети
+bool ghFresh = false;            // проверка сразу после ввода сети
+MenuScr ghBackScr = MS_WIFI;     // куда вернуться при выходе
+int  ghBackIdx = 0;
+int  ghRssi = 0;
+char ghIp[20] = "";
 char ghSha[65] = "";             // SHA-256 из ответа GitHub
 char ghUrl[200] = "";
 size_t ghSize = 0, ghDone = 0;
 unsigned long ghT0 = 0;
 void ghBegin();
+void ghTestBegin(int slot, MenuScr back, int idx, bool fresh);
 void ghStop(const char* why);
 
 // ============ БАТАРЕЯ ============
@@ -1291,6 +1301,8 @@ int menuCount() {
     case MS_DBGLIST: return NUM_DP + 1;
     case MS_FRTARGET: return 3;
     case MS_NETS:    return NET_MAX + 3;
+    case MS_WIFI:    return WF_COUNT;
+    case MS_NETACT:  return 3;
     case MS_NETPICK: return pickScanning ? 1 : pickN + 2;
     case MS_RX:      return RT_COUNT;
     case MS_RXCH:    return NUM_CH + 1;
@@ -1663,6 +1675,9 @@ void textFinish() {
   logLine(r == 0 ? "Wi-Fi network saved" : "Wi-Fi network not saved");
   toast(r == 0 ? "Saved" : (r == 1 ? "No free slot" : "Error"));
   gotoScr(MS_NETS, 0);
+  if (r == 0)                                            // сразу проверить подключение
+    for (int i = 0; i < NET_MAX; i++)
+      if (strcmp(netSsid[i], txtSsid) == 0) ghTestBegin(i, MS_NETS, 0, true);
 }
 
 void textStep(int a, int b, int m) {
@@ -1707,9 +1722,7 @@ void menuLabel(int i, char* b, size_t n) {
         case TX_TRT:   snprintf(b, n, "Telem rate %d/s", telemRate); break;
         case TX_LOG:   snprintf(b, n, "Event Log"); break;
         case TX_DBG:   snprintf(b, n, "Debug"); break;
-        case TX_WIFI:  snprintf(b, n, "Wi-Fi Update"); break;
-        case TX_GH:    snprintf(b, n, "GitHub Update"); break;
-        case TX_NETS:  snprintf(b, n, "Wi-Fi Networks"); break;
+        case TX_WIFI:  snprintf(b, n, "Wi-Fi"); break;
         case TX_FR:    snprintf(b, n, "Factory Reset"); break;
         case TX_SIM:   snprintf(b, n, "Sim RX: %s", simN[simMode]); break;
         default:       snprintf(b, n, "Back"); break;
@@ -1858,6 +1871,16 @@ void menuLabel(int i, char* b, size_t n) {
       else                snprintf(b, n, "Back");
       break;
     case MS_DBGLIST: snprintf(b, n, "%s", dbgL[i]); break;
+    case MS_WIFI: {
+      static const char* wl[] = { "Phone update", "GitHub update", "Networks", "Back" };
+      snprintf(b, n, "%s", wl[i]);
+      break;
+    }
+    case MS_NETACT: {
+      static const char* nl[] = { "Test connection", "Delete", "Back" };
+      snprintf(b, n, "%s", nl[i]);
+      break;
+    }
     case MS_NETS:
       if (i < NET_MAX)       snprintf(b, n, "%d %.14s", i + 1, netSsid[i][0] ? netSsid[i] : "(empty)");
       else if (i == NET_MAX) snprintf(b, n, "Add network");
@@ -2039,9 +2062,7 @@ void menuSelect(int i) {
         case TX_TRT:   editInt = telemRate; gotoScr(MS_TRATE, 0); break;
         case TX_LOG:   gotoScr(MS_EVLOG, idxEvLog); break;
         case TX_DBG:   gotoScr(MS_DBGLIST, idxDbg); break;
-        case TX_WIFI:  wifiBegin(); break;
-        case TX_GH:    ghBegin(); break;
-        case TX_NETS:  gotoScr(MS_NETS, idxNets); break;
+        case TX_WIFI:  gotoScr(MS_WIFI, idxWifi); break;
         case TX_FR:    startPin(); break;
         case TX_SIM:
           simMode = (SimMode)((simMode + 1) % 3);      // откат и журнал делает eventsTick
@@ -2257,10 +2278,22 @@ void menuSelect(int i) {
       if (i < NUM_DP) { dbgPage = i; dbgTop = 0; gotoScr(MS_DBGDESC, 0); }
       else            gotoScr(MS_TX, idxTx);
       break;
+    case MS_WIFI:
+      idxWifi = i;
+      if (i == WF_PHONE)     wifiBegin();
+      else if (i == WF_GH)   ghBegin();
+      else if (i == WF_NETS) gotoScr(MS_NETS, idxNets);
+      else                   gotoScr(MS_TX, idxTx);
+      break;
+    case MS_NETACT:
+      if (i == 0)      ghTestBegin(netSlot, MS_NETACT, 0, false);
+      else if (i == 1) startConfirm(CA_NETDEL, MS_NETS, netSlot);
+      else             gotoScr(MS_NETS, idxNets);
+      break;
     case MS_NETS:
       idxNets = i;
       if (i < NET_MAX) {
-        if (netSsid[i][0]) startConfirm(CA_NETDEL, MS_NETS, i);
+        if (netSsid[i][0]) { netSlot = i; gotoScr(MS_NETACT, 0); }
         else               netAddBegin();
       }
       else if (i == NET_MAX)     netAddBegin();
@@ -2268,7 +2301,7 @@ void menuSelect(int i) {
         if (netCount() == 0) toast("Nothing saved");
         else                 startConfirm(CA_NETALL, MS_NETS, i);
       }
-      else gotoScr(MS_TX, idxTx);
+      else gotoScr(MS_WIFI, idxWifi);
       break;
     case MS_NETPICK:
       if (pickScanning) break;
@@ -2309,8 +2342,10 @@ void menuBack() {
     case MS_EVLOG:
     case MS_DBGLIST:
     case MS_FRTARGET:
-    case MS_NETS:
+    case MS_WIFI:
     case MS_PIN:      gotoScr(MS_TX, idxTx); break;
+    case MS_NETS:     gotoScr(MS_WIFI, idxWifi); break;
+    case MS_NETACT:   gotoScr(MS_NETS, idxNets); break;
     case MS_NETPICK:  netScanStop(); gotoScr(MS_NETS, idxNets); break;
     case MS_TEXTIN:   gotoScr(MS_NETS, idxNets); break;
     case MS_CHEDIT:   gotoScr(MS_CHLIST, idxChList); break;
@@ -2603,7 +2638,7 @@ button.m:disabled{opacity:.35}
 <input type="file" id="f" accept=".bin">
 <div id="ck" hidden></div>
 <button class="m" id="go" disabled></button></div>
-<div class="cd" id="c4"><h2 id="t4"></h2><div id="sv"></div>
+<div class="cd" id="c4"><h2 id="t4"></h2><div class="ms" id="hn"></div><div id="sv"></div>
 <button class="m" id="sc"></button><div id="lst"></div>
 <input class="in" id="ss" maxlength="32" autocomplete="off"><input class="in" id="pw" maxlength="63" autocomplete="off">
 <button class="m" id="sa"></button><div class="ms" id="sm" hidden></div></div>
@@ -2613,13 +2648,13 @@ button.m:disabled{opacity:.35}
 </div><script>
 var T={en:{h1:'Firmware update',t0:'This device',k1:'Device',k2:'Firmware',k3:'Network',t1:'New firmware',pt:'Choose .bin file',ph:'Sketch > Export Compiled Binary',
 ck1:'Firmware for',ck2:'Size',ck3:'Version',go:'Install',t2:'Installing',up:'Uploading',vf:'Verifying and installing',wm:'Do not switch off the device and do not leave the network.',
-ok:'Installed. The device is restarting, close this page.',wr:'Wrong firmware: this file is not for this device. Nothing was changed.',er:'Error: ',bk:'Back',nf:'Not a firmware file',t4:'Wi-Fi for GitHub update',n0:'No saved networks',sc:'Scan networks',scn:'Scanning...',sn:'Network name',pw:'Password (empty = open)',sa:'Save',sd:'Saved',fl:'List is full (3). Delete one.',dl:'Delete',e2:'Error'},
+ok:'Installed. The device is restarting, close this page.',wr:'Wrong firmware: this file is not for this device. Nothing was changed.',er:'Error: ',bk:'Back',nf:'Not a firmware file',t4:'Wi-Fi for GitHub update',n0:'No saved networks',sc:'Scan networks',scn:'Scanning...',sn:'Network name',pw:'Password (empty = open)',sa:'Save',sd:'Saved',fl:'List is full (3). Delete one.',dl:'Delete',e2:'Error',hn:'Check the connection on the pult: Wi-Fi > Networks > select the network > Test connection.'},
 ru:{h1:'Обновление прошивки',t0:'Это устройство',k1:'Устройство',k2:'Прошивка',k3:'Сеть',t1:'Новая прошивка',pt:'Выбрать файл .bin',ph:'Скетч > Экспорт бинарного файла',
 ck1:'Прошивка для',ck2:'Размер',ck3:'Версия',go:'Установить',t2:'Установка',up:'Загрузка',vf:'Проверка и установка',wm:'Не выключайте устройство и не отключайтесь от сети.',
-ok:'Установлено. Устройство перезагружается, закройте страницу.',wr:'Не та прошивка: файл не для этого устройства. Ничего не изменено.',er:'Ошибка: ',bk:'Назад',nf:'Это не файл прошивки',t4:'Wi-Fi для обновления с GitHub',n0:'Нет сохранённых сетей',sc:'Найти сети',scn:'Поиск...',sn:'Название сети',pw:'Пароль (пусто = открытая)',sa:'Сохранить',sd:'Сохранено',fl:'Список полон (3). Удалите одну.',dl:'Удалить',e2:'Ошибка'}};
+ok:'Установлено. Устройство перезагружается, закройте страницу.',wr:'Не та прошивка: файл не для этого устройства. Ничего не изменено.',er:'Ошибка: ',bk:'Назад',nf:'Это не файл прошивки',t4:'Wi-Fi для обновления с GitHub',n0:'Нет сохранённых сетей',sc:'Найти сети',scn:'Поиск...',sn:'Название сети',pw:'Пароль (пусто = открытая)',sa:'Сохранить',sd:'Сохранено',fl:'Список полон (3). Удалите одну.',dl:'Удалить',e2:'Ошибка',hn:'Проверить подключение можно на пульте: Wi-Fi > Networks > выбрать сеть > Test connection.'}};
 var $=function(i){return document.getElementById(i)},lang=(navigator.language||'en').slice(0,2)=='ru'?'ru':'en',D={dev:'',name:'-',ver:'-',net:'-'},F=null;
 function tx(k){return T[lang][k]}
-function ui(){var m={h1:'h1',t0:'t0',k1:'k1',k2:'k2',k3:'k3',t1:'t1',pt:'pt',ph:'ph',go:'go',t2:'t2',wm:'wm',bk:'bk',t4:'t4',sc:'sc',sa:'sa'};for(var k in m)$(m[k]).textContent=tx(k);$('ss').placeholder=tx('sn');$('pw').placeholder=tx('pw');ld();$('v1').textContent=D.name;$('v2').textContent=D.ver;$('v3').textContent=D.net;if(F)chk()}
+function ui(){var m={h1:'h1',t0:'t0',k1:'k1',k2:'k2',k3:'k3',t1:'t1',pt:'pt',ph:'ph',go:'go',t2:'t2',wm:'wm',bk:'bk',t4:'t4',sc:'sc',sa:'sa',hn:'hn'};for(var k in m)$(m[k]).textContent=tx(k);$('ss').placeholder=tx('sn');$('pw').placeholder=tx('pw');ld();$('v1').textContent=D.name;$('v2').textContent=D.ver;$('v3').textContent=D.net;if(F)chk()}
 $('lg').onclick=function(){lang=lang=='en'?'ru':'en';ui()};
 function tag(u,d){var p='FWTAG:'+d+':',n=p.length;for(var i=0;i<u.length-n-2;i++){if(u[i]!==70)continue;var j=0;while(j<n&&u[i+j]===p.charCodeAt(j))j++;if(j===n&&u[i+n]>=48&&u[i+n]<=57){var s='';for(var k=i+n;k<i+n+12&&u[k]!==59&&u[k]!==0;k++)s+=String.fromCharCode(u[k]);return s}}return''}
 function chk(){var c=$('ck'),o='';c.hidden=false;if(F.v){o='<div class="r"><span>'+tx('ck1')+'</span><b class="ok">'+D.name+' &#10003;</b></div><div class="r"><span>'+tx('ck2')+'</span><b>'+Math.round(F.f.size/1024)+' KB</b></div><div class="r"><span>'+tx('ck3')+'</span><b class="wn">'+D.ver+' &rarr; '+F.v+'</b></div>'}else o='<div class="ms bad">'+tx(F.nf?'nf':'wr')+'</div>';c.innerHTML=o;$('go').disabled=!F.v}
@@ -2868,7 +2903,7 @@ void wifiStop(const char* why) {
   WiFi.mode(WIFI_OFF);
   wifiUp = false;
   state = ST_MENU;
-  gotoScr(MS_TX, idxTx);
+  gotoScr(MS_WIFI, idxWifi);
   navReset();
   LOGF("Wi-Fi Update: off (%s)", why);
   char tb[20]; snprintf(tb, sizeof(tb), "Wi-Fi off: %.8s", why); toast(tb);
@@ -2920,7 +2955,7 @@ void ghStop(const char* why) {
   WiFi.disconnect();
   WiFi.mode(WIFI_OFF);
   state = ST_MENU;
-  gotoScr(MS_TX, idxTx);
+  gotoScr(ghBackScr, ghBackIdx);
   navReset();
   LOGF("GitHub Update: off (%s)", why);
   if (strcmp(why, "declined") == 0) toast("Cancelled");
@@ -2928,20 +2963,25 @@ void ghStop(const char* why) {
   if (estop.state) goEstop();
 }
 
-void ghBegin() {
+static void ghStart(int testSlot, MenuScr back, int idx, bool fresh) {
   if (batLevel >= 1 && !batUsb) { toast("Battery low"); return; }
+  ghTestSlot = testSlot; ghFresh = fresh; ghBackScr = back; ghBackIdx = idx;
   state = ST_GH;
   ghErr[0] = ghErr2[0] = 0; ghNet[0] = 0; ghVer[0] = 0; ghSha[0] = 0; ghUrl[0] = 0;
   ghSize = ghDone = 0; ghBegan = false;
   ghT0 = millis();
   navReset();
+  if (testSlot >= 0) snprintf(ghNet, sizeof(ghNet), "%s", netSsid[testSlot]);
   if (netCount() == 0) { ghStage = G_ERR; snprintf(ghErr, sizeof(ghErr), "No saved network"); snprintf(ghErr2, sizeof(ghErr2), "Add: Wi-Fi Networks"); return; }
   ghStage = G_SCAN;
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
   WiFi.scanNetworks(true);
-  LOGF("GitHub Update: start");
+  LOGF(testSlot >= 0 ? "Wi-Fi test: start" : "GitHub Update: start");
 }
+
+void ghBegin() { ghStart(-1, MS_WIFI, idxWifi, false); }
+void ghTestBegin(int slot, MenuScr back, int idx, bool fresh) { ghStart(slot, back, idx, fresh); }
 
 // ответ GitHub: ищем файл "pult_<версия>.bin" (не *_full.bin), берём размер, SHA-256 и адрес скачивания
 static bool ghParse(const String& body) {
@@ -3091,11 +3131,17 @@ void ghTick(unsigned long now) {
       for (int i = 0; i < n; i++) {
         String sd = WiFi.SSID(i);
         int r = WiFi.RSSI(i);
-        for (int k = 0; k < NET_MAX; k++)
+        for (int k = 0; k < NET_MAX; k++) {
+          if (ghTestSlot >= 0 && k != ghTestSlot) continue;
           if (netSsid[k][0] && sd == netSsid[k] && r > bestR) { best = k; bestR = r; }
+        }
       }
       WiFi.scanDelete();
-      if (best < 0) { ghFail("No saved network", "in range"); break; }
+      if (best < 0) {
+        if (ghTestSlot >= 0) ghFail("Network not in range", ghFresh ? "Saved, not tested" : netSsid[ghTestSlot]);
+        else                 ghFail("No saved network", "in range");
+        break;
+      }
       snprintf(ghNet, sizeof(ghNet), "%s", netSsid[best]);
       WiFi.begin(netSsid[best], netPass[best][0] ? netPass[best] : nullptr);
       ghStage = G_CONN;
@@ -3104,7 +3150,17 @@ void ghTick(unsigned long now) {
     }
     case G_CONN: {
       wl_status_t st = WiFi.status();
-      if (st == WL_CONNECTED)                    { ghStage = G_API; ghT0 = now; }
+      if (st == WL_CONNECTED) {
+        if (ghTestSlot >= 0) {
+          ghRssi = WiFi.RSSI();
+          snprintf(ghIp, sizeof(ghIp), "%s", WiFi.localIP().toString().c_str());
+          ghStage = G_TEST;
+          LOGF("Wi-Fi test: connected %d dBm", ghRssi);
+        } else {
+          ghStage = G_API;
+        }
+        ghT0 = now;
+      }
       else if (st == WL_CONNECT_FAILED)          ghFail("Wrong password", ghNet);
       else if ((now - ghT0) > 20000UL)           ghFail("Can't connect to", ghNet);
       break;
@@ -3121,6 +3177,9 @@ void ghTick(unsigned long now) {
     }
     case G_DL:
     case G_OK:
+      break;
+    case G_TEST:
+      if ((now - ghT0) > 30000UL) ghStop("timeout");
       break;
     case G_ERR:
       if ((now - ghT0) > 30000UL) ghStop("timeout");
@@ -3722,8 +3781,15 @@ void drawRxWifi() {
 void hintLine(const char* what);
 void drawGh() {
   startScreen();
-  display.setCursor(0, 0);   display.print("GITHUB UPDATE");
+  display.setCursor(0, 0);   display.print(ghTestSlot >= 0 ? "WI-FI TEST" : "GITHUB UPDATE");
   switch (ghStage) {
+    case G_TEST:
+      display.setCursor(0, 14);  display.print(ghFresh ? "Saved and connected" : "Connected");
+      display.setCursor(0, 26);  display.printf("%.21s", ghNet);
+      display.setCursor(0, 36);  display.printf("Signal %d dBm", ghRssi);
+      display.setCursor(0, 46);  display.printf("IP %s", ghIp);
+      drawHintText("MENU = exit", 56);
+      break;
     case G_SCAN:
       display.setCursor(0, 16);  display.print("Looking for networks");
       display.setCursor(0, 28);  display.print("saved in the pult...");
@@ -3805,7 +3871,9 @@ void drawMenu() {
     case MS_EVLOG:   display.printf("EVENT LOG %d/%d", logN, LOG_MAX); break;
     case MS_DBGLIST: display.print("DEBUG"); break;
     case MS_FRTARGET: display.print("FACTORY RESET"); break;
-    case MS_NETS:    display.printf("WI-FI NETWORKS %d/%d", netCount(), NET_MAX); break;
+    case MS_WIFI:    display.print("WI-FI"); break;
+    case MS_NETACT:  display.printf("%.21s", netSsid[netSlot < NET_MAX ? netSlot : 0]); break;
+    case MS_NETS:    display.printf("NETWORKS %d/%d", netCount(), NET_MAX); break;
     case MS_NETPICK: display.print("SELECT NETWORK"); break;
     case MS_RX:      display.print("RECEIVER"); break;
     case MS_RXCH: {
