@@ -1,5 +1,8 @@
 // ============================================================
 // Пульт гидрораспределителя. Журнал версий
+//  0.2 - (нумерация начата заново, до этого было 0.1..0.7) Wi-Fi: код причины отказа подключения (неверный пароль,
+//        сеть не найдена и т.д.), длина сохранённого пароля на экране проверки, ожидание подключения 30 с;
+//        полоса загрузки больше не заходит на значок батареи
 //  0.7 - выход из экранов Wi-Fi (Phone update, GitHub update, Test connection, ошибки) также рычагом CH6,
 //        в любую сторону; в калибровке CH6 не работает как отмена (рычаги там двигаются)
 //  0.6 - Wi-Fi собран в одну вкладку меню (Transmitter -> Wi-Fi: Phone update, GitHub update, Networks); у сохранённой
@@ -110,7 +113,8 @@
 #define HB_FLASH_MS     100        // длительность вспышки пульса
 
 // ============ ВЕРСИЯ ПРОШИВКИ ============
-#define FW_VERSION      "0.7"
+#define FW_VERSION      "0.2"
+#define PBAR_W          108             // ширина полосы загрузки (значок батареи справа)
 #define GH_REPO         "potska9992-hub/forester"   // репозиторий с готовыми прошивками
 #define GH_TAG          "pult-latest"               // релиз с последней прошивкой пульта
 #define NET_MAX         3           // сохранённых Wi-Fi сетей
@@ -911,6 +915,9 @@ bool ghFresh = false;            // проверка сразу после вв�
 MenuScr ghBackScr = MS_WIFI;     // куда вернуться при выходе
 int  ghBackIdx = 0;
 int  ghRssi = 0;
+volatile int ghReason = 0;       // последний код причины отключения Wi-Fi (событие)
+int  ghErrCode = 0;              // код для экрана ошибки
+int  ghPassLen = 0;              // длина пароля выбранной сети
 char ghIp[20] = "";
 char ghSha[65] = "";             // SHA-256 из ответа GitHub
 char ghUrl[200] = "";
@@ -2942,7 +2949,19 @@ static void ghFrame() {              // нарисовать и вытолкну
   while (oledBusy() && (millis() - t0) < 300) oledStep();
 }
 
+static void ghWifiEvt(arduino_event_id_t ev, arduino_event_info_t info) {
+  if (ev == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) ghReason = info.wifi_sta_disconnected.reason;
+}
+static bool ghAuthReason(int r) { return r == 15 || r == 202 || r == 204; }
+static const char* ghReasonText(int r) {
+  if (ghAuthReason(r)) return "Wrong password";
+  if (r == 201)        return "Network not found";
+  if (r == 203 || r == 5 || r == 4) return "Router refused";
+  if (r == 200 || r == 8 || r == 1 || r == 2) return "Signal lost";
+  return "Can't connect to";
+}
 static void ghFail(const char* m, const char* m2 = "") {
+  ghErrCode = 0;
   snprintf(ghErr, sizeof(ghErr), "%s", m);
   snprintf(ghErr2, sizeof(ghErr2), "%s", m2);
   if (ghBegan) { Update.abort(); ghBegan = false; }
@@ -3148,6 +3167,10 @@ void ghTick(unsigned long now) {
         break;
       }
       snprintf(ghNet, sizeof(ghNet), "%s", netSsid[best]);
+      { static bool evSet = false;
+        if (!evSet) { WiFi.onEvent(ghWifiEvt, ARDUINO_EVENT_WIFI_STA_DISCONNECTED); evSet = true; } }
+      ghReason = 0;
+      ghPassLen = strlen(netPass[best]);
       WiFi.begin(netSsid[best], netPass[best][0] ? netPass[best] : nullptr);
       ghStage = G_CONN;
       ghT0 = now;
@@ -3166,8 +3189,16 @@ void ghTick(unsigned long now) {
         }
         ghT0 = now;
       }
-      else if (st == WL_CONNECT_FAILED)          ghFail("Wrong password", ghNet);
-      else if ((now - ghT0) > 20000UL)           ghFail("Can't connect to", ghNet);
+      else if (st == WL_CONNECT_FAILED || ghAuthReason(ghReason)) {
+        int r = ghReason;
+        ghFail("Wrong password", ghNet);
+        ghErrCode = r ? r : 15;
+      }
+      else if ((now - ghT0) > 30000UL) {
+        int r = ghReason;
+        ghFail(ghReasonText(r), ghNet);
+        ghErrCode = r;
+      }
       break;
     }
     case G_API:
@@ -3741,8 +3772,8 @@ void drawWifi() {
     int pct = upTotal ? (int)((upDone * 100UL) / upTotal) : 0;
     if (pct > 99) pct = 99;
     display.setCursor(0, 14);  display.print("Receiving firmware");
-    display.drawRect(0, 28, SCREEN_W, 12, SH110X_WHITE);
-    display.fillRect(2, 30, (SCREEN_W - 4) * pct / 100, 8, SH110X_WHITE);
+    display.drawRect(0, 28, PBAR_W, 12, SH110X_WHITE);   // уже значка батареи (x от 116)
+    display.fillRect(2, 30, (PBAR_W - 4) * pct / 100, 8, SH110X_WHITE);
     display.setCursor(0, 46);  display.printf("%d%%", pct);
     display.setCursor(0, 56);  display.print("do not switch off");
   } else if (upOk) {
@@ -3797,7 +3828,7 @@ void drawGh() {
     case G_TEST:
       display.setCursor(0, 14);  display.print(ghFresh ? "Saved and connected" : "Connected");
       display.setCursor(0, 26);  display.printf("%.21s", ghNet);
-      display.setCursor(0, 36);  display.printf("Signal %d dBm", ghRssi);
+      display.setCursor(0, 36);  display.printf("%d dBm  pass:%d", ghRssi, ghPassLen);
       display.setCursor(0, 46);  display.printf("IP %s", ghIp);
       exitHint("exit", 56);
       break;
@@ -3826,9 +3857,9 @@ void drawGh() {
       bool ver = ghSize && ghDone >= ghSize;
       int pct = ghSize ? (int)((uint64_t)ghDone * 100 / ghSize) : 0;
       display.setCursor(0, 14);  display.print(ver ? "Verifying..." : "Downloading");
-      display.drawRect(0, 26, SCREEN_W, 12, SH110X_WHITE);
-      display.fillRect(2, 28, (SCREEN_W - 4) * pct / 100, 8, SH110X_WHITE);
-      display.setCursor(0, 42);  display.printf("%d%%  %u/%u KB", pct, (unsigned)(ghDone / 1024), (unsigned)(ghSize / 1024));
+      display.drawRect(0, 26, PBAR_W, 12, SH110X_WHITE);
+      display.fillRect(2, 28, (PBAR_W - 4) * pct / 100, 8, SH110X_WHITE);
+      display.setCursor(0, 42);  display.printf("%d%% %u/%u KB", pct, (unsigned)(ghDone / 1024), (unsigned)(ghSize / 1024));
       display.setCursor(0, 56);  display.print("do not switch off");
       break;
     }
@@ -3840,6 +3871,7 @@ void drawGh() {
     case G_ERR:
       display.setCursor(0, 14);  display.print(ghErr);
       display.setCursor(0, 26);  display.printf("%.21s", ghErr2);
+      if (ghErrCode > 0) { display.setCursor(0, 38); display.printf("code %d  pass:%d", ghErrCode, ghPassLen); }
       exitHint("exit", 56);
       break;
   }
