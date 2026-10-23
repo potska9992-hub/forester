@@ -1,5 +1,7 @@
 // ============================================================
 // Пульт гидрораспределителя. Журнал версий
+//  0.7 - выход из экранов Wi-Fi (Phone update, GitHub update, Test connection, ошибки) также рычагом CH6,
+//        в любую сторону; в калибровке CH6 не работает как отмена (рычаги там двигаются)
 //  0.6 - Wi-Fi собран в одну вкладку меню (Transmitter -> Wi-Fi: Phone update, GitHub update, Networks); у сохранённой
 //        сети пункты Test connection и Delete; после ввода сети с пульта подключение проверяется сразу
 //  0.5 - исправлено: метка прошивки FWTAG выбрасывалась линкером из файла, поэтому страница и пульт считали
@@ -108,7 +110,7 @@
 #define HB_FLASH_MS     100        // длительность вспышки пульса
 
 // ============ ВЕРСИЯ ПРОШИВКИ ============
-#define FW_VERSION      "0.6"
+#define FW_VERSION      "0.7"
 #define GH_REPO         "potska9992-hub/forester"   // репозиторий с готовыми прошивками
 #define GH_TAG          "pult-latest"               // релиз с последней прошивкой пульта
 #define NET_MAX         3           // сохранённых Wi-Fi сетей
@@ -2915,6 +2917,7 @@ void wifiTick(unsigned long now) {
   server.handleClient();
   now = millis();                                           // handleClient мог обновить wifiAct позже, чем "now" из начала цикла
   if (upActive) { wifiAct = now; return; }                 // во время приёма файла выхода и таймаутов нет
+  if (navPoll(MENU_ENTER_CH, navB, now, false) != 0) { wifiStop("lever"); return; }   // CH6 в любую сторону = выход
   if (estop.state) { wifiStop("E-Stop"); return; }
   if (WiFi.softAPgetStationNum() > 0 && !wifiEver) { wifiEver = true; wifiAct = now; }
   if (!wifiEver) {
@@ -3122,6 +3125,8 @@ static void ghDownload() {
 void ghTick(unsigned long now) {
   if (state != ST_GH) return;
   if (estop.state && ghStage != G_DL && ghStage != G_OK) { ghStop("E-Stop"); return; }
+  int nb = (ghStage == G_DL || ghStage == G_OK || ghStage == G_API) ? 0 : navPoll(MENU_ENTER_CH, navB, now, false);
+  if (nb != 0 && ghStage != G_ASK) { ghStop(ghStage == G_SCAN || ghStage == G_CONN ? "cancel" : "exit"); return; }   // CH6 = выход / отмена
   switch (ghStage) {
     case G_SCAN: {
       int n = WiFi.scanComplete();
@@ -3169,7 +3174,7 @@ void ghTick(unsigned long now) {
       ghCheck();                                 // блокирующий шаг: экран нарисован внутри
       break;
     case G_ASK: {
-      int b = navPoll(MENU_ENTER_CH, navB, now, false);
+      int b = nb;
       if (b > 0)       ghDownload();
       else if (b < 0)  ghStop("declined");
       else if ((now - ghT0) > 120000UL) ghStop("timeout");
@@ -3722,6 +3727,12 @@ void drawAlert() {
   oledCommit();
 }
 
+static void exitHint(const char* what, int y) {     // "MENU or 6 = exit": выход кнопкой меню или рычагом CH6
+  char h[24];
+  snprintf(h, sizeof(h), "MENU or %d = %s", MENU_ENTER_CH + 1, what);
+  drawHintText(h, y);
+}
+
 void drawWifi() {
   startScreen();
   display.setCursor(0, 0);   display.print("WI-FI UPDATE");
@@ -3741,7 +3752,7 @@ void drawWifi() {
   } else if (upErr[0]) {
     display.setCursor(0, 14);  display.print("Update failed");
     display.setCursor(0, 26);  display.print(upErr);
-    drawHintText("MENU = exit", 56);
+    exitHint("exit", 56);
   } else if (!wifiPage) {
     display.setCursor(0, 12);  display.printf("Net:  %s", wifiSsid);
     display.setCursor(0, 22);  display.print("Pass: " WIFI_PASS);
@@ -3749,14 +3760,14 @@ void drawWifi() {
     display.setCursor(0, 44);  display.print(wifiEver ? "Phone connected" : "Waiting for phone");
     long left = (long)((wifiEver ? WIFI_IDLE_MS : WIFI_NOCONN_MS) - (now - (wifiEver ? wifiAct : wifiT0)) ) / 1000;
     if (left < 0) left = 0;
-    display.setCursor(0, 56);  display.printf("MENU=exit  %ld:%02ld", left / 60, left % 60);
+    display.setCursor(0, 56);  display.printf("MENU/%d=exit %ld:%02ld", MENU_ENTER_CH + 1, left / 60, left % 60);
   } else {
     long left = (long)(WIFI_IDLE_MS - (now - wifiAct)) / 1000;
     if (left < 0) left = 0;
     display.setCursor(0, 14);  display.print("Page open");
     display.setCursor(0, 26);  display.print("Choose the file on the phone");
     display.setCursor(0, 44);  display.printf("idle exit %ld:%02ld", left / 60, left % 60);
-    drawHintText("MENU = exit", 56);
+    exitHint("exit", 56);
   }
   drawBattery();
   oledCommit();
@@ -3773,7 +3784,7 @@ void drawRxWifi() {
     display.setCursor(0, 32);  display.print("Open: " WIFI_ADDR);
     display.setCursor(0, 44);  display.print("Receiver outputs off");
   }
-  drawHintText("MENU = exit", 56);
+  exitHint("exit", 56);
   drawBattery();
   oledCommit();
 }
@@ -3788,17 +3799,17 @@ void drawGh() {
       display.setCursor(0, 26);  display.printf("%.21s", ghNet);
       display.setCursor(0, 36);  display.printf("Signal %d dBm", ghRssi);
       display.setCursor(0, 46);  display.printf("IP %s", ghIp);
-      drawHintText("MENU = exit", 56);
+      exitHint("exit", 56);
       break;
     case G_SCAN:
       display.setCursor(0, 16);  display.print("Looking for networks");
       display.setCursor(0, 28);  display.print("saved in the pult...");
-      drawHintText("MENU = cancel", 56);
+      exitHint("cancel", 56);
       break;
     case G_CONN:
       display.setCursor(0, 16);  display.print("Connecting to");
       display.setCursor(0, 28);  display.printf("%.21s", ghNet);
-      drawHintText("MENU = cancel", 56);
+      exitHint("cancel", 56);
       break;
     case G_API:
       display.setCursor(0, 16);  display.printf("%.21s", ghNet);
@@ -3829,7 +3840,7 @@ void drawGh() {
     case G_ERR:
       display.setCursor(0, 14);  display.print(ghErr);
       display.setCursor(0, 26);  display.printf("%.21s", ghErr2);
-      drawHintText("MENU = exit", 56);
+      exitHint("exit", 56);
       break;
   }
   drawBattery();
