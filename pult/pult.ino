@@ -2963,6 +2963,10 @@ static bool ghParse(const String& body) {
     String sha = body.substring(dg + 17, dg + 17 + 64);
     int ue = body.indexOf('"', ur + 24);
     if (size <= 0 || sha.length() != 64 || ue < 0) continue;
+    if (body.indexOf('"', dg + 17) != dg + 17 + 64) continue;                      // сумма ровно 64 символа
+    bool hexOk = true;
+    for (int i = 0; i < 64; i++) { char c = sha.c_str()[i]; if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) hexOk = false; }
+    if (!hexOk) continue;
     String url = body.substring(ur + 24, ue);
     if (!url.startsWith("https://") || url.length() >= sizeof(ghUrl)) continue;
     snprintf(ghVer, sizeof(ghVer), "%s", ver.c_str());
