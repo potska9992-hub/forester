@@ -1,5 +1,7 @@
 // ============================================================
 // Пульт гидрораспределителя. Журнал версий
+//  0.3.2 - ТЕСТОВАЯ: радио теста опрашивается на каждом проходе цикла (раньше раз в 16 мс, поэтому терялся каждый
+//        второй-третий ответ), ожидание ответа 150 мс, пинг раз в 200 мс.
 //  0.3.1 - ТЕСТОВАЯ: Transmitter -> Radio test (проверка радиоканала с приёмником, пинги и ответы, RSSI/SNR в обе стороны,
 //        мощность CH3). Радио включается только на этом экране после подтверждения антенны (CH6 "+"). За основу
 //        остаётся 0.3, эта версия в основную линию не входит.
@@ -37,6 +39,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <SPI.h>
+#include <math.h>
 #include <RadioLib.h>
 #include <Preferences.h>
 #include <Adafruit_GFX.h>
@@ -123,7 +126,7 @@
 #define HB_FLASH_MS     100        // длительность вспышки пульса
 
 // ============ ВЕРСИЯ ПРОШИВКИ ============
-#define FW_VERSION      "0.3.1"
+#define FW_VERSION      "0.3.2"
 #define PBAR_W          108             // ширина полосы загрузки (значок батареи справа)
 #define GH_REPO         "potska9992-hub/forester"   // репозиторий с готовыми прошивками
 #define GH_TAG          "pult-latest"               // релиз с последней прошивкой пульта
@@ -866,6 +869,7 @@ void gameEnter();
 void rtestEnter();
 void rtestStop();
 void rtestStep(unsigned long now, int a, int b);
+void rtestRadio(unsigned long now);
 void gameStep(unsigned long now, int b);
 bool gameOn();
 
@@ -4049,7 +4053,7 @@ void drawGame() {
 
 // ============ ТЕСТ РАДИО (только 0.3.1) ============
 // Transmitter -> Radio test. Радио инициализируется только после подтверждения антенны (CH6 "+") и выключается при выходе.
-// Пульт шлёт PING раз в 100 мс, приёмник отвечает PONG (с RSSI/SNR, с которыми он услышал пульт).
+// Пульт шлёт PING раз в 200 мс, приёмник отвечает PONG (с RSSI/SNR, с которыми он услышал пульт).
 #define RT_FREQ_MHZ   868.0
 #define RT_BW_KHZ     125.0
 #define RT_SF         7
@@ -4119,13 +4123,18 @@ void rtestStep(unsigned long now, int a, int b) {
     rtPwrIdx = constrain(rtPwrIdx + a, 0, 4);
     rtRadio.setOutputPower(RT_PWR[rtPwrIdx]);
   }
+}
+
+// радиочасть теста: вызывается на каждом проходе главного цикла (ответ приходит быстро, пульт должен успеть на приём)
+void rtestRadio(unsigned long now) {
+  if (rtSt != 1 || !rtInit) return;
   if (rtIrq) {
     rtIrq = false;
     if (rtTxBusy) {
       rtRadio.finishTransmit();
       rtTxBusy = false;
       rtRadio.startReceive();
-      rtWait = true; rtWaitUntil = now + 90;
+      rtWait = true; rtWaitUntil = now + 150;
     } else {
       size_t len = rtRadio.getPacketLength();
       uint8_t buf[32];
@@ -4149,7 +4158,7 @@ void rtestStep(unsigned long now, int a, int b) {
     p.crc = rtCrc(p);
     if (rtRadio.startTransmit((uint8_t*)&p, sizeof(p)) == RADIOLIB_ERR_NONE) { rtTxBusy = true; rtSent++; }
     else rtRadio.startReceive();
-    rtNextAt = now + 100;
+    rtNextAt = now + 200;
   }
 }
 
@@ -5049,6 +5058,7 @@ void loop() {
 
   if (restartAt && (long)(now - restartAt) >= 0) ESP.restart();   // после Factory Reset
 
+  if (state == ST_MENU && menuScr == MS_RTEST) rtestRadio(millis());   // радио теста: на каждом проходе цикла
   oledStep();                                  // одна страница кадра за проход цикла
   static unsigned long lastDisp = 0;
   if (okOled && !oledBusy() && (now - lastDisp) >= (gameOn() ? GAME_FRAME_MS : DISP_PERIOD_MS)) {
