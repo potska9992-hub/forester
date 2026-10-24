@@ -1,5 +1,8 @@
 // ============================================================
 // Пульт гидрораспределителя. Журнал версий
+//  0.3.1 - ТЕСТОВАЯ: Transmitter -> Radio test (проверка радиоканала с приёмником, пинги и ответы, RSSI/SNR в обе стороны,
+//        мощность CH3). Радио включается только на этом экране после подтверждения антенны (CH6 "+"). За основу
+//        остаётся 0.3, эта версия в основную линию не входит.
 //  0.3 - игра Dino (главное меню: Transmitter, Receiver, Dino, Exit; CH3 прыжок/присесть, CH6 "+" старт, "-" и MENU выход,
 //        при проигрыше один раз вспышка красных светодиодов, рекорд в памяти); Receiver -> Wi-Fi вкладка (Phone update,
 //        GitHub update - пока имитация, сети берутся из пульта); из LED & Alerts убран пункт Heartbeat (настройка осталась
@@ -33,6 +36,8 @@
 // ============================================================
 #include <Arduino.h>
 #include <Wire.h>
+#include <SPI.h>
+#include <RadioLib.h>
 #include <Preferences.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SH110X.h>
@@ -118,7 +123,7 @@
 #define HB_FLASH_MS     100        // длительность вспышки пульса
 
 // ============ ВЕРСИЯ ПРОШИВКИ ============
-#define FW_VERSION      "0.3"
+#define FW_VERSION      "0.3.1"
 #define PBAR_W          108             // ширина полосы загрузки (значок батареи справа)
 #define GH_REPO         "potska9992-hub/forester"   // репозиторий с готовыми прошивками
 #define GH_TAG          "pult-latest"               // релиз с последней прошивкой пульта
@@ -194,7 +199,7 @@ enum MenuScr {
   MS_DBGLIST, MS_DBGDESC, MS_DBGPAGE,
   MS_PIN, MS_FRTARGET, MS_CONFIRM,
   MS_RX, MS_RXCH, MS_RXDIR, MS_RXGLOB, MS_RXEDIT, MS_RXSTAT, MS_RXWIFI,
-  MS_NETS, MS_NETPICK, MS_TEXTIN, MS_WIFI, MS_NETACT, MS_RXWIFIM, MS_GAME
+  MS_NETS, MS_NETPICK, MS_TEXTIN, MS_WIFI, MS_NETACT, MS_RXWIFIM, MS_GAME, MS_RTEST
 };
 enum ChItem { CI_TYPE, CI_REV, CI_EN, CI_EXPO, CI_MAX, CI_LED, CI_BACK };
 enum EvItem { EI_EN, EI_COLOR, EI_PAT, EI_INT, EI_WHERE, EI_SCR, EI_FIXED, EI_BACK };
@@ -203,10 +208,11 @@ enum SimMode { SIM_OFF, SIM_LINK, SIM_LOST };
 struct Nav { bool armed; unsigned long since; unsigned long held; unsigned long last; int dir; };
 struct EvCfg { uint8_t en, color, pat, whereAll, ival, scr; };
 struct GObs { float x; uint8_t kind; bool on; };      // 0 малый кактус, 1 большой, 2 двойной, 3 птица (присесть), 4 птица высоко   // тип выше функций (Arduino делает прототипы)
+struct __attribute__((packed)) RtPkt { uint8_t m0, m1, type; uint16_t seq; int8_t rssi, snr; uint8_t bind, crc; };   // пакет радио-теста (9 байт)
 struct NetFound { char ssid[33]; int8_t rssi; };      // найденная Wi-Fi сеть (тип выше функций: Arduino делает прототипы)
 
 // порядок = порядок в меню: частое и важное сверху, опасное и временное внизу, Back последний
-enum TxItem { TX_CAL, TX_CHSET, TX_PWR, TX_BIND, TX_TRT, TX_SCR, TX_LED, TX_BAT, TX_LOG, TX_DBG, TX_WIFI, TX_SIM, TX_FR, TX_BACK, TX_COUNT };
+enum TxItem { TX_CAL, TX_CHSET, TX_PWR, TX_BIND, TX_TRT, TX_SCR, TX_LED, TX_BAT, TX_LOG, TX_DBG, TX_WIFI, TX_RTEST, TX_SIM, TX_FR, TX_BACK, TX_COUNT };
 enum RxTopic { RT_LIMIT, RT_DUTY, RT_MAXD, RT_RAMP, RT_CHEN, RT_GLOB, RT_STAT, RT_WIFI, RT_BACK, RT_COUNT };
 enum WifiItem { WF_PHONE, WF_GH, WF_NETS, WF_BACK, WF_COUNT };
 enum RxWifiItem { RW_PHONE, RW_GH, RW_BACK, RW_COUNT };
@@ -857,6 +863,9 @@ void wifiBegin();
 void wifiStop(const char* why);
 void rxWifiBegin(int mode);
 void gameEnter();
+void rtestEnter();
+void rtestStop();
+void rtestStep(unsigned long now, int a, int b);
 void gameStep(unsigned long now, int b);
 bool gameOn();
 
@@ -1745,6 +1754,7 @@ void menuLabel(int i, char* b, size_t n) {
         case TX_LOG:   snprintf(b, n, "Event Log"); break;
         case TX_DBG:   snprintf(b, n, "Debug"); break;
         case TX_WIFI:  snprintf(b, n, "Wi-Fi"); break;
+        case TX_RTEST: snprintf(b, n, "Radio test"); break;
         case TX_FR:    snprintf(b, n, "Factory Reset"); break;
         case TX_SIM:   snprintf(b, n, "Sim RX: %s", simN[simMode]); break;
         default:       snprintf(b, n, "Back"); break;
@@ -2086,6 +2096,7 @@ void menuSelect(int i) {
         case TX_LOG:   gotoScr(MS_EVLOG, idxEvLog); break;
         case TX_DBG:   gotoScr(MS_DBGLIST, idxDbg); break;
         case TX_WIFI:  gotoScr(MS_WIFI, idxWifi); break;
+        case TX_RTEST: rtestEnter(); gotoScr(MS_RTEST, 0); break;
         case TX_FR:    startPin(); break;
         case TX_SIM:
           simMode = (SimMode)((simMode + 1) % 3);      // откат и журнал делает eventsTick
@@ -2402,6 +2413,7 @@ void menuBack() {
     case MS_RXWIFI:   rxWifiSt = 0; gotoScr(MS_RXWIFIM, idxRxWifi); break;
     case MS_RXWIFIM:  gotoScr(MS_RX, idxRx); break;
     case MS_GAME:     gotoScr(MS_MAIN, idxMain); break;
+    case MS_RTEST:    rtestStop(); gotoScr(MS_TX, idxTx); break;
   }
 }
 
@@ -2492,6 +2504,9 @@ void navStep(unsigned long now) {
       return;
     case MS_GAME:
       gameStep(now, b);
+      return;
+    case MS_RTEST:
+      rtestStep(now, a, b);
       return;
     case MS_BINDRUN:
       if (b < 0) menuBack();
@@ -4032,6 +4047,140 @@ void drawGame() {
   oledCommit();
 }
 
+// ============ ТЕСТ РАДИО (только 0.3.1) ============
+// Transmitter -> Radio test. Радио инициализируется только после подтверждения антенны (CH6 "+") и выключается при выходе.
+// Пульт шлёт PING раз в 100 мс, приёмник отвечает PONG (с RSSI/SNR, с которыми он услышал пульт).
+#define RT_FREQ_MHZ   868.0
+#define RT_BW_KHZ     125.0
+#define RT_SF         7
+#define RT_CR         5
+#define RT_SYNC       0x12
+#define RT_PREAMBLE   8
+#define RT_TCXO_V     1.8f
+#define RT_PIN_NSS    8
+#define RT_PIN_SCK    9
+#define RT_PIN_MOSI   10
+#define RT_PIN_MISO   11
+#define RT_PIN_RST    12
+#define RT_PIN_BUSY   13
+#define RT_PIN_DIO1   14
+#define RT_BIND       0x42
+const int8_t RT_PWR[5] = { 2, 5, 8, 10, 14 };
+
+SX1262 rtRadio = new Module(RT_PIN_NSS, RT_PIN_DIO1, RT_PIN_RST, RT_PIN_BUSY);
+volatile bool rtIrq = false;
+void IRAM_ATTR rtIsr() { rtIrq = true; }
+uint8_t  rtSt = 0;                     // 0 подтверждение антенны, 1 идёт тест, 2 ошибка
+bool     rtInit = false, rtTxBusy = false, rtWait = false;
+uint16_t rtSeq = 0;
+unsigned long rtNextAt = 0, rtWaitUntil = 0;
+uint32_t rtSent = 0, rtRcv = 0;
+int      rtPwrIdx = 0, rtErr = 0;
+int      rtHearRssi = 0, rtHearSnr = 0;   // как пульт слышит приёмник
+int      rtRxRssi = 0, rtRxSnr = 0;       // как приёмник слышит пульт (из PONG)
+bool     rtHave = false;
+
+static uint8_t rtCrc(const RtPkt& p) {
+  const uint8_t* b = (const uint8_t*)&p;
+  uint8_t c = 0;
+  for (size_t i = 0; i < sizeof(RtPkt) - 1; i++) c ^= b[i];
+  return c;
+}
+
+void rtestEnter() {
+  rtSt = 0; rtSent = 0; rtRcv = 0; rtSeq = 0; rtHave = false; rtTxBusy = false; rtWait = false; rtErr = 0;
+}
+
+void rtestStop() {
+  if (rtInit) {
+    rtRadio.clearDio1Action();
+    rtRadio.sleep();
+    rtInit = false;
+    logLine("Radio test: stopped");
+  }
+  rtIrq = false; rtTxBusy = false; rtWait = false; rtSt = 0;
+}
+
+static void rtestStart(unsigned long now) {
+  SPI.begin(RT_PIN_SCK, RT_PIN_MISO, RT_PIN_MOSI, RT_PIN_NSS);
+  int st = rtRadio.begin(RT_FREQ_MHZ, RT_BW_KHZ, RT_SF, RT_CR, RT_SYNC, RT_PWR[rtPwrIdx], RT_PREAMBLE, RT_TCXO_V);
+  if (st != RADIOLIB_ERR_NONE) st = rtRadio.begin(RT_FREQ_MHZ, RT_BW_KHZ, RT_SF, RT_CR, RT_SYNC, RT_PWR[rtPwrIdx], RT_PREAMBLE, 0.0f);
+  if (st == RADIOLIB_ERR_NONE) { rtRadio.setDio2AsRfSwitch(true); rtRadio.setDio1Action(rtIsr); st = rtRadio.startReceive(); }
+  if (st != RADIOLIB_ERR_NONE) { rtErr = st; rtSt = 2; LOGF("Radio test: init failed %d", st); return; }
+  rtInit = true; rtSt = 1; rtIrq = false; rtNextAt = now;
+  LOGF("Radio test: started, %d dBm", RT_PWR[rtPwrIdx]);
+}
+
+void rtestStep(unsigned long now, int a, int b) {
+  if (b < 0) { menuBack(); return; }                      // CH6 "-" = выход
+  if (rtSt == 0) { if (b > 0) rtestStart(now); return; }  // CH6 "+" = антенна подключена, старт
+  if (rtSt != 1) return;
+  if (a) {
+    rtPwrIdx = constrain(rtPwrIdx + a, 0, 4);
+    rtRadio.setOutputPower(RT_PWR[rtPwrIdx]);
+  }
+  if (rtIrq) {
+    rtIrq = false;
+    if (rtTxBusy) {
+      rtRadio.finishTransmit();
+      rtTxBusy = false;
+      rtRadio.startReceive();
+      rtWait = true; rtWaitUntil = now + 90;
+    } else {
+      size_t len = rtRadio.getPacketLength();
+      uint8_t buf[32];
+      if (len > sizeof(buf)) len = sizeof(buf);
+      if (rtRadio.readData(buf, len) == RADIOLIB_ERR_NONE && len == sizeof(RtPkt)) {
+        RtPkt p; memcpy(&p, buf, sizeof(p));
+        if (p.m0 == 0xA5 && p.m1 == 0x5A && p.bind == RT_BIND && p.crc == rtCrc(p) && p.type == 2 && p.seq == rtSeq) {
+          rtRcv++;
+          rtHearRssi = (int)lroundf(rtRadio.getRSSI());
+          rtHearSnr = (int)lroundf(rtRadio.getSNR());
+          rtRxRssi = p.rssi; rtRxSnr = p.snr; rtHave = true;
+          rtWait = false;
+        }
+      }
+    }
+  }
+  if (rtWait && (long)(now - rtWaitUntil) >= 0) rtWait = false;
+  if (!rtTxBusy && !rtWait && (long)(now - rtNextAt) >= 0) {
+    RtPkt p;
+    p.m0 = 0xA5; p.m1 = 0x5A; p.type = 1; p.seq = ++rtSeq; p.rssi = 0; p.snr = 0; p.bind = RT_BIND;
+    p.crc = rtCrc(p);
+    if (rtRadio.startTransmit((uint8_t*)&p, sizeof(p)) == RADIOLIB_ERR_NONE) { rtTxBusy = true; rtSent++; }
+    else rtRadio.startReceive();
+    rtNextAt = now + 100;
+  }
+}
+
+void drawRtest() {
+  startScreen();
+  display.setCursor(0, 0);
+  if (rtSt == 0) {
+    display.print("RADIO TEST");
+    display.setCursor(0, 14); display.print("868 MHz SF7 BW125");
+    display.setCursor(0, 26); display.print("ANTENNA CONNECTED?");
+    display.setCursor(0, 38); display.printf("%d+ yes: start", MENU_ENTER_CH + 1);
+    display.setCursor(0, 48); display.printf("%d- or MENU: exit", MENU_ENTER_CH + 1);
+  } else if (rtSt == 2) {
+    display.print("RADIO TEST");
+    display.setCursor(0, 16); display.print("Radio init failed");
+    display.setCursor(0, 28); display.printf("code %d", rtErr);
+    display.setCursor(0, 48); display.printf("%d- or MENU: exit", MENU_ENTER_CH + 1);
+  } else {
+    int lost = rtSent ? (int)(100UL * (rtSent - rtRcv) / rtSent) : 0;
+    display.printf("RADIO TEST %ddBm", RT_PWR[rtPwrIdx]);
+    display.setCursor(0, 11); display.printf("Sent %lu  Got %lu", (unsigned long)rtSent, (unsigned long)rtRcv);
+    display.setCursor(0, 21); display.printf("Lost %d%%", lost);
+    display.setCursor(0, 31);
+    if (rtHave) display.printf("RX hears me %d/%d", rtRxRssi, rtRxSnr); else display.print("RX hears me --");
+    display.setCursor(0, 41);
+    if (rtHave) display.printf("I hear RX   %d/%d", rtHearRssi, rtHearSnr); else display.print("I hear RX   --");
+    display.setCursor(0, 54); display.printf("%d:power %d-:exit", MENU_NAV_CH + 1, MENU_ENTER_CH + 1);
+  }
+  oledCommit();
+}
+
 void hintLine(const char* what);
 void drawGh() {
   startScreen();
@@ -4703,6 +4852,7 @@ void drawScreen() {
         case MS_CONFIRM: drawConfirm(); break;
         case MS_TEXTIN:  drawText(); break;
         case MS_GAME:    drawGame(); break;
+        case MS_RTEST:   drawRtest(); break;
         case MS_BINDRUN: drawBindRun(); break;
         case MS_BINDID:  drawBindId(); break;
         case MS_TXPWR:   drawTxPwr(); break;
