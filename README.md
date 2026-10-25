@@ -9,14 +9,14 @@
 
 - `pult/` прошивка пульта (`pult.ino`, список библиотек `libs.txt`)
 - `receiver/` прошивка приёмника (позже)
-- `hwtest/` проверочная прошивка приёмника: проверка всех узлов и калибровка датчиков тока (ставится первой на каждое изделие, калибровка хранится в NVS и читается прошивкой приёмника)
+- `hwtest/` проверочная прошивка приёмника: проверка всех узлов и калибровка датчиков тока (ставится первой на каждое изделие, заливается с ПК, на GitHub не собирается; калибровка хранится в NVS и читается прошивкой приёмника; описание в `hwtest/README.md`)
 - `docs/` концепт и протокол связи
 
 ## Сборка .bin
 
-Actions -> Build firmware -> Run workflow -> выбрать pult, receiver или hwtest.
+Actions -> Build firmware -> Run workflow -> выбрать pult или receiver (hwtest на GitHub не собирается, его заливают с ПК).
 
-- Готовый файл: раздел Releases (`pult-latest`, `receiver-latest`, `hwtest-latest`): `pult_<версия>.bin` для обновления по Wi-Fi, `..._full.bin` для заливки по USB.
+- Готовый файл: раздел Releases (`pult-latest`, `receiver-latest`): `pult_<версия>.bin` для обновления по Wi-Fi, `..._full.bin` для заливки по USB.
 - Сводка по памяти: страница запуска.
 - Полный лог: ветка `build-logs` (`pult_build.log`, `pult_summary.md`).
 
