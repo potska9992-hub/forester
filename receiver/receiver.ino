@@ -44,6 +44,7 @@
 
 #define PROJECT_NAME  "receiver"
 #define FW_VERSION    "1.0"
+#define RF_TURNAROUND_MS 15UL                              // пауза перед ответом пульту
 static const char FW_TAG[] __attribute__((used)) = "FWTAG:" PROJECT_NAME ":" FW_VERSION ";";
 
 #define GH_REPO       "potska9992-hub/forester"
