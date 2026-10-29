@@ -161,6 +161,10 @@ static char     logBuf[LOG_SZ];
 static uint32_t logTotal = 0;
 static portMUX_TYPE shMux = portMUX_INITIALIZER_UNLOCKED;
 
+struct CtlShared { int8_t v[NUM_CH]; uint32_t rxAt; uint32_t nzAt; bool estop; bool lever; bool have; };
+static CtlShared ctlSh = { { 0 }, 0, 0, false, false, false };
+struct TelShared { uint8_t cur[NUM_CH]; int8_t pwm[NUM_CH]; uint8_t mLim, mOvl, mOpen, side; uint8_t kill, reason; uint8_t vrx; };
+static TelShared telSh = { { 0 }, { 0 }, 0, 0, 0, 0, 1, 3, 0 };
 static void logRaw(const char* s) { while (*s) { logBuf[logTotal % LOG_SZ] = *s++; logTotal++; } }
 static void plog(const char* fmt, ...) {
   char msg[200];
@@ -176,10 +180,6 @@ static void plog(const char* fmt, ...) {
 }
 
 // ---- Общие данные между ядрами ----
-struct CtlShared { int8_t v[NUM_CH]; uint32_t rxAt; uint32_t nzAt; bool estop; bool lever; bool have; };
-static CtlShared ctlSh = { { 0 }, 0, 0, false, false, false };
-struct TelShared { uint8_t cur[NUM_CH]; int8_t pwm[NUM_CH]; uint8_t mLim, mOvl, mOpen, side; uint8_t kill, reason; uint8_t vrx; };
-static TelShared telSh = { { 0 }, { 0 }, 0, 0, 0, 0, 1, 3, 0 };
 static volatile uint8_t wifiSt = HLW_OFF, wifiArg = 0;     // состояние Wi-Fi, его параметр (в телеметрию)
 static volatile uint8_t wifiReq = 0;                        // команда радио -> loop: 1 phone, 2 github, 3 off, 4 yes
 static volatile bool    btnLatched = false;                 // аварийная кнопка приёмника (держит до нулевого пакета после отпускания)
