@@ -1,5 +1,6 @@
 // ============================================================
 // Пульт гидрораспределителя. Журнал версий
+//  1.3 - экран Safe Start показывается только если какой-то канал не в центре (или ошибка ADS); когда всё в центре, проверка идёт в фоне, экран обычный
 //  1.2 - из меню Transmitter убрана имитация приёмника (RX: Radio/Sim link/Sim lost): всегда настоящее радио; экран Boot check (шина I2C, ADS) показывается только при ошибке; радио запускается после заставки и Safe Start
 //  1.1 - радио опрашивается и во время чтения каналов джойстиков (раньше ждало конца чтения, ~10 мс): больше пакетов управления в секунду, быстрее приём ответов
 //  1.0 - РАДИО (HydroLink v1, SX1262 868 МГц, SF7 BW250): пакеты управления с маской каналов и heartbeat, телеметрия по запросу
@@ -132,7 +133,7 @@
 #define HB_FLASH_MS     100        // длительность вспышки пульса
 
 // ============ ВЕРСИЯ ПРОШИВКИ ============
-#define FW_VERSION      "1.2"
+#define FW_VERSION      "1.3"
 #define PBAR_W          108             // ширина полосы загрузки (значок батареи справа)
 #define GH_REPO         "potska9992-hub/forester"   // репозиторий с готовыми прошивками
 #define GH_TAG          "pult-latest"               // релиз с последней прошивкой пульта
@@ -818,6 +819,12 @@ bool chBad(int i) {
   if (!chEn[i]) return false;
   if (!adsOk[CH[i].ads]) return true;
   return isMoved(i);
+}
+
+// есть ли канал, мешающий Safe Start (не в центре или нет АЦП): только тогда показываем экран Safe Start
+bool safeScreenNeeded() {
+  for (int i = 0; i < NUM_CH; i++) if (chBad(i)) return true;
+  return false;
 }
 
 // ============ СОСТОЯНИЯ ============
@@ -5466,7 +5473,7 @@ void drawCal() {
 void drawScreen() {
   switch (state) {
     case ST_BOOT:    if ((millis() - bootStart) < SPLASH_MS) drawSplash(); else drawBoot(); break;
-    case ST_SAFE:    drawSafe(); break;
+    case ST_SAFE:    if (safeScreenNeeded()) drawSafe(); else drawRun1(); break;   // экран Safe Start только при ошибке канала
     case ST_RUN:
       if (alShown >= 0) { drawAlert(); break; }
       switch (screenNo) {
