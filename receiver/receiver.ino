@@ -405,12 +405,18 @@ static void pcaInit() {
 // ============================================================
 static void setOe(bool on) { oeOn = on; digitalWrite(PIN_OE, on ? LOW : HIGH); }
 static void setEn(bool on) { enOn = on; digitalWrite(PIN_EN, on ? HIGH : LOW); }
-static void relayPin(bool on) { digitalWrite(PIN_RELAY, on ? LOW : HIGH); }
+// EN драйверов включается вместе с реле и остаётся включённым после его размыкания (конденсаторы разряжаются через драйверы).
+// Выключается только при аварии (setFault): реле залипло (1) или не замкнулось / обрыв за реле (2), а также потеря PCA (3). Выходы PCA9685 (OE) при остановке выключаются как раньше.
+static bool enHold = false;
+static void relayPin(bool on) {
+  if (on && !faultCode) { enHold = true; setEn(true); }
+  digitalWrite(PIN_RELAY, on ? LOW : HIGH);
+}
 
 // все выходы в безопасное состояние: сначала аппаратно (OE, EN), потом PCA, потом реле
 static void hardOff() {
   setOe(false);
-  setEn(false);
+  setEn(enHold && !faultCode);
   pcaSetAll(0);
   sweepMask = 0;
 }
@@ -423,6 +429,7 @@ static void relayOpen(unsigned long now) {
 static void setFault(uint8_t code, const char* why) {
   if (faultCode) return;
   faultCode = code;
+  enHold = false;
   setOe(false);
   setEn(false);
   relayPin(false);
@@ -863,7 +870,7 @@ static void controlTick(unsigned long now) {
     bool allow = !faultCode && !btnLatched;
     if (!allow) { testRelay = false; testOe = false; testEn = false; hardOff(); }
     setOe(allow && testOe);
-    setEn(allow && testEn);
+    setEn(allow && (testEn || enHold));
     outAct = false;
     runReset();
     testCurrentTick(now);
@@ -881,7 +888,7 @@ static void controlTick(unsigned long now) {
     if (act) { runReset(); setEn(true); setOe(true); plog("Outputs ENABLED"); }
     else { hardOff(); runReset(); plog("Outputs OFF"); }
   }
-  if (!act && (oeOn || enOn)) hardOff();
+  if (!act && (oeOn || enOn != (enHold && !faultCode))) hardOff();
   if (!act) { for (int i = 0; i < NMOD; i++) iPeakA[i] = -1.0f; currentEval(now); telPublish(); ctlAt = now; return; }
 
   if (!armedRun) {                                          // Safe Start приёмника: сначала нули

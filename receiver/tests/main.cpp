@@ -91,7 +91,7 @@ int main(){
   // --- 5. аварийная кнопка приёмника ---
   pinLvl[34]=1; step(50);
   t=telem(); CHECK((t[27]&1)==1 && ((t[27]>>1)&3)==1);
-  CHECK(pinLvl[33]==1 && pinLvl[38]==0);
+  CHECK(pinLvl[33]==1 && pinLvl[38]==1);
   pinLvl[34]=0; step(100);
   t=telem(); CHECK((t[27]&1)==1 && ((t[27]>>1)&3)==1);               // отпущена, но держит до нулевого пакета
   allCentered(); step(5);
@@ -100,7 +100,7 @@ int main(){
   CHECK(pinLvl[21]==0 && pinLvl[38]==1);
   // --- 6. потеря связи и Safe Start ---
   step(900);
-  printf("init pins 21=%d 33=%d 38=%d\n",pinLvl[21],pinLvl[33],pinLvl[38]); CHECK(pinLvl[21]==1 && pinLvl[33]==1 && pinLvl[38]==0);
+  printf("init pins 21=%d 33=%d 38=%d\n",pinLvl[21],pinLvl[33],pinLvl[38]); CHECK(pinLvl[21]==1 && pinLvl[33]==1 && pinLvl[38]==1);
   CHECK(killNow && killReasonNow==3);
   sendCtlLoop(2500,0,{{0,60}});                                      // связь вернулась с рычагом не в центре
   CHECK(pcaDuty[0]==0);                                              // выходы ждут нуль
