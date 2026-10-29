@@ -44,7 +44,6 @@
 
 #define PROJECT_NAME  "receiver"
 #define FW_VERSION    "1.0"
-#define SERIAL_LOG    0                                   // 1 = дублировать журнал в монитор порта (отладка); журнал виден на странице Wi-Fi (вкладка Test)
 #define RF_TURNAROUND_MS 5UL                               // пауза перед ответом пульту
 static const char FW_TAG[] __attribute__((used)) = "FWTAG:" PROJECT_NAME ":" FW_VERSION ";";
 
@@ -178,9 +177,7 @@ static void plog(const char* fmt, ...) {
   char line[240];
   snprintf(line, sizeof(line), "[%02lu:%02lu] %s\n", (s / 60UL) % 100UL, s % 60UL, msg);
   logRaw(line);
-#if SERIAL_LOG
   if (Serial) Serial.print(line);
-#endif
 }
 
 // ---- Общие данные между ядрами ----
@@ -441,60 +438,42 @@ static void relayMsgSet(const char* fmt, ...) {
   plog("%s", relayMsg);
 }
 
-static const char* relayWhyText();
-
-// Конечный автомат реле: want = нужно ли реле замкнуто.
-// За реле стоят конденсаторы драйверов: после размыкания напряжение за реле падает медленно (минуты), поэтому
-//  - реле считается разомкнутым через 300 мс после команды, падения напряжения не ждём;
-//  - повторное замыкание не требует разряда конденсаторов (при замыкании на заряженные конденсаторы тока нет);
-//  - при замыкании на разряженные конденсаторы напряжение за реле растёт медленно: ждём до 5 с;
-//  - «залипание» реле только предупреждение (в журнале): по напряжению нельзя отличить залипшее реле от заряженного конденсатора.
-//    Выходы при этом выключены сигналами OE и EN независимо от реле.
-static const unsigned long RELAY_RELEASE_MS = 300UL;      // время размыкания контактов
-static const unsigned long RELAY_CLOSE_MAX_MS = 5000UL;   // время заряда конденсаторов после замыкания
-static const unsigned long RELAY_MIN_OFF_MS = 500UL;      // пауза между размыканием и новым замыканием
-static bool relayWarned = false;
-
+// конечный автомат реле: want = нужно ли реле замкнуто
 static void relayTick(unsigned long now, bool want) {
   bool busOk = vBus > 5.0f;
   if (faultCode) want = false;
   switch (relayState) {
     case RS_OFF:
-      if (want && busOk && adcInit && now > 1500UL && (now - relayOffAt) >= RELAY_MIN_OFF_MS) {
+      if (adcInit && now > 1500UL && (now - relayOffAt) > 1000UL) {          // залипание: реле выключено, а за ним напряжение
+        if (vFb > 3.0f) { if (!relayBadAt) relayBadAt = now; else if ((now - relayBadAt) > 500UL) { char m[96]; snprintf(m, sizeof(m), "relay stuck: voltage after relay while OFF (bus %.2f V, after relay %.2f V)", vBus, vFb); setFault(1, m); } }
+        else relayBadAt = 0;
+      }
+      if (want && busOk && vFb < 1.5f && adcInit && now > 1500UL) {
         relayPin(true);
         relayState = RS_CLOSING;
         relayChangeAt = now;
         relayBadAt = 0;
-        relayMsgSet("Relay CLOSING (bus %.2f V, after relay %.2f V)", vBus, vFb);
-      }
-      if (!relayWarned && (now - relayOffAt) > 10000UL && vFb > 3.0f && relayOffAt != 0) {
-        relayWarned = true;
-        relayMsgSet("Relay OFF for 10 s, voltage after relay %.2f V (capacitors still charged or contact stuck)", vFb);
       }
       break;
     case RS_CLOSING:
-      if (!want) { relayMsgSet("Relay OPEN while closing: %s", relayWhyText()); relayPin(false); relayState = RS_OPENING; relayChangeAt = now; break; }
-      if (vBus > 2.0f && vFb >= 0.8f * vBus && (now - relayChangeAt) >= RELAY_RELEASE_MS) {
+      if (!want) { relayPin(false); relayState = RS_OPENING; relayChangeAt = now; break; }
+      if (busOk && vFb > 0.9f * vBus && (now - relayChangeAt) >= 300UL) {
         relayState = RS_ON;
-        relayBadAt = 0;
-        relayMsgSet("Relay ON OK (bus %.2f V, after relay %.2f V, %lu ms)", vBus, vFb, now - relayChangeAt);
-      } else if ((now - relayChangeAt) >= RELAY_CLOSE_MAX_MS) {
-        if (!busOk) { relayPin(false); relayState = RS_OPENING; relayChangeAt = now; relayMsgSet("Relay ON: no bus voltage (12 V missing), cannot check"); }
-        else { char m[96]; snprintf(m, sizeof(m), "relay ON but no voltage after it (relay or fuse): bus %.2f V, after relay %.2f V", vBus, vFb); setFault(2, m); }
+        relayMsgSet("Relay ON OK (bus %.2f V, after relay %.2f V)", vBus, vFb);
+      } else if ((now - relayChangeAt) >= 800UL) {
+        if (busOk && vFb > 0.8f * vBus) { relayState = RS_ON; relayMsgSet("Relay ON OK, slow rise (bus %.2f V, after relay %.2f V)", vBus, vFb); }
+        else if (!busOk) { relayPin(false); relayState = RS_OPENING; relayChangeAt = now; relayMsgSet("Relay ON: no bus voltage (12 V missing), cannot check"); }
+        else setFault(2, "relay ON but no voltage after it (relay or fuse)");
       }
       break;
     case RS_ON:
-      if (!want) { relayMsgSet("Relay OPEN: %s (bus %.2f V, after relay %.2f V)", relayWhyText(), vBus, vFb); relayPin(false); relayState = RS_OPENING; relayChangeAt = now; break; }
-      if (vBus > 5.0f && vFb < 0.5f * vBus) {
-        if (!relayBadAt) relayBadAt = now;
-        else if ((now - relayBadAt) > 500UL) { char m[96]; snprintf(m, sizeof(m), "voltage after relay lost while relay ON (relay or fuse): bus %.2f V, after relay %.2f V", vBus, vFb); setFault(2, m); }
-      } else relayBadAt = 0;
+      if (!want) { relayPin(false); relayState = RS_OPENING; relayChangeAt = now; break; }
+      if (busOk && vFb < 0.5f * vBus) { if (!relayBadAt) relayBadAt = now; else if ((now - relayBadAt) > 500UL) setFault(2, "voltage after relay lost while relay ON (relay or fuse)"); }
+      else relayBadAt = 0;
       break;
     case RS_OPENING:
-      if ((now - relayChangeAt) >= RELAY_RELEASE_MS) {
-        relayState = RS_OFF; relayOffAt = now; relayBadAt = 0; relayWarned = false;
-        relayMsgSet("Relay OFF (after relay %.2f V, falls slowly because of the driver capacitors)", vFb);
-      }
+      if (vFb < 1.5f) { relayState = RS_OFF; relayOffAt = now; relayBadAt = 0; relayMsgSet("Relay OFF OK (after relay %.2f V)", vFb); }
+      else if ((now - relayChangeAt) >= 2500UL) setFault(1, "relay stuck: voltage after relay 2.5 s after opening");
       break;
   }
 }
@@ -844,19 +823,6 @@ static void estopTick(unsigned long now) {
 }
 
 static bool wifiActive() { return wifiSt != HLW_OFF; }
-
-// Причина, по которой реле должно быть выключено (для журнала)
-static const char* relayWhyText() {
-  if (faultCode) return "fault";
-  if (btnLatched) return "RX E-Stop button";
-  if (killNow && killReasonNow == 0) return "pult E-Stop";
-  if (killNow && killReasonNow == 3) return "link lost";
-  if (bindMode) return "bind mode";
-  if (wifiActive()) return "Wi-Fi mode";
-  if (vBus <= 5.0f) return "no bus voltage";
-  return "stopped";
-}
-
 static bool testMode() { return testOK && wifiSt != HLW_OFF; }
 
 static void testCurrentTick(unsigned long now);
@@ -892,11 +858,8 @@ static void controlTick(unsigned long now) {
   }
 
   // рабочий режим
-  // напряжение шины нужно для замыкания реле; при замыкании на пустые конденсаторы шина просаживается, поэтому уже замкнутое реле
-  // не размыкаем из-за просадки (только если шина пропала совсем, ниже 2 В)
   bool busOk = vBus > 5.0f;
-  bool busKeep = vBus > 2.0f && (relayState == RS_CLOSING || relayState == RS_ON);
-  bool runEnable = !kill && !bindMode && !wifiActive() && (busOk || busKeep);
+  bool runEnable = !kill && !bindMode && !wifiActive() && busOk;
   relayTick(now, runEnable);
   bool act = runEnable && relayState == RS_ON && !faultCode;
   if (act != outAct) {
@@ -2333,6 +2296,7 @@ void setup() {
   pinMode(PIN_ESTOP, INPUT);
   pinMode(PIN_VBUS, INPUT);
   pinMode(PIN_VFB, INPUT);
+  Serial.begin(115200);
 
   cfgLoad();
   bindLoad();
@@ -2383,6 +2347,7 @@ void loop() {
   unsigned long now = millis();
   if (wifiSt >= HLW_PH_WAIT && wifiSt <= HLW_PH_DONE) server.handleClient();
   powerMeasure(now);
+  radioStatsTick(now);
   estopTick(now);
   wifiTick(now);
   controlTick(now);

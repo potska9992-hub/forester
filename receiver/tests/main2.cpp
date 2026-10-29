@@ -20,7 +20,7 @@ static void mediumStep(){
 }
 static void relayModel(){
   bool on=(pinLvl[21]==0);
-  if(relayStuck) fbV=busV; else if(on){ if(relayNoClose) fbV=0; else fbV += (busV-fbV)*0.004f; } else fbV *= 0.99995f;
+  if(relayNoClose) fbV = 0; else if(relayStuck) fbV = busV; else fbV = on ? busV : (fbV>0.3f? fbV*0.97f : 0);
 }
 static void step(int ms){
   for(int i=0;i<ms;i++){ T++; relayModel(); loop(); mediumStep(); radioStep(T); samplerStep(SS); if(T%2==0) samplerStep(SS); }
@@ -51,8 +51,8 @@ int main(int argc,char**argv){
   CHECK(pinLvl[21]==0 && pinLvl[38]==1 && pinLvl[33]==0);
   if(sc=='a'){            // реле не замкнулось
     step(900); CHECK(pinLvl[21]==1);
-    fbV=0; relayNoClose=true;
-    sendCtlLoop(7000,0,{});
+    relayNoClose=true;
+    sendCtlLoop(4000,0,{});
     CHECK(faultCode==2);
     CHECK(pinLvl[33]==1 && pinLvl[38]==0 && pinLvl[21]==1);
     Bytes t=telem(); CHECK((t[27]&1)==1 && ((t[27]>>1)&3)==2);
@@ -63,12 +63,6 @@ int main(int argc,char**argv){
     for(int k=0;k<30;k++){ Bytes a=ask(mkCfg(100+k,1,0,k%8,0,0),4); CHECK(a.size()==12); step(30); }   // ~1.8 с без CONTROL
     CHECK(!killNow); CHECK(pinLvl[21]==0 && pinLvl[38]==1);
     step(3300); CHECK(killNow && killReasonNow==3);                 // без управления связь всё же пропадает
-  }
-  if(sc=='f'){            // Wi-Fi можно включить при аварии реле
-    relayNoClose=true; fbV=0; step(900); sendCtlLoop(7000,0,{});
-    CHECK(faultCode==2);
-    Bytes a=ask(mkCfg(1,3,0x20,0,0,0),4); CHECK(a.size()==12 && a[4]==0);
-    sendCtlLoop(300,0,{}); Bytes t=telem(); CHECK(t[32]==2);
   }
   if(sc=='b'){            // потеряна PCA9685
     pcaPresent=false; sendCtlLoop(300,0,{{0,50}});

@@ -19,7 +19,7 @@ static void mediumStep(){
 }
 static void relayModel(){
   bool on=(pinLvl[21]==0);
-  if(relayStuck) fbV=busV; else if(on){ if(relayNoClose) fbV=0; else fbV += (busV-fbV)*0.004f; } else fbV *= 0.99995f;
+  if(relayNoClose) fbV = 0; else if(relayStuck) fbV = busV; else fbV = on ? busV : (fbV>0.3f? fbV*0.97f : 0);
 }
 static void step(int ms){
   for(int i=0;i<ms;i++){ T++; relayModel(); loop(); mediumStep(); radioStep(T); samplerStep(SS); if(T%2==0) samplerStep(SS); }
