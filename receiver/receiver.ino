@@ -444,7 +444,7 @@ static void relayTick(unsigned long now, bool want) {
   switch (relayState) {
     case RS_OFF:
       if (adcInit && now > 1500UL && (now - relayOffAt) > 1000UL) {          // залипание: реле выключено, а за ним напряжение
-        if (vFb > 3.0f) { if (!relayBadAt) relayBadAt = now; else if ((now - relayBadAt) > 500UL) setFault(1, "relay stuck: voltage after relay while OFF"); }
+        if (vFb > 3.0f) { if (!relayBadAt) relayBadAt = now; else if ((now - relayBadAt) > 500UL) { char m[96]; snprintf(m, sizeof(m), "relay stuck: voltage after relay while OFF (bus %.2f V, after relay %.2f V)", vBus, vFb); setFault(1, m); } }
         else relayBadAt = 0;
       }
       if (want && busOk && vFb < 1.5f && adcInit && now > 1500UL) {
