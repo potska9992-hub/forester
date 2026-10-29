@@ -1,6 +1,6 @@
 // ============================================================
 // Пульт гидрораспределителя. Журнал версий
-//  1.2 - из меню Transmitter убрана имитация приёмника (RX: Radio/Sim link/Sim lost): всегда настоящее радио; экран Boot check (шина I2C, ADS) показывается только при ошибке; радио запускается после заставки
+//  1.2 - из меню Transmitter убрана имитация приёмника (RX: Radio/Sim link/Sim lost): всегда настоящее радио; экран Boot check (шина I2C, ADS) показывается только при ошибке; радио запускается после заставки и Safe Start
 //  1.1 - радио опрашивается и во время чтения каналов джойстиков (раньше ждало конца чтения, ~10 мс): больше пакетов управления в секунду, быстрее приём ответов
 //  1.0 - РАДИО (HydroLink v1, SX1262 868 МГц, SF7 BW250): пакеты управления с маской каналов и heartbeat, телеметрия по запросу
 //        (TELEM RATE), настройки приёмника с подтверждением и повторами (SetConfig / Ack / Batch), полная синхронизация
@@ -5652,7 +5652,7 @@ void setup() {
   for (int i = 0; i < NUM_CH; i++) { raw[i] = cenV[i]; ctl[i] = 0; }
 
   batTick(millis());
-  bootStart = millis();                        // радио SX1262 запускается в loop() после заставки
+  bootStart = millis();                        // радио SX1262 запускается в loop() после заставки и Safe Start
   state = ST_BOOT;
 }
 
@@ -5673,7 +5673,7 @@ void loop() {
   }
 
   static bool radioStarted = false;
-  if (!radioStarted && (now - bootStart) >= SPLASH_MS) { radioStarted = true; hlBegin(); }   // радио после заставки
+  if (!radioStarted && state != ST_BOOT && state != ST_SAFE) { radioStarted = true; hlBegin(); }   // радио после заставки и Safe Start (рычаги в центре)
   bool bootOk = okOled && okMcp && adsOk[0] && adsOk[1];
   if (state == ST_BOOT && (now - bootStart) >= (bootOk ? SPLASH_MS : (SPLASH_MS + BOOT_MS * 2))) {   // экран Boot check только при ошибке
     if (estop.state) goEstop();
