@@ -1,5 +1,10 @@
 // ============================================================
 // Пульт гидрораспределителя. Журнал версий
+//  0.4 - подготовка к радио: стартовый и максимальный ШИМ в единицах 0.1 % (шаг 0.5 %, стартовый по умолчанию 5 %);
+//        Receiver -> Wi-Fi: "Phone: Update/Test" (вкладки Update и Test на странице приёмника, имитация статусов
+//        Client connected / Test active / Uploading); ток приёмника подписан как ток в импульсе (Ipulse);
+//        событие SHORT (КЗ) больше не создаётся; Safe Start при возврате связи; запрос режима CONTROL у приёмника
+//        при подключении (имитация); при ошибках загрузки с GitHub на экране код (HTTP / Update)
 //  0.3 - игра Dino (главное меню: Transmitter, Receiver, Dino, Exit; CH3 прыжок/присесть, CH6 "+" старт, "-" и MENU выход,
 //        при проигрыше один раз вспышка красных светодиодов, рекорд в памяти); Receiver -> Wi-Fi вкладка (Phone update,
 //        GitHub update - пока имитация, сети берутся из пульта); из LED & Alerts убран пункт Heartbeat (настройка осталась
@@ -118,7 +123,7 @@
 #define HB_FLASH_MS     100        // длительность вспышки пульса
 
 // ============ ВЕРСИЯ ПРОШИВКИ ============
-#define FW_VERSION      "0.3"
+#define FW_VERSION      "0.4"
 #define PBAR_W          108             // ширина полосы загрузки (значок батареи справа)
 #define GH_REPO         "potska9992-hub/forester"   // репозиторий с готовыми прошивками
 #define GH_TAG          "pult-latest"               // релиз с последней прошивкой пульта
@@ -213,13 +218,14 @@ enum RxWifiItem { RW_PHONE, RW_GH, RW_BACK, RW_COUNT };
 enum ScrId { SC_MAIN, SC_TX, SC_RX, SC_LINK, SC_POWER, SC_LOG };
 enum DbgPage { DP_RADIO, DP_TELEM, DP_LIM, DP_RAW, DP_SYS, DP_LOG };
 enum ConfAct { CA_CLEARLOG, CA_FORGET, CA_FR_TX, CA_FR_RX, CA_NETDEL, CA_NETALL };
+// LT_SHORT больше не создаётся (решение 28.10.2026), номер оставлен, чтобы не сломать старые записи журнала в NVS
 enum LogType { LT_ESTOP, LT_RXALARM, LT_NOLINK, LT_LINKOK, LT_RXFAULT, LT_LIMIT, LT_BATTTX, LT_OVL, LT_SHORT, LT_OPEN, LT_BATTRX, LT_COUNT };
 // параметры приёмника (SetConfig): SOL = на соленоид (канал x сторона A/B), CH = на канал, GLOB = общие
 enum RxParam { RXP_LIMIT, RXP_DUTY, RXP_MAXD, RXP_RAMPUP, RXP_RAMPDN, RXP_CHEN,
                RXP_OVLDLY, RXP_LINKTMO, RXP_PWMFREQ, RXP_DITHAMP, RXP_DITHFRQ, RXP_PWR,
                RXP_MODE, RXP_STARTI, RXP_MAXI, NUM_RXP };
 enum RxScope { PS_SOL, PS_CH, PS_GLOB };
-enum RxFmt { F_AMP, F_PCT, F_MS, F_HZ, F_ONOFF, F_DBM, F_MODE };
+enum RxFmt { F_AMP, F_PCT, F_MS, F_HZ, F_ONOFF, F_DBM, F_MODE, F_PCT10 };
 struct RxParamDef { const char* name; uint8_t scope; int16_t mn, mx, step, def; uint8_t fmt; };
 struct LogEv { uint8_t type, ch, side, cnt; uint16_t dA; uint32_t t; bool old; };
 struct Telem {
@@ -233,8 +239,8 @@ struct Telem {
 
 const RxParamDef RXP[NUM_RXP] = {
   { "LIMIT",     PS_SOL,    5,  100,  1,  20, F_AMP   },   // 0.5..10.0 А, по умолчанию 2.0 А
-  { "DUTY",      PS_SOL,    0,  100,  1,  30, F_PCT   },   // стартовый ШИМ
-  { "MAX DUTY",  PS_SOL,   10,  100,  1,  60, F_PCT   },   // по умолчанию 60 %
+  { "DUTY",      PS_SOL,    0, 1000,  5,  50, F_PCT10 },   // стартовый ШИМ, 0.1 % (0..100.0 %), шаг 0.5 %, по умолчанию 5.0 %
+  { "MAX DUTY",  PS_SOL,  100, 1000,  5, 600, F_PCT10 },   // максимальный ШИМ, 0.1 % (10.0..100.0 %), по умолчанию 60.0 %
   { "RAMP UP",   PS_CH,     0, 2000, 50, 200, F_MS    },
   { "RAMP DN",   PS_CH,     0, 2000, 50, 200, F_MS    },
   { "ENABLE",    PS_CH,     0,    1,  1,   1, F_ONOFF },
@@ -1108,6 +1114,9 @@ int navMult(const Nav &n, unsigned long now) {
 // Параметры канала хранятся со стороной 0, общие параметры: канал 0, сторона 0.
 uint16_t simNvs[NUM_RXP][NUM_CH][2];
 uint16_t simRam[NUM_RXP][NUM_CH][2];
+// Режим CONTROL хранится в памяти приёмника; пульт запрашивает его при подключении (на радио: SetConfig 0xFFFF)
+bool     rxCfgKnown = false;
+uint16_t rxModeCache = 0;
 
 void simInit() {
   for (int p = 0; p < NUM_RXP; p++)
@@ -1136,6 +1145,7 @@ uint16_t rxSet(int ch, int dir, int param, int value, bool commit) {
   value = constrain(value, (int)RXP[param].mn, (int)RXP[param].mx);
   simRam[param][ch][dir] = value;
   if (commit) simNvs[param][ch][dir] = value;
+  if (param == RXP_MODE) rxModeCache = value;
   return value;
 }
 
@@ -1144,10 +1154,17 @@ void rxRevertAll() {
   for (int p = 0; p < NUM_RXP; p++)
     for (int c = 0; c < NUM_CH; c++)
       for (int d = 0; d < 2; d++) simRam[p][c][d] = simNvs[p][c][d];
+  rxModeCache = simRam[RXP_MODE][0][0];
+}
+
+void rxCfgRequest() {
+  rxModeCache = simRam[RXP_MODE][0][0];
+  rxCfgKnown = true;
+  LOGF("RX config: CONTROL=%s", rxModeCache ? "CURRENT" : "PWM");
 }
 
 // сброс настроек приёмника (привязка не затрагивается)
-void rxFactoryReset() { simInit(); }
+void rxFactoryReset() { simInit(); rxModeCache = simRam[RXP_MODE][0][0]; }
 
 int  rxTopic = RT_LIMIT;           // что выбрано в меню Receiver
 int  rxParam = RXP_LIMIT, rxCh = 0, rxDir = 0;
@@ -1199,7 +1216,7 @@ void simTelemetry(unsigned long now) {
     int mag = abs(p);
     if (!simRam[RXP_CHEN][c][0]) continue;
     bool curMode = simRam[RXP_MODE][0][0] != 0;
-    int maxd = simRam[RXP_MAXD][c][side];
+    int maxd = simRam[RXP_MAXD][c][side] / 10;       // 0.1 % -> %
     if (!curMode && mag > maxd) mag = maxd;
     if (ovlLatch[c]) {
       if (p == 0) {
@@ -1245,9 +1262,12 @@ void eventsTick(unsigned long now) {
   if (linked && !pLinked) {
     restoredAt = now ? now : 1;
     logEvent(LT_LINKOK, 0, 0, 0);
+    rxCfgRequest();                      // режим CONTROL и т.п. берём у приёмника
   }
   if (!linked && pLinked) {
     rxRevertAll();                       // несохранённое откатывается
+    rxCfgKnown = false;
+    rxWifiSt = 0;
     logEvent(LT_NOLINK, 0, 0, 0);
   }
   pLinked = linked;
@@ -1259,10 +1279,7 @@ void eventsTick(unsigned long now) {
     uint8_t bit = (uint8_t)(1 << c);
     int side = (tel.side >> c) & 1;
     if ((ovl & bit) && !(pOvl & bit)) {
-      int l = simRam[RXP_LIMIT][c][side];
-      int th = l * 2;
-      if (th < 40) th = 40;                                  // порог КЗ: 2 x лимит, не менее 4 А
-      logEvent((tel.cur[c] >= th) ? LT_SHORT : LT_OVL, c, side, (uint16_t)tel.cur[c]);
+      logEvent(LT_OVL, c, side, (uint16_t)tel.cur[c]);     // отдельного события КЗ нет, только перегрузка
     }
     if ((opn & bit) && !(pOpen & bit)) logEvent(LT_OPEN, c, side, 0);
     if ((lim & bit) && !(pLim & bit))  logEvent(LT_LIMIT, c, side, (uint16_t)tel.cur[c]);
@@ -1405,6 +1422,7 @@ void fmtParam(int p, int v, char* b, size_t n) {
   switch (RXP[p].fmt) {
     case F_AMP:   snprintf(b, n, "%d.%dA", v / 10, v % 10); break;
     case F_PCT:   snprintf(b, n, "%d%%", v); break;
+    case F_PCT10: snprintf(b, n, "%d.%d%%", v / 10, v % 10); break;
     case F_MS:    snprintf(b, n, "%dms", v); break;
     case F_HZ:    snprintf(b, n, "%dHz", v); break;
     case F_ONOFF: snprintf(b, n, "%s", v ? "ON" : "OFF"); break;
@@ -1413,7 +1431,7 @@ void fmtParam(int p, int v, char* b, size_t n) {
   }
 }
 
-bool rxCurMode() { return rxQuery(0, 0, RXP_MODE) != 0; }
+bool rxCurMode() { return rxCfgKnown && rxModeCache != 0; }   // пока режим не получен от приёмника, показываем PWM
 
 // параметры, при правке которых работает тестовый рычаг
 bool rxLeverParam(int p) { return p == RXP_LIMIT || p == RXP_DUTY || p == RXP_STARTI; }
@@ -1595,7 +1613,7 @@ const char* const DESC_RADIO[] = {
   "RSSI = signal level.", "Closer to 0 is", "better: -63 good,", "-110 bad.", "SNR = signal/noise.", "",
   "Lost = lost packets", "and percent.", "26/s = packets", "per second.", "Age = time since", "last telemetry.", "ID = receiver code." };
 const char* const DESC_TELEM[] = {
-  "TELEMETRY RAW", "I = current of each", "channel, in 0.1 A.", "P = PWM, -100..100.", "Minus = side B.", "",
+  "TELEMETRY RAW", "Ip = pulse current", "of each channel, in", "0.1 A (not average).", "P = PWM, -100..100.", "Minus = side B.", "",
   "L = limit reached", "O = overload", "X = open circuit", "Each is a mask: one", "bit per channel.",
   "s = faulty side", "bit: 0=A, 1=B.", "",
   "Vrx = receiver", "battery, volts.", "R = receiver RSSI.", "K = killswitch:", "no, or the reason." };
@@ -1606,7 +1624,7 @@ const char* const DESC_LOG[] = {
   "LOG", "Last lines of the", "serial log, newest", "at the bottom.", "Same text as on the", "USB serial monitor." };
 const char* const DESC_LIM[] = {
   "LIMITS / NOW / OVL", "One row per channel", "channel, then A", "side, then B side.", "Each side has 3", "numbers, in 0.1 A.", "",
-  "Lim = current limit", "Now = current now", "Ovl = last overload", "from the log", "-- = no data", "",
+  "Lim = current limit", "Now = pulse current", "Ovl = last overload", "from the log", "-- = no data", "",
   "Example row:", "3 30 00 -- 30 31 52", "= CH3. A: lim 3.0,", "now 0, no overload.", "B: lim 3.0, now 3.1", "overload 5.2 A." };
 struct DescRef { const char* const* lines; int n; };
 const DescRef DESC[NUM_DP] = {
@@ -1731,7 +1749,7 @@ void menuLabel(int i, char* b, size_t n) {
   static const char* dbgL[]  = { "Radio", "Telemetry", "Limits", "RAW ADC", "System", "Log", "Back" };
   switch (menuScr) {
     case MS_MAIN: snprintf(b, n, "%s", mainL[i]); break;
-    case MS_RXWIFIM: { static const char* rwL[] = { "Phone update", "GitHub update", "Back" }; snprintf(b, n, "%s", rwL[i < 3 ? i : 2]); break; }
+    case MS_RXWIFIM: { static const char* rwL[] = { "Phone: Update/Test", "GitHub update", "Back" }; snprintf(b, n, "%s", rwL[i < 3 ? i : 2]); break; }
     case MS_TX:
       switch (i) {
         case TX_CAL:   snprintf(b, n, "Calibrate"); break;
@@ -2399,7 +2417,8 @@ void menuBack() {
     case MS_RXGLOB:   gotoScr(MS_RX, idxRx); break;
     case MS_RXEDIT:   rxEditCancel(); break;
     case MS_RXSTAT:   gotoScr(MS_RX, idxRx); break;
-    case MS_RXWIFI:   rxWifiSt = 0; gotoScr(MS_RXWIFIM, idxRxWifi); break;
+    case MS_RXWIFI:   if (rxWifiSt == 5) break;                   // во время загрузки прошивки выход заблокирован
+                      rxWifiSt = 0; gotoScr(MS_RXWIFIM, idxRxWifi); break;
     case MS_RXWIFIM:  gotoScr(MS_RX, idxRx); break;
     case MS_GAME:     gotoScr(MS_MAIN, idxMain); break;
   }
@@ -2616,6 +2635,7 @@ void goEstop() {
   logEvent(LT_ESTOP, 0, 0, 0);
   navReset();
   rxRevertAll();
+  rxWifiSt = 0;                          // Wi-Fi приёмника (и режим Test) закрывается
   logLine("STATE: ESTOP");
 }
 
@@ -2982,10 +3002,12 @@ static const char* ghReasonText(int r) {
   if (r == 200 || r == 8 || r == 1 || r == 2) return "Signal lost";
   return "Can't connect to";
 }
-static void ghFail(const char* m, const char* m2 = "") {
+char ghErrInfo[22] = "";                  // код для диагностики: "http 404", "update 12"
+static void ghFail(const char* m, const char* m2 = "", const char* info = "") {
   ghErrCode = 0;
   snprintf(ghErr, sizeof(ghErr), "%s", m);
   snprintf(ghErr2, sizeof(ghErr2), "%s", m2);
+  snprintf(ghErrInfo, sizeof(ghErrInfo), "%s", info);
   if (ghBegan) { Update.abort(); ghBegan = false; }
   WiFi.disconnect();
   ghStage = G_ERR;
@@ -3073,10 +3095,11 @@ static void ghCheck() {
   http.setTimeout(10000);
   if (!http.begin(cl, "https://api.github.com/repos/" GH_REPO "/releases/tags/" GH_TAG)) { ghFail("GitHub not reachable"); return; }
   int code = http.GET();
-  if (code <= 0)                 { http.end(); ghFail("GitHub not reachable"); return; }
-  if (code == 404)               { http.end(); ghFail("Release not found", "Is the repo public?"); return; }
-  if (code == 403 || code == 429){ http.end(); ghFail("GitHub busy", "Try again later"); return; }
-  if (code != 200)               { http.end(); char t[24]; snprintf(t, sizeof(t), "GitHub error %d", code); ghFail(t); return; }
+  char hi[22]; snprintf(hi, sizeof(hi), "http %d", code);
+  if (code <= 0)                 { http.end(); ghFail("GitHub not reachable", "", hi); return; }
+  if (code == 404)               { http.end(); ghFail("Release not found", "Is the repo public?", hi); return; }
+  if (code == 403 || code == 429){ http.end(); ghFail("GitHub busy", "Try again later", hi); return; }
+  if (code != 200)               { http.end(); char t[24]; snprintf(t, sizeof(t), "GitHub error %d", code); ghFail(t, "", hi); return; }
   String body = http.getString();
   http.end();
   if (!ghParse(body)) { ghFail("No firmware found", "in the release"); return; }
@@ -3089,7 +3112,7 @@ static void ghCheck() {
 static bool ghChunk(const uint8_t* b, size_t n, mbedtls_sha256_context* sha) {
   upScan(b, n, false);
   mbedtls_sha256_update(sha, b, n);
-  if (Update.write((uint8_t*)b, n) != n) { ghFail("Write error", Update.errorString()); return false; }
+  if (Update.write((uint8_t*)b, n) != n) { { char ui[22]; snprintf(ui, sizeof(ui), "update %d", (int)Update.getError()); ghFail("Write error", Update.errorString(), ui); } return false; }
   ghDone += n;
   return true;
 }
@@ -3109,7 +3132,7 @@ static void ghDownload() {
   http.setTimeout(15000);
   if (!http.begin(cl, ghUrl)) { ghFail("Download failed"); return; }
   int code = http.GET();
-  if (code != 200) { http.end(); char t[24]; snprintf(t, sizeof(t), "Download error %d", code); ghFail(code <= 0 ? "Download failed" : t); return; }
+  if (code != 200) { http.end(); char t[24], hi[22]; snprintf(t, sizeof(t), "Download error %d", code); snprintf(hi, sizeof(hi), "http %d", code); ghFail(code <= 0 ? "Download failed" : t, "", hi); return; }
   int len = http.getSize();
   if (len > 0 && (size_t)len != ghSize) { http.end(); ghFail("Size mismatch"); return; }
   WiFiClient* st = http.getStreamPtr();
@@ -3121,7 +3144,7 @@ static void ghDownload() {
   uint8_t hdr[64];
   if (st->readBytes(hdr, sizeof(hdr)) != sizeof(hdr)) { ok = false; ghFail("Download failed"); }
   else if (hdr[0] != 0xE9 || (hdr[12] | (hdr[13] << 8)) != 9) { ok = false; ghFail("Not an ESP32-S3 image"); }
-  else if (!Update.begin(ghSize)) { ok = false; ghFail("Update error", Update.errorString()); }
+  else if (!Update.begin(ghSize)) { ok = false; char ui[22]; snprintf(ui, sizeof(ui), "update %d", (int)Update.getError()); ghFail("Update error", Update.errorString(), ui); }
   else {
     ghBegan = true;
     ok = ghChunk(hdr, sizeof(hdr), &sha);
@@ -3156,7 +3179,7 @@ static void ghDownload() {
   if (ghDone != ghSize)                       { ghFail("Download failed"); return; }
   if (strcasecmp(hex, ghSha) != 0)            { ghFail("Checksum error", "Nothing changed"); return; }
   if (!upFound)                               { ghFail("Wrong firmware", "Nothing changed"); return; }
-  if (!Update.end(true))                      { ghFail("Update error", Update.errorString()); return; }
+  if (!Update.end(true))                      { char ui[22]; snprintf(ui, sizeof(ui), "update %d", (int)Update.getError()); ghFail("Update error", Update.errorString(), ui); return; }
   ghBegan = false;
   ghStage = G_OK;
   restartAt = millis() + 2500UL;
@@ -3256,13 +3279,24 @@ void rxWifiBegin(int mode) {
   logLine(mode ? "RX GitHub update: requested (simulated)" : "RX Wi-Fi Update: requested (simulated)");
 }
 
+// Phone (Update/Test), имитация статусов из телеметрии приёмника (с радио придут от него):
+// 2 ждём телефон, 3 телефон подключён (вкладка Update), 4 Test active (вкладка Test подтверждена), 5 Uploading n %, 6 Installed.
+// Пока Test active, пульт управление не отправляет (нули), E-Stop закрывает Wi-Fi.
+int rxUpPct = 0;
 void rxWifiTick(unsigned long now) {
   if (rxWifiSt == 1 && (now - rxWifiAt) >= 800) {
     rxWifiSt = 2; rxWifiAt = now;
     snprintf(rxWifiSsid, sizeof(rxWifiSsid), "RX-SIM1");
   } else if (rxWifiMode == 1 && rxWifiSt >= 2 && rxWifiSt < 5 && (now - rxWifiAt) >= 1200) {
     rxWifiSt++; rxWifiAt = now;                  // имитация этапов: сети -> подключение -> проверка GitHub -> конец
-  } else if (rxWifiSt >= 2 && (now - rxWifiAt) >= (rxWifiMode ? 20000UL : WIFI_NOCONN_MS)) {
+  } else if (rxWifiMode == 0 && rxWifiSt >= 2 && rxWifiSt <= 3 && (now - rxWifiAt) >= 4000) {
+    rxWifiSt++; rxWifiAt = now; rxUpPct = 0;     // имитация: ждём телефон -> подключён -> Test active
+  } else if (rxWifiMode == 0 && rxWifiSt == 4 && (now - rxWifiAt) >= 10000) {
+    rxWifiSt = 5; rxWifiAt = now; rxUpPct = 0;   // имитация: загрузка прошивки
+  } else if (rxWifiMode == 0 && rxWifiSt == 5) {
+    rxUpPct = (int)((now - rxWifiAt) / 40UL);
+    if (rxUpPct >= 100) { rxUpPct = 100; rxWifiSt = 6; rxWifiAt = now; }
+  } else if (rxWifiSt >= 2 && (now - rxWifiAt) >= (rxWifiMode ? 20000UL : (rxWifiSt == 6 ? 5000UL : WIFI_NOCONN_MS))) {
     rxWifiSt = 0;
     toast("RX Wi-Fi closed");
     gotoScr(MS_RXWIFIM, idxRxWifi);
@@ -3646,11 +3680,11 @@ void drawRun2() {
   oledCommit();
 }
 
-// RX CHANNELS: по 9 символов на канал: номер, сторона A/B, ток (А), ШИМ со знаком, пометка ! L O
+// RX CHANNELS: по 9 символов на канал: номер, сторона A/B, ток в импульсе (А), ШИМ со знаком, пометка ! L O
 void drawRxChannels() {
   startScreen();
   display.setCursor(0, 0);
-  display.print("RX CHANNELS");
+  display.print("RX CHANNELS Ipulse");
   for (int r = 0; r < 4; r++) {
     for (int col = 0; col < 2; col++) {
       int c = r + col * 4;
@@ -3715,8 +3749,8 @@ void drawPowerScreen() {
   if (telValid) {
     int sum = 0;
     for (int c = 0; c < NUM_CH; c++) sum += tel.cur[c];
-    display.printf("Load %d.%dA", sum / 10, sum % 10);
-  } else display.print("Load --");
+    display.printf("Ipulse sum %d.%dA", sum / 10, sum % 10);
+  } else display.print("Ipulse sum --");
   display.setCursor(0, 41);
   if (!telValid)       display.print("Kill: --");
   else if (!tel.kill)  display.print("Kill: no");
@@ -3766,9 +3800,9 @@ void drawAlert() {
     case EV_RXALARM:  title = "RX ALARM";  snprintf(l1, sizeof(l1), "Alarm button on RX"); snprintf(l2, sizeof(l2), "Outputs stopped"); break;
     case EV_NOLINK:   title = "NO LINK";   snprintf(l1, sizeof(l1), "No signal from RX"); snprintf(l2, sizeof(l2), "Controls locked"); break;
     case EV_RXFAULT:  title = "RX FAULT";  snprintf(l1, sizeof(l1), "Receiver fault"); snprintf(l2, sizeof(l2), "Check receiver"); break;
-    case EV_OVERLOAD: title = "OVERLOAD";  snprintf(l1, sizeof(l1), "CH%d %c  %d.%dA", sl + 1, side, cur / 10, cur % 10); hint = "Center lever to reset"; break;
+    case EV_OVERLOAD: title = "OVERLOAD";  snprintf(l1, sizeof(l1), "CH%d %c pulse %d.%dA", sl + 1, side, cur / 10, cur % 10); hint = "Center lever to reset"; break;
     case EV_OPEN:     title = "OPEN COIL"; snprintf(l1, sizeof(l1), "CH%d %c", sl + 1, side); hint = "Check solenoid wiring"; break;
-    case EV_LIMIT:    title = "CUR LIMIT"; snprintf(l1, sizeof(l1), "CH%d %c  %d.%dA", sl + 1, side, cur / 10, cur % 10); hint = "Current is limited"; break;
+    case EV_LIMIT:    title = "CUR LIMIT"; snprintf(l1, sizeof(l1), "CH%d %c pulse %d.%dA", sl + 1, side, cur / 10, cur % 10); hint = "Current is limited"; break;
     case EV_RESTORED: title = "LINK BACK"; snprintf(l1, sizeof(l1), "Link restored"); break;
     case EV_BATTTX:   title = "TX BATT";   snprintf(l1, sizeof(l1), "Pult battery %d%%", vbatPct); hint = batLevel >= 2 ? "Critical, charge now" : "Charge soon"; break;
     case EV_BATTRX:   title = "RX BATT";   snprintf(l1, sizeof(l1), "Receiver supply low"); break;
@@ -3836,7 +3870,7 @@ void drawWifi() {
 
 void drawRxWifi() {
   startScreen();
-  display.setCursor(0, 0);   display.print(rxWifiMode ? "RECEIVER GITHUB" : "RECEIVER WI-FI");
+  display.setCursor(0, 0);   display.print(rxWifiMode ? "RECEIVER GITHUB" : "RECEIVER PHONE");
   if (rxWifiSt == 1) {
     display.setCursor(0, 20);  display.print("Asking receiver...");
   } else if (rxWifiMode == 1) {
@@ -3844,12 +3878,31 @@ void drawRxWifi() {
     display.setCursor(0, 16);  display.printf("%d saved networks", netCount());
     display.setCursor(0, 28);  display.print(st[rxWifiSt < 6 ? rxWifiSt : 5]);
     display.setCursor(0, 40);  display.print(rxWifiSt >= 5 ? "works with radio 1.0" : "Receiver outputs off");
+  } else if (rxWifiSt == 3) {
+    display.setCursor(0, 14);  display.print("Phone connected");
+    display.setCursor(0, 26);  display.print("Tab: Update");
+    display.setCursor(0, 40);  display.print("Receiver outputs off");
+  } else if (rxWifiSt == 4) {
+    display.setCursor(0, 12);  display.print("TEST ACTIVE");
+    display.setCursor(0, 24);  display.print("RX outputs LIVE");
+    display.setCursor(0, 34);  display.print("E-Stop works");
+    display.setCursor(0, 44);  display.print("Pult sends no control");
+  } else if (rxWifiSt == 5) {
+    display.setCursor(0, 14);  display.printf("Uploading %d%%", rxUpPct);
+    display.drawRect(0, 26, PBAR_W, 12, SH110X_WHITE);
+    display.fillRect(2, 28, (PBAR_W - 4) * rxUpPct / 100, 8, SH110X_WHITE);
+    display.setCursor(0, 44);  display.print("Do not switch off");
+  } else if (rxWifiSt == 6) {
+    display.setCursor(0, 14);  display.print("Installed");
+    display.setCursor(0, 26);  display.print("Receiver restarts");
+    display.setCursor(0, 40);  display.print("Simulation: no radio");
   } else {
     display.setCursor(0, 12);  display.printf("Net:  %s", rxWifiSsid);
     display.setCursor(0, 22);  display.print("Pass: " WIFI_PASS);
     display.setCursor(0, 32);  display.print("Open: " WIFI_ADDR);
-    display.setCursor(0, 44);  display.print("Receiver outputs off");
+    display.setCursor(0, 42);  display.print("Tabs: Update, Test");
   }
+  if (rxWifiSt == 5) { drawBattery(); oledCommit(); return; }     // во время загрузки выхода нет
   exitHint("exit", 56);
   drawBattery();
   oledCommit();
@@ -4084,6 +4137,7 @@ void drawGh() {
       display.setCursor(0, 14);  display.print(ghErr);
       display.setCursor(0, 26);  display.printf("%.21s", ghErr2);
       if (ghErrCode > 0) { display.setCursor(0, 38); display.printf("code %d  pass:%d", ghErrCode, ghPassLen); }
+      else if (ghErrInfo[0]) { display.setCursor(0, 38); display.printf("code: %s", ghErrInfo); }
       exitHint("exit", 56);
       break;
   }
@@ -4316,6 +4370,9 @@ void drawRxStat() {
   if (telValid) display.printf("RSSI: %d dBm", rfRssi);
   else          display.print("RSSI: --");
   display.setCursor(0, 41);  display.printf("Lost pkts: %lu", (unsigned long)rfLost);
+  display.setCursor(0, 51);
+  if (rxCfgKnown) display.printf("Control: %s", rxModeCache ? "CURRENT" : "PWM");
+  else            display.print("Control: --");
   hintLine("%d:back");
   drawBattery();
   oledCommit();
@@ -4390,7 +4447,7 @@ void drawDbgPage() {
         display.setCursor(0, 20);  display.print("no telemetry");
       } else {
         display.setCursor(0, 10);
-        display.print("I");
+        display.print("Ip");
         for (int c = 0; c < NUM_CH; c++) display.printf("%d ", tel.cur[c]);
         display.setCursor(0, 19);
         display.print("P");
@@ -4721,6 +4778,14 @@ void drawScreen() {
 
 // ============ ЛОГИКА КАЖДОГО ТАКТА ОПРОСА ============
 void stepLogic(unsigned long now) {
+  // связь появилась (вернулась) в рабочем режиме: как при включении, нули, пока все рычаги не в центре
+  static bool prevLinked = false;
+  bool lk = rxLinked();
+  if (lk && !prevLinked && state == ST_RUN) {
+    logLine("LINK back -> SAFE START");
+    goSafe();
+  }
+  prevLinked = lk;
   switch (state) {
     case ST_SAFE: {
       bool ok = true;
