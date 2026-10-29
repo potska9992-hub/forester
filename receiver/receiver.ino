@@ -444,7 +444,7 @@ static void relayTick(unsigned long now, bool want) {
   if (faultCode) want = false;
   switch (relayState) {
     case RS_OFF:
-      if (adcInit && now > 1500UL && (now - relayOffAt) > 1000UL) {          // залипание: реле выключено, а за ним напряжение
+      if (wifiSt == HLW_OFF && adcInit && now > 1500UL && (now - relayOffAt) > 1000UL) {   // в режиме Wi-Fi (конденсаторы разряжаются долго) аварию «залипло» не ставим          // залипание: реле выключено, а за ним напряжение
         if (vFb > 3.0f) { if (!relayBadAt) relayBadAt = now; else if ((now - relayBadAt) > 500UL) { char m[96]; snprintf(m, sizeof(m), "relay stuck: voltage after relay while OFF (bus %.2f V, after relay %.2f V)", vBus, vFb); setFault(1, m); } }
         else relayBadAt = 0;
       }
@@ -473,7 +473,10 @@ static void relayTick(unsigned long now, bool want) {
       break;
     case RS_OPENING:
       if (vFb < 1.5f) { relayState = RS_OFF; relayOffAt = now; relayBadAt = 0; relayMsgSet("Relay OFF OK (after relay %.2f V)", vFb); }
-      else if ((now - relayChangeAt) >= 2500UL) setFault(1, "relay stuck: voltage after relay 2.5 s after opening");
+      else if ((now - relayChangeAt) >= 2500UL) {
+        if (wifiSt != HLW_OFF) { relayState = RS_OFF; relayOffAt = now; relayBadAt = 0; relayMsgSet("Relay opened, voltage after relay still %.2f V (driver capacitors?), Wi-Fi mode: no fault", vFb); }
+        else setFault(1, "relay stuck: voltage after relay 2.5 s after opening");
+      }
       break;
   }
 }
