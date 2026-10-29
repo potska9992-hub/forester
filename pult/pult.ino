@@ -1,5 +1,6 @@
 // ============================================================
 // Пульт гидрораспределителя. Журнал версий
+//  1.2 - из меню Transmitter убрана имитация приёмника (RX: Radio/Sim link/Sim lost): всегда настоящее радио; экран Boot check (шина I2C, ADS) показывается только при ошибке; радио запускается после заставки
 //  1.1 - радио опрашивается и во время чтения каналов джойстиков (раньше ждало конца чтения, ~10 мс): больше пакетов управления в секунду, быстрее приём ответов
 //  1.0 - РАДИО (HydroLink v1, SX1262 868 МГц, SF7 BW250): пакеты управления с маской каналов и heartbeat, телеметрия по запросу
 //        (TELEM RATE), настройки приёмника с подтверждением и повторами (SetConfig / Ack / Batch), полная синхронизация
@@ -131,7 +132,7 @@
 #define HB_FLASH_MS     100        // длительность вспышки пульса
 
 // ============ ВЕРСИЯ ПРОШИВКИ ============
-#define FW_VERSION      "1.1"
+#define FW_VERSION      "1.2"
 #define PBAR_W          108             // ширина полосы загрузки (значок батареи справа)
 #define GH_REPO         "potska9992-hub/forester"   // репозиторий с готовыми прошивками
 #define GH_TAG          "pult-latest"               // релиз с последней прошивкой пульта
@@ -219,7 +220,7 @@ struct GObs { float x; uint8_t kind; bool on; };      // 0 малый какту
 struct NetFound { char ssid[33]; int8_t rssi; };      // найденная Wi-Fi сеть (тип выше функций: Arduino делает прототипы)
 
 // порядок = порядок в меню: частое и важное сверху, опасное и временное внизу, Back последний
-enum TxItem { TX_CAL, TX_CHSET, TX_PWR, TX_BIND, TX_TRT, TX_SCR, TX_LED, TX_BAT, TX_LOG, TX_DBG, TX_WIFI, TX_SIM, TX_FR, TX_BACK, TX_COUNT };
+enum TxItem { TX_CAL, TX_CHSET, TX_PWR, TX_BIND, TX_TRT, TX_SCR, TX_LED, TX_BAT, TX_LOG, TX_DBG, TX_WIFI, TX_FR, TX_BACK, TX_COUNT };
 enum RxTopic { RT_LIMIT, RT_DUTY, RT_MAXD, RT_RAMP, RT_CHEN, RT_GLOB, RT_STAT, RT_WIFI, RT_BACK, RT_COUNT };
 enum WifiItem { WF_PHONE, WF_GH, WF_NETS, WF_BACK, WF_COUNT };
 enum RxWifiItem { RW_PHONE, RW_GH, RW_BACK, RW_COUNT };
@@ -2334,7 +2335,6 @@ void menuLabel(int i, char* b, size_t n) {
   static const char* mainL[] = { "Transmitter", "Receiver", "Dino", "Exit" };
   static const char* calL[]  = { "Set Center", "Set Min/Max", "Dead Zone", "Back" };
   static const char* ledM[]  = { "Both", "Red", "Green", "Off" };
-  static const char* simN[]  = { "Radio", "Sim link", "Sim lost" };
   static const char* ledL[]  = { "Presets", "Alert events", "Status LEDs", "Test alerts", "Reset alerts", "Back" };
   static const char* rxL[]   = { "Current Limits", "Start Duty", "Max Duty", "Ramps", "Channels On/Off", "Global", "RX Status", "Wi-Fi", "Back" };
   static const char* dbgL[]  = { "Radio", "Telemetry", "Limits", "RAW ADC", "System", "Log", "Back" };
@@ -2355,7 +2355,6 @@ void menuLabel(int i, char* b, size_t n) {
         case TX_DBG:   snprintf(b, n, "Debug"); break;
         case TX_WIFI:  snprintf(b, n, "Wi-Fi"); break;
         case TX_FR:    snprintf(b, n, "Factory Reset"); break;
-        case TX_SIM:   snprintf(b, n, "RX: %s", simN[simMode]); break;
         default:       snprintf(b, n, "Back"); break;
       }
       break;
@@ -2697,10 +2696,6 @@ void menuSelect(int i) {
         case TX_DBG:   gotoScr(MS_DBGLIST, idxDbg); break;
         case TX_WIFI:  gotoScr(MS_WIFI, idxWifi); break;
         case TX_FR:    startPin(); break;
-        case TX_SIM:
-          simMode = (SimMode)((simMode + 1) % 3);      // откат и журнал делает eventsTick
-          LOGF("Sim RX -> %d", simMode);
-          break;
         default:       gotoScr(MS_MAIN, idxMain); break;
       }
       break;
@@ -5657,8 +5652,7 @@ void setup() {
   for (int i = 0; i < NUM_CH; i++) { raw[i] = cenV[i]; ctl[i] = 0; }
 
   batTick(millis());
-  hlBegin();                                   // радио SX1262
-  bootStart = millis();
+  bootStart = millis();                        // радио SX1262 запускается в loop() после заставки
   state = ST_BOOT;
 }
 
@@ -5678,7 +5672,10 @@ void loop() {
     LOGF("MENU button: %s", btnMenu.state ? "pressed" : "released");
   }
 
-  if (state == ST_BOOT && (now - bootStart) >= (SPLASH_MS + BOOT_MS)) {
+  static bool radioStarted = false;
+  if (!radioStarted && (now - bootStart) >= SPLASH_MS) { radioStarted = true; hlBegin(); }   // радио после заставки
+  bool bootOk = okOled && okMcp && adsOk[0] && adsOk[1];
+  if (state == ST_BOOT && (now - bootStart) >= (bootOk ? SPLASH_MS : (SPLASH_MS + BOOT_MS * 2))) {   // экран Boot check только при ошибке
     if (estop.state) goEstop();
     else goSafe();
   }
