@@ -1,4 +1,4 @@
-Build: 2026-10-29T03:29:50Z  commit 8ba171d
+Build: 2026-10-29T05:37:46Z  commit 177389a
 FQBN: esp32:esp32:heltec_wireless_stick_lite_V3
 ID          Installed Latest Name
 esp32:esp32 3.3.11    3.3.12 esp32
@@ -9,7 +9,8 @@ Adafruit BusIO                    1.17.4    -            user     -
 Adafruit GFX Library              1.12.6    1.13.0       user     Adafruit GFX graphics core library, t...
 Adafruit MCP23017 Arduino Library 2.3.2     -            user     -
 Adafruit SH110X                   2.1.15    -            user     -
+RadioLib                          7.1.2     7.8.1        user     Universal wireless communication library
 
 -----
-Sketch uses 1133756 bytes (33%) of program storage space. Maximum is 3342336 bytes.
-Global variables use 57000 bytes (17%) of dynamic memory, leaving 270680 bytes for local variables. Maximum is 327680 bytes.
+Sketch uses 1177307 bytes (35%) of program storage space. Maximum is 3342336 bytes.
+Global variables use 58660 bytes (17%) of dynamic memory, leaving 269020 bytes for local variables. Maximum is 327680 bytes.
