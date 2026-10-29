@@ -929,7 +929,13 @@ static void lampsTick(unsigned long now) {
 // ============================================================
 static SX1262 radio = new Module(PIN_NSS, PIN_DIO1, PIN_RST, PIN_BUSY);
 static volatile bool hlIrq = false;
-static void IRAM_ATTR hlIsr() { hlIrq = true; }
+static TaskHandle_t radioTaskH = nullptr;
+static void IRAM_ATTR hlIsr() {
+  hlIrq = true;
+  BaseType_t w = pdFALSE;
+  if (radioTaskH) vTaskNotifyGiveFromISR(radioTaskH, &w);     // будим радиозадачу сразу: пульт отвечает без паузы
+  if (w) portYIELD_FROM_ISR();
+}
 static bool hlInit = false, hlTxBusy = false;
 static int  hlErr = 0;
 
@@ -1067,6 +1073,8 @@ static bool hlSafeNow(unsigned long now) {
   return zero && !c.estop && !btnLatched && !faultCode;
 }
 
+static volatile uint32_t stCtl = 0, stCfg = 0, stNet = 0, stCrcBad = 0, stPairBad = 0, stShort = 0, stTxOk = 0, stTxErr = 0, stAck = 0, stTel = 0;
+static volatile uint8_t stLastCfgTag = 0, stLastCfgOp = 0, stLastCfgPrm = 0;
 static unsigned long lastCtlAt = 0;
 // Настройки/сеть во время синхронизации идут без пакетов управления: продлеваем связь, но не дольше 3 с после последнего управления
 static void cfgKeepAlive(unsigned long now) {
@@ -1206,18 +1214,18 @@ static void handleBind(const uint8_t* p, size_t len, unsigned long now) {
 static void hlRead(unsigned long now) {
   size_t len = radio.getPacketLength();
   uint8_t p[64];
-  if (len > sizeof(p) || len < 6) { uint8_t d[64]; radio.readData(d, len > sizeof(d) ? sizeof(d) : len); return; }
-  if (radio.readData(p, len) != RADIOLIB_ERR_NONE) return;
+  if (len > sizeof(p) || len < 6) { uint8_t d[64]; radio.readData(d, len > sizeof(d) ? sizeof(d) : len); stShort++; return; }
+  if (radio.readData(p, len) != RADIOLIB_ERR_NONE) { stCrcBad++; return; }
   uint16_t c = hlCrc16(p, len - 2);
-  if (c != (uint16_t)(p[len - 2] | (p[len - 1] << 8))) return;
+  if (c != (uint16_t)(p[len - 2] | (p[len - 1] << 8))) { stCrcBad++; return; }
   int type = p[0] >> 4;
   uint16_t pr = (uint16_t)(p[1] | (p[2] << 8));
   if (type == HLT_BIND) { if (pr == 0xFFFF) handleBind(p, len, now); return; }
-  if (pr != pairId()) return;
+  if (pr != pairId()) { stPairBad++; return; }
   switch (type) {
-    case HLT_CONTROL: handleControl(p, len, now); break;
-    case HLT_CFG:     handleCfg(p, len, now); break;
-    case HLT_NET:     handleNet(p, len); break;
+    case HLT_CONTROL: stCtl++; handleControl(p, len, now); break;
+    case HLT_CFG:     stCfg++; if (len >= 8) { stLastCfgTag = p[3]; stLastCfgOp = p[4]; stLastCfgPrm = p[5]; } handleCfg(p, len, now); break;
+    case HLT_NET:     stNet++; handleNet(p, len); break;
     default: break;
   }
 }
@@ -1236,8 +1244,8 @@ static void radioStep(unsigned long now) {
   }
   if (!hlTxBusy && qCount) {
     if (pwrDirty) { pwrDirty = false; hlSetPower(); }
-    if (radio.startTransmit(qBuf[qHead], qLen[qHead]) == RADIOLIB_ERR_NONE) hlTxBusy = true;
-    else radio.startReceive();
+    if (radio.startTransmit(qBuf[qHead], qLen[qHead]) == RADIOLIB_ERR_NONE) { hlTxBusy = true; stTxOk++; if ((qBuf[qHead][0] >> 4) == HLT_ACK) stAck++; else if ((qBuf[qHead][0] >> 4) == HLT_TELEM) stTel++; }
+    else { stTxErr++; radio.startReceive(); }
     qHead = (uint8_t)((qHead + 1) & 3);
     qCount--;
   } else if (!hlTxBusy && pwrDirty) {
@@ -1246,7 +1254,7 @@ static void radioStep(unsigned long now) {
 }
 
 static void radioTask(void*) {
-  for (;;) { radioStep(millis()); vTaskDelay(1); }
+  for (;;) { ulTaskNotifyTake(pdTRUE, 1); radioStep(millis()); }
 }
 
 // ============================================================
@@ -2296,13 +2304,27 @@ void setup() {
   plog("RX E-STOP %s", estopBtn ? "ACTIVE (pressed or wire broken)" : "released");
 
   hlBegin();
-  xTaskCreatePinnedToCore(radioTask, "radio", 8192, nullptr, 3, nullptr, 0);
+  xTaskCreatePinnedToCore(radioTask, "radio", 8192, nullptr, 3, &radioTaskH, 0);
+}
+
+static void radioStatsTick(unsigned long now) {
+  static unsigned long at = 0;
+  static uint32_t last = 0;
+  if ((now - at) < 1000UL) return;
+  at = now;
+  uint32_t sum = stCtl + stCfg + stNet + stCrcBad + stPairBad + stShort + stTxOk + stTxErr;
+  if (sum == last) return;
+  last = sum;
+  plog("RF: ctl %lu cfg %lu net %lu | bad crc %lu pair %lu short %lu | tx telem %lu ack %lu err %lu | last cfg tag %u op %u p %u | rssi %d snr %d",
+       (unsigned long)stCtl, (unsigned long)stCfg, (unsigned long)stNet, (unsigned long)stCrcBad, (unsigned long)stPairBad, (unsigned long)stShort,
+       (unsigned long)stTel, (unsigned long)stAck, (unsigned long)stTxErr, stLastCfgTag, stLastCfgOp, stLastCfgPrm, (int)lastRssi, (int)lastSnr);
 }
 
 void loop() {
   unsigned long now = millis();
   if (wifiSt >= HLW_PH_WAIT && wifiSt <= HLW_PH_DONE) server.handleClient();
   powerMeasure(now);
+  radioStatsTick(now);
   estopTick(now);
   wifiTick(now);
   controlTick(now);
