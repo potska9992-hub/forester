@@ -1060,7 +1060,7 @@ static void hlBegin() {
   hlErr = st;
   hlInit = (st == RADIOLIB_ERR_NONE);
   if (hlInit) hlSetPower();
-  plog("Radio: %s (%d), %d dBm", hlInit ? "started" : "init failed", st, p);
+  plog("Radio: %s (%d), %d dBm, reply delay %lu ms", hlInit ? "started" : "init failed", st, p, RF_TURNAROUND_MS);
 }
 
 // условие для команд, которым нужны нулевые рычаги и отсутствие аварии
@@ -1212,7 +1212,6 @@ static void handleBind(const uint8_t* p, size_t len, unsigned long now) {
 }
 
 static unsigned long txNotBefore = 0;                       // ответ не раньше этого времени: пульту нужно время, чтобы переключиться на приём
-#define RF_TURNAROUND_MS 15UL
 static void hlRead(unsigned long now) {
   txNotBefore = now + RF_TURNAROUND_MS;
   size_t len = radio.getPacketLength();
