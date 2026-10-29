@@ -452,11 +452,12 @@ static bool relayWatch = false;                             // идёт слеж
 static void relayTick(unsigned long now, bool want) {
   bool busOk = vBus > 5.0f;
   if (faultCode) want = false;
+  bool chk = (wifiSt == HLW_OFF);                           // в режиме Wi-Fi (Update/Test/GitHub) проверки реле выключены: аварии не ставятся
   bool vNear = busOk && ((vBus - vFb) <= RELAY_DV);          // напряжение за реле не отличается от бортового больше чем на 2 В
   switch (relayState) {
     case RS_OFF:
       if (relayWatch) {                                     // реле считается разомкнутым, но напряжение ещё держится
-        if (!busOk || !vNear) { relayWatch = false; relayMsgSet("Relay OFF OK (bus %.2f V, after relay %.2f V)", vBus, vFb); }
+        if (!chk || !busOk || !vNear) { relayWatch = false; relayMsgSet("Relay OFF OK (bus %.2f V, after relay %.2f V)", vBus, vFb); }
         else if ((now - relayChangeAt) >= RELAY_STUCK_MS) { relayWatch = false; char m[96]; snprintf(m, sizeof(m), "relay stuck: voltage after relay held %lu s after opening (bus %.2f V, after relay %.2f V)", (unsigned long)(RELAY_STUCK_MS / 1000UL), vBus, vFb); setFault(1, m); }
       }
       if (want && busOk && adcInit && now > 1500UL && (now - relayOffAt) >= RELAY_MIN_OFF_MS) {
@@ -469,13 +470,13 @@ static void relayTick(unsigned long now, bool want) {
     case RS_CLOSING:
       if (!want) { relayPin(false); relayState = RS_OPENING; relayChangeAt = now; break; }
       if ((now - relayChangeAt) >= RELAY_CHECK_MS) {
-        if (vNear) { relayState = RS_ON; relayMsgSet("Relay ON OK (bus %.2f V, after relay %.2f V)", vBus, vFb); }
+        if (vNear || !chk) { relayState = RS_ON; relayMsgSet("Relay ON OK (bus %.2f V, after relay %.2f V)", vBus, vFb); }
         else { char m[96]; snprintf(m, sizeof(m), "relay did not close (bus %.2f V, after relay %.2f V)", vBus, vFb); setFault(2, m); }
       }
       break;
     case RS_ON:
       if (!want) { relayPin(false); relayState = RS_OPENING; relayChangeAt = now; break; }
-      if (busOk && vFb < 0.5f * vBus) { if (!relayBadAt) relayBadAt = now; else if ((now - relayBadAt) > 500UL) setFault(2, "voltage after relay lost while relay ON (relay or fuse)"); }
+      if (chk && busOk && vFb < 0.5f * vBus) { if (!relayBadAt) relayBadAt = now; else if ((now - relayBadAt) > 500UL) setFault(2, "voltage after relay lost while relay ON (relay or fuse)"); }
       else relayBadAt = 0;
       break;
     case RS_OPENING:
@@ -484,7 +485,7 @@ static void relayTick(unsigned long now, bool want) {
       }
       if ((now - relayChangeAt) >= RELAY_CHECK_MS) {
         relayState = RS_OFF; relayOffAt = now; relayBadAt = 0;
-        if (!busOk || !vNear) relayMsgSet("Relay OFF OK (bus %.2f V, after relay %.2f V)", vBus, vFb);
+        if (!chk || !busOk || !vNear) relayMsgSet("Relay OFF OK (bus %.2f V, after relay %.2f V)", vBus, vFb);
         else { relayWatch = true; relayMsgSet("Relay opened, voltage after relay still %.2f V (bus %.2f V), capacitors? watching", vFb, vBus); }
       }
       break;
@@ -1635,7 +1636,7 @@ progress{width:100%;height:18px}
  <div class="card warn" id="wrn"><h2>Warning: Test mode</h2>
   <ul>
    <li>Outputs and the relay become ACTIVE. Hydraulics may move.</li>
-   <li>Nobody must be vNear the valves or the machine.</li>
+   <li>Nobody must be near the valves or the machine.</li>
    <li>Never apply 12 V while the board is powered from USB.</li>
    <li>The emergency button stays working. Leaving this tab, closing the page or losing the phone switches everything off.</li>
   </ul>
@@ -1967,6 +1968,8 @@ static void hRedirect() { server.sendHeader("Location", "http://" AP_ADDR "/", t
 static void wifiOpenPhone() {
   uint64_t mac = ESP.getEfuseMac();
   snprintf(apSsid, sizeof(apSsid), "RX-%02X%02X", (unsigned)((mac >> 32) & 0xFF), (unsigned)((mac >> 40) & 0xFF));
+  if (faultCode == 1 || faultCode == 2) faultCode = 0;       // аварии реле сбрасываем: в режиме Wi-Fi проверки реле выключены
+  relayWatch = false;
   WiFi.mode(WIFI_AP_STA);
   bool apOk = WiFi.softAP(apSsid, AP_PASS);
   WiFi.setTxPower(WIFI_POWER_11dBm);
