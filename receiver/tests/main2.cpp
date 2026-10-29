@@ -20,7 +20,7 @@ static void mediumStep(){
 }
 static void relayModel(){
   bool on=(pinLvl[21]==0);
-  if(relayNoClose) fbV = 0; else if(relayStuck) fbV = busV; else fbV = on ? busV : (fbV>0.3f? fbV*0.97f : 0);
+  if(relayStuck) fbV=busV; else if(on){ if(relayNoClose) fbV=0; else fbV += (busV-fbV)*0.004f; } else fbV *= 0.99995f;
 }
 static void step(int ms){
   for(int i=0;i<ms;i++){ T++; relayModel(); loop(); mediumStep(); radioStep(T); samplerStep(SS); if(T%2==0) samplerStep(SS); }
@@ -51,8 +51,8 @@ int main(int argc,char**argv){
   CHECK(pinLvl[21]==0 && pinLvl[38]==1 && pinLvl[33]==0);
   if(sc=='a'){            // реле не замкнулось
     step(900); CHECK(pinLvl[21]==1);
-    relayNoClose=true;
-    sendCtlLoop(4000,0,{});
+    fbV=0; relayNoClose=true;
+    sendCtlLoop(7000,0,{});
     CHECK(faultCode==2);
     CHECK(pinLvl[33]==1 && pinLvl[38]==0 && pinLvl[21]==1);
     Bytes t=telem(); CHECK((t[27]&1)==1 && ((t[27]>>1)&3)==2);

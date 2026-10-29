@@ -20,7 +20,9 @@ static void mediumStep(){
 }
 static void relayModel(){
   bool on=(pinLvl[21]==0);
-  if(relayNoClose) fbV = 0; else if(relayStuck) fbV = busV; else fbV = on ? busV : (fbV>0.3f? fbV*0.97f : 0);
+  if(relayStuck) fbV=busV;
+  else if(on){ if(relayNoClose) fbV=0; else fbV += (busV-fbV)*0.004f; }   // заряд конденсаторов драйверов через замкнутое реле
+  else fbV *= 0.99995f;                                                   // медленный разряд конденсаторов после размыкания
 }
 static void step(int ms){
   for(int i=0;i<ms;i++){ T++; relayModel(); loop(); mediumStep(); radioStep(T); samplerStep(SS); if(T%2==0) samplerStep(SS); }
@@ -153,17 +155,19 @@ int main(){
   CHECK(pcaDuty[0]>0);
   sendCtlLoop(300,0,{});
   adsV[0]=0;
-  // --- 9. сбой реле: залипло ---
-  step(900);                                                         // связь потеряна, реле открывается
-  relayStuck=true;
-  sendCtlLoop(100,0,{});                                             // связь снова, реле пытается замкнуться
-  step(4000);
-  sendCtlLoop(100,0,{});
-  CHECK(pinLvl[33]==1 && pinLvl[38]==0 && pinLvl[21]==1);
-  CHECK(faultCode==1);
-  t=telem(); CHECK((t[27]&1)==1 && ((t[27]>>1)&3)==2);
-  sendCtlLoop(3000,0,{});
-  CHECK(faultCode==1 && pinLvl[21]==1);                               // защёлка
+  // --- 9. конденсаторы за реле: после размыкания напряжение падает медленно, реле не должно считаться неисправным ---
+  step(900);                                                         // связь потеряна: реле размыкается
+  CHECK(pinLvl[21]==1 && faultCode==0);
+  step(12000);                                                       // 12 с: конденсаторы ещё заряжены
+  CHECK(fbV>3.0f); CHECK(faultCode==0);
+  sendCtlLoop(1500,0,{});                                            // связь вернулась: реле замыкается без ожидания разряда
+  CHECK(pinLvl[21]==0 && pinLvl[38]==1 && pinLvl[33]==0 && faultCode==0);
+  // повторные потери связи подряд не приводят к аварии
+  for(int k=0;k<4;k++){ step(900); CHECK(faultCode==0); sendCtlLoop(1500,0,{}); CHECK(pinLvl[21]==0 && faultCode==0); }
+  // залипшее реле (напряжение за реле равно шине всегда): только предупреждение, аварии нет
+  relayStuck=true; step(900); sendCtlLoop(1500,0,{}); step(12000);
+  CHECK(faultCode==0);
+  relayStuck=false;
   printf("part1 fails=%d\n", fails);
   return fails?1:0;
 }
