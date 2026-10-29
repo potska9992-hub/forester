@@ -72,7 +72,13 @@ jobs:
             arduino-cli lib list
             echo "-----"
           } > "out/$DEV.build.log"
+          set +e
           arduino-cli compile --fqbn "$FQBN" --output-dir "out/$DEV" --warnings default "$DEV" 2>&1 | tee -a "out/$DEV.build.log"
+          RC=${PIPESTATUS[0]}
+          if [ "$RC" != "0" ]; then
+            grep -E "error|Error" "out/$DEV.build.log" | head -20 | while IFS= read -r L; do echo "::error::${L:0:900}"; done
+            exit "$RC"
+          fi
 
       - name: Summary
         run: |
