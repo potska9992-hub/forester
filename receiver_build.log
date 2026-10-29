@@ -1,0 +1,37 @@
+Build: 2026-10-29T10:15:49Z  commit 56f9fbb
+FQBN: esp32:esp32:heltec_wireless_stick_lite_V3
+ID          Installed Latest Name
+esp32:esp32 3.3.11    3.3.12 esp32
+
+Name     Installed     Available     Location Description
+RadioLib 7.1.2         7.8.1         user     Universal wireless communication library
+
+-----
+/home/runner/work/forester/forester/receiver/receiver.ino:723:49: error: 'CtlShared' does not name a type
+  723 | static void controlRun(unsigned long now, const CtlShared& c, float dtMs) {
+      |                                                 ^~~~~~~~~
+/home/runner/work/forester/forester/receiver/receiver.ino: In function 'void samplerStep(SamplerState&)':
+/home/runner/work/forester/forester/receiver/receiver.ino:544:24: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
+  544 |       } else { adsErr[d]++; if (++S.errRun[d] > 20) S.errRun[d] = 20; }
+      |                ~~~~~~~~^
+/home/runner/work/forester/forester/receiver/receiver.ino:559:22: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
+  559 |       else { adsErr[d]++; }
+      |              ~~~~~~~~^
+
+[92mUsed library[0m        [92mVersion[0m [90mPath[0m
+[93mWire[0m                3.3.11  [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/Wire[0m
+[93mSPI[0m                 3.3.11  [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/SPI[0m
+[93mRadioLib[0m            7.1.2   [90m/home/runner/Arduino/libraries/RadioLib[0m
+[93mWiFi[0m                3.3.11  [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/WiFi[0m
+[93mNetworking[0m          3.3.11  [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/Network[0m
+[93mWebServer[0m           3.3.11  [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/WebServer[0m
+[93mFS[0m                  3.3.11  [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/FS[0m
+[93mPreferences[0m         3.3.11  [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/Preferences[0m
+[93mUpdate[0m              3.3.11  [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/Update[0m
+[93mHTTPClient[0m          3.3.11  [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/HTTPClient[0m
+[93mNetworkClientSecure[0m 3.3.11  [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/NetworkClientSecure[0m
+[93mHash[0m                3.3.11  [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/3.3.11/libraries/Hash[0m
+
+[92mUsed platform[0m [92mVersion[0m [90mPath[0m
+[93mesp32:esp32[0m   3.3.11  [90m/home/runner/.arduino15/packages/esp32/hardware/esp32/3.3.11[0m
+Error during build: exit status 1
