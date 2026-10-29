@@ -2167,7 +2167,7 @@ static void ghTick(unsigned long now) {
   switch (ghStage) {
     case G_SCAN: {
       int n = WiFi.scanComplete();
-      if (n == WIFI_SCAN_RUNNING) { if ((now - ghT0) > 15000UL) ghFail(WE_NONET, "scan timeout"); break; }
+      if (n == WIFI_SCAN_RUNNING) { if ((long)(now - ghT0) > 15000L) ghFail(WE_NONET, "scan timeout"); break; }
       if (n < 0) { ghFail(WE_NONET, "scan failed"); break; }
       int best = -1, bestR = -1000;
       for (int i = 0; i < n; i++) {
@@ -2190,7 +2190,7 @@ static void ghTick(unsigned long now) {
       wl_status_t st = WiFi.status();
       if (st == WL_CONNECTED) { ghStage = G_API; wifiSt = HLW_GH_CHECK; ghT0 = now; }
       else if (st == WL_CONNECT_FAILED || ghAuthReason(ghReason)) ghFail(WE_PASS, ghNet);
-      else if ((now - ghT0) > 30000UL) ghFail(WE_NONET, "connect timeout");
+      else if ((long)(now - ghT0) > 30000L) ghFail(WE_NONET, "connect timeout");
       break;
     }
     case G_API:
@@ -2198,10 +2198,10 @@ static void ghTick(unsigned long now) {
       break;
     case G_ASK:
       if (ghYes) ghDownload();
-      else if ((now - ghT0) > 120000UL) wifiClose("no confirmation");
+      else if ((long)(now - ghT0) > 120000L) wifiClose("no confirmation");
       break;
     case G_ERR:
-      if ((now - ghT0) > 60000UL) wifiClose("error timeout");
+      if ((long)(now - ghT0) > 60000L) wifiClose("error timeout");
       break;
     default:
       break;
@@ -2238,9 +2238,10 @@ static void wifiTick(unsigned long now) {
     else if (r == 4 && wifiSt == HLW_GH_ASK) ghYes = true;
     now = millis();                                         // запуск точки доступа занимает время: старое now было бы меньше wifiT0
   }
+  now = millis();
   if (wifiSt == HLW_OFF) return;
   if (wifiSt == HLW_ERR && ghStage == G_OFF) {                  // ошибка запуска точки доступа: показать пульту 4 с и закрыть
-    if ((now - wifiT0) > 4000UL) wifiClose("AP start failed");
+    if ((long)(now - wifiT0) > 4000L) wifiClose("AP start failed");
     return;
   }
   CtlShared c;
@@ -2252,11 +2253,15 @@ static void wifiTick(unsigned long now) {
   if ((btnLatched || (link && c.estop)) && !busy) { wifiClose("E-Stop"); return; }
   if (wifiSt >= HLW_PH_WAIT && wifiSt <= HLW_PH_DONE) {
     int st = WiFi.softAPgetStationNum();
+    static int stPrev = 0;
+    if (st > 0 && stPrev == 0) { wifiAct = now; plog("Wi-Fi: phone connected"); }
+    if (st == 0 && stPrev > 0) plog("Wi-Fi: phone disconnected");
+    stPrev = st;
     if (wifiSt == HLW_PH_WAIT && (pageSeen || st > 0)) wifiSt = HLW_PH_CONN;
-    if (wifiSt == HLW_PH_WAIT && (now - wifiT0) > 120000UL) { wifiClose("no phone"); return; }
-    if (!busy && (now - wifiAct) > 300000UL) { wifiClose("idle"); return; }
+    if (wifiSt == HLW_PH_WAIT && (long)(now - wifiT0) > 120000L) { wifiClose("no phone"); return; }
+    if (!busy && (long)(now - wifiAct) > 300000L) { wifiClose("idle"); return; }
     if (testOK) {
-      if ((now - lastPoll) > 4000UL) testOff("page closed");
+      if ((long)(now - lastPoll) > 4000L) testOff("page closed");
       else if (faultCode || btnLatched) testOff("alarm");
     }
   } else {
@@ -2346,7 +2351,7 @@ static void radioStatsTick(unsigned long now) {
 
 void loop() {
   unsigned long now = millis();
-  if (wifiSt >= HLW_PH_WAIT && wifiSt <= HLW_PH_DONE) server.handleClient();
+  if (wifiSt >= HLW_PH_WAIT && wifiSt <= HLW_PH_DONE) { server.handleClient(); now = millis(); }   // обработчики ставят wifiAct позже, чем "now" из начала цикла
   powerMeasure(now);
   estopTick(now);
   wifiTick(now);
