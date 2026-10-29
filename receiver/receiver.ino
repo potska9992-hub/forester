@@ -438,32 +438,39 @@ static void relayMsgSet(const char* fmt, ...) {
   plog("%s", relayMsg);
 }
 
-// конечный автомат реле: want = нужно ли реле замкнуто
+// Логика реле (с конденсаторами за реле напряжение за ним падает медленно):
+//  - управление НЕ ждёт проверки: сигнал на реле пришёл -> выходы работают; стоп только при аварии
+//  - проверка идёт параллельно, через RELAY_CHECK_MS после срабатывания сравниваем напряжение за реле (vFb) с бортовым (vBus)
+//  - замкнулось: |vBus - vFb| <= RELAY_DV; не замкнулось -> авария 2
+//  - разомкнулось: vBus - vFb > RELAY_DV; держится в пределах RELAY_DV дольше RELAY_STUCK_MS -> авария 1 (залипло), до этого только запись в журнале
+#define RELAY_CHECK_MS  2000UL
+#define RELAY_STUCK_MS  5000UL
+#define RELAY_DV        2.0f
+#define RELAY_MIN_OFF_MS 300UL
+static bool relayWatch = false;                             // идёт слежение за падением напряжения после размыкания
+
 static void relayTick(unsigned long now, bool want) {
   bool busOk = vBus > 5.0f;
   if (faultCode) want = false;
+  bool vNear = busOk && ((vBus - vFb) <= RELAY_DV);          // напряжение за реле не отличается от бортового больше чем на 2 В
   switch (relayState) {
     case RS_OFF:
-      if (wifiSt == HLW_OFF && adcInit && now > 1500UL && (now - relayOffAt) > 1000UL) {   // в режиме Wi-Fi (конденсаторы разряжаются долго) аварию «залипло» не ставим          // залипание: реле выключено, а за ним напряжение
-        if (vFb > 3.0f) { if (!relayBadAt) relayBadAt = now; else if ((now - relayBadAt) > 500UL) { char m[96]; snprintf(m, sizeof(m), "relay stuck: voltage after relay while OFF (bus %.2f V, after relay %.2f V)", vBus, vFb); setFault(1, m); } }
-        else relayBadAt = 0;
+      if (relayWatch) {                                     // реле считается разомкнутым, но напряжение ещё держится
+        if (!busOk || !vNear) { relayWatch = false; relayMsgSet("Relay OFF OK (bus %.2f V, after relay %.2f V)", vBus, vFb); }
+        else if ((now - relayChangeAt) >= RELAY_STUCK_MS) { relayWatch = false; char m[96]; snprintf(m, sizeof(m), "relay stuck: voltage after relay held %lu s after opening (bus %.2f V, after relay %.2f V)", (unsigned long)(RELAY_STUCK_MS / 1000UL), vBus, vFb); setFault(1, m); }
       }
-      if (want && busOk && vFb < 1.5f && adcInit && now > 1500UL) {
+      if (want && busOk && adcInit && now > 1500UL && (now - relayOffAt) >= RELAY_MIN_OFF_MS) {
         relayPin(true);
         relayState = RS_CLOSING;
         relayChangeAt = now;
-        relayBadAt = 0;
+        relayWatch = false;
       }
       break;
     case RS_CLOSING:
       if (!want) { relayPin(false); relayState = RS_OPENING; relayChangeAt = now; break; }
-      if (busOk && vFb > 0.9f * vBus && (now - relayChangeAt) >= 300UL) {
-        relayState = RS_ON;
-        relayMsgSet("Relay ON OK (bus %.2f V, after relay %.2f V)", vBus, vFb);
-      } else if ((now - relayChangeAt) >= 800UL) {
-        if (busOk && vFb > 0.8f * vBus) { relayState = RS_ON; relayMsgSet("Relay ON OK, slow rise (bus %.2f V, after relay %.2f V)", vBus, vFb); }
-        else if (!busOk) { relayPin(false); relayState = RS_OPENING; relayChangeAt = now; relayMsgSet("Relay ON: no bus voltage (12 V missing), cannot check"); }
-        else setFault(2, "relay ON but no voltage after it (relay or fuse)");
+      if ((now - relayChangeAt) >= RELAY_CHECK_MS) {
+        if (vNear) { relayState = RS_ON; relayMsgSet("Relay ON OK (bus %.2f V, after relay %.2f V)", vBus, vFb); }
+        else { char m[96]; snprintf(m, sizeof(m), "relay did not close (bus %.2f V, after relay %.2f V)", vBus, vFb); setFault(2, m); }
       }
       break;
     case RS_ON:
@@ -472,10 +479,13 @@ static void relayTick(unsigned long now, bool want) {
       else relayBadAt = 0;
       break;
     case RS_OPENING:
-      if (vFb < 1.5f) { relayState = RS_OFF; relayOffAt = now; relayBadAt = 0; relayMsgSet("Relay OFF OK (after relay %.2f V)", vFb); }
-      else if ((now - relayChangeAt) >= 2500UL) {
-        if (wifiSt != HLW_OFF) { relayState = RS_OFF; relayOffAt = now; relayBadAt = 0; relayMsgSet("Relay opened, voltage after relay still %.2f V (driver capacitors?), Wi-Fi mode: no fault", vFb); }
-        else setFault(1, "relay stuck: voltage after relay 2.5 s after opening");
+      if (want && busOk && !faultCode && (now - relayChangeAt) >= RELAY_MIN_OFF_MS) {   // сигнал вернулся до конца проверки: замыкаем сразу
+        relayPin(true); relayState = RS_CLOSING; relayChangeAt = now; relayWatch = false; break;
+      }
+      if ((now - relayChangeAt) >= RELAY_CHECK_MS) {
+        relayState = RS_OFF; relayOffAt = now; relayBadAt = 0;
+        if (!busOk || !vNear) relayMsgSet("Relay OFF OK (bus %.2f V, after relay %.2f V)", vBus, vFb);
+        else { relayWatch = true; relayMsgSet("Relay opened, voltage after relay still %.2f V (bus %.2f V), capacitors? watching", vFb, vBus); }
       }
       break;
   }
@@ -864,7 +874,7 @@ static void controlTick(unsigned long now) {
   bool busOk = vBus > 5.0f;
   bool runEnable = !kill && !bindMode && !wifiActive() && busOk;
   relayTick(now, runEnable);
-  bool act = runEnable && relayState == RS_ON && !faultCode;
+  bool act = runEnable && (relayState == RS_CLOSING || relayState == RS_ON) && !faultCode;   // сигнал на реле пришёл -> работаем, проверка идёт параллельно
   if (act != outAct) {
     outAct = act;
     if (act) { runReset(); setEn(true); setOe(true); plog("Outputs ENABLED"); }
@@ -1625,7 +1635,7 @@ progress{width:100%;height:18px}
  <div class="card warn" id="wrn"><h2>Warning: Test mode</h2>
   <ul>
    <li>Outputs and the relay become ACTIVE. Hydraulics may move.</li>
-   <li>Nobody must be near the valves or the machine.</li>
+   <li>Nobody must be vNear the valves or the machine.</li>
    <li>Never apply 12 V while the board is powered from USB.</li>
    <li>The emergency button stays working. Leaving this tab, closing the page or losing the phone switches everything off.</li>
   </ul>
