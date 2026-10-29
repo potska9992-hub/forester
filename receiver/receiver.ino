@@ -1211,7 +1211,10 @@ static void handleBind(const uint8_t* p, size_t len, unsigned long now) {
   qPush(b, hlFinish(b, 8));
 }
 
+static unsigned long txNotBefore = 0;                       // ответ не раньше этого времени: пульту нужно время, чтобы переключиться на приём
+#define RF_TURNAROUND_MS 15UL
 static void hlRead(unsigned long now) {
+  txNotBefore = now + RF_TURNAROUND_MS;
   size_t len = radio.getPacketLength();
   uint8_t p[64];
   if (len > sizeof(p) || len < 6) { uint8_t d[64]; radio.readData(d, len > sizeof(d) ? sizeof(d) : len); stShort++; return; }
@@ -1242,7 +1245,7 @@ static void radioStep(unsigned long now) {
       hlRead(now);
     }
   }
-  if (!hlTxBusy && qCount) {
+  if (!hlTxBusy && qCount && (long)(now - txNotBefore) >= 0) {
     if (pwrDirty) { pwrDirty = false; hlSetPower(); }
     if (radio.startTransmit(qBuf[qHead], qLen[qHead]) == RADIOLIB_ERR_NONE) { hlTxBusy = true; stTxOk++; if ((qBuf[qHead][0] >> 4) == HLT_ACK) stAck++; else if ((qBuf[qHead][0] >> 4) == HLT_TELEM) stTel++; }
     else { stTxErr++; radio.startReceive(); }
