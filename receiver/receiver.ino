@@ -177,7 +177,7 @@ static void plog(const char* fmt, ...) {
   char line[240];
   snprintf(line, sizeof(line), "[%02lu:%02lu] %s\n", (s / 60UL) % 100UL, s % 60UL, msg);
   logRaw(line);
-  if (Serial) Serial.print(line);
+  if (Serial && (!strncmp(msg, "Wi-Fi", 5) || !strncmp(msg, "GitHub", 6))) Serial.print(line);   // в монитор только журнал сервера
 }
 
 // ---- Общие данные между ядрами ----
@@ -2236,6 +2236,7 @@ static void wifiTick(unsigned long now) {
     else if (r == 2 && wifiSt == HLW_OFF) ghStart(now);
     else if (r == 3 && wifiSt != HLW_OFF) wifiClose("closed from the pult");
     else if (r == 4 && wifiSt == HLW_GH_ASK) ghYes = true;
+    now = millis();                                         // запуск точки доступа занимает время: старое now было бы меньше wifiT0
   }
   if (wifiSt == HLW_OFF) return;
   if (wifiSt == HLW_ERR && ghStage == G_OFF) {                  // ошибка запуска точки доступа: показать пульту 4 с и закрыть
@@ -2347,7 +2348,6 @@ void loop() {
   unsigned long now = millis();
   if (wifiSt >= HLW_PH_WAIT && wifiSt <= HLW_PH_DONE) server.handleClient();
   powerMeasure(now);
-  radioStatsTick(now);
   estopTick(now);
   wifiTick(now);
   controlTick(now);
