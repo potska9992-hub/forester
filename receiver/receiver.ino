@@ -44,6 +44,7 @@
 
 #define PROJECT_NAME  "receiver"
 #define FW_VERSION    "1.0"
+#define SERIAL_LOG    0                                   // 1 = дублировать журнал в монитор порта (отладка); журнал виден на странице Wi-Fi (вкладка Test)
 #define RF_TURNAROUND_MS 5UL                               // пауза перед ответом пульту
 static const char FW_TAG[] __attribute__((used)) = "FWTAG:" PROJECT_NAME ":" FW_VERSION ";";
 
@@ -177,7 +178,9 @@ static void plog(const char* fmt, ...) {
   char line[240];
   snprintf(line, sizeof(line), "[%02lu:%02lu] %s\n", (s / 60UL) % 100UL, s % 60UL, msg);
   logRaw(line);
+#if SERIAL_LOG
   if (Serial) Serial.print(line);
+#endif
 }
 
 // ---- Общие данные между ядрами ----
@@ -471,7 +474,7 @@ static void relayTick(unsigned long now, bool want) {
       break;
     case RS_CLOSING:
       if (!want) { relayMsgSet("Relay OPEN while closing: %s", relayWhyText()); relayPin(false); relayState = RS_OPENING; relayChangeAt = now; break; }
-      if (busOk && vFb >= 0.8f * vBus && (now - relayChangeAt) >= RELAY_RELEASE_MS) {
+      if (vBus > 2.0f && vFb >= 0.8f * vBus && (now - relayChangeAt) >= RELAY_RELEASE_MS) {
         relayState = RS_ON;
         relayBadAt = 0;
         relayMsgSet("Relay ON OK (bus %.2f V, after relay %.2f V, %lu ms)", vBus, vFb, now - relayChangeAt);
@@ -482,7 +485,7 @@ static void relayTick(unsigned long now, bool want) {
       break;
     case RS_ON:
       if (!want) { relayMsgSet("Relay OPEN: %s (bus %.2f V, after relay %.2f V)", relayWhyText(), vBus, vFb); relayPin(false); relayState = RS_OPENING; relayChangeAt = now; break; }
-      if (busOk && vFb < 0.5f * vBus) {
+      if (vBus > 5.0f && vFb < 0.5f * vBus) {
         if (!relayBadAt) relayBadAt = now;
         else if ((now - relayBadAt) > 500UL) { char m[96]; snprintf(m, sizeof(m), "voltage after relay lost while relay ON (relay or fuse): bus %.2f V, after relay %.2f V", vBus, vFb); setFault(2, m); }
       } else relayBadAt = 0;
@@ -889,8 +892,11 @@ static void controlTick(unsigned long now) {
   }
 
   // рабочий режим
+  // напряжение шины нужно для замыкания реле; при замыкании на пустые конденсаторы шина просаживается, поэтому уже замкнутое реле
+  // не размыкаем из-за просадки (только если шина пропала совсем, ниже 2 В)
   bool busOk = vBus > 5.0f;
-  bool runEnable = !kill && !bindMode && !wifiActive() && busOk;
+  bool busKeep = vBus > 2.0f && (relayState == RS_CLOSING || relayState == RS_ON);
+  bool runEnable = !kill && !bindMode && !wifiActive() && (busOk || busKeep);
   relayTick(now, runEnable);
   bool act = runEnable && relayState == RS_ON && !faultCode;
   if (act != outAct) {
@@ -1986,8 +1992,14 @@ static void wifiOpenPhone() {
   uint64_t mac = ESP.getEfuseMac();
   snprintf(apSsid, sizeof(apSsid), "RX-%02X%02X", (unsigned)((mac >> 32) & 0xFF), (unsigned)((mac >> 40) & 0xFF));
   WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP(apSsid, AP_PASS);
+  bool apOk = WiFi.softAP(apSsid, AP_PASS);
   WiFi.setTxPower(WIFI_POWER_11dBm);
+  plog("Wi-Fi AP start: %s, free heap %u", apOk ? "ok" : "FAILED", (unsigned)ESP.getFreeHeap());
+  if (!apOk) {
+    wifiSt = HLW_ERR; wifiArg = 8;                          // пульт покажет ошибку вместо «нет ответа»
+    wifiAct = wifiT0 = millis();
+    return;
+  }
   if (!wifiRoutes) {
     server.on("/", HTTP_GET, hRoot);
     server.on("/info", HTTP_GET, hInfo);
@@ -2263,6 +2275,10 @@ static void wifiTick(unsigned long now) {
     else if (r == 4 && wifiSt == HLW_GH_ASK) ghYes = true;
   }
   if (wifiSt == HLW_OFF) return;
+  if (wifiSt == HLW_ERR && ghStage == G_OFF) {                  // ошибка запуска точки доступа: показать пульту 4 с и закрыть
+    if ((now - wifiT0) > 4000UL) wifiClose("AP start failed");
+    return;
+  }
   CtlShared c;
   taskENTER_CRITICAL(&shMux);
   c = ctlSh;
@@ -2317,7 +2333,6 @@ void setup() {
   pinMode(PIN_ESTOP, INPUT);
   pinMode(PIN_VBUS, INPUT);
   pinMode(PIN_VFB, INPUT);
-  Serial.begin(115200);
 
   cfgLoad();
   bindLoad();
@@ -2368,7 +2383,6 @@ void loop() {
   unsigned long now = millis();
   if (wifiSt >= HLW_PH_WAIT && wifiSt <= HLW_PH_DONE) server.handleClient();
   powerMeasure(now);
-  radioStatsTick(now);
   estopTick(now);
   wifiTick(now);
   controlTick(now);
