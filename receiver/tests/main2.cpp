@@ -59,6 +59,11 @@ int main(int argc,char**argv){
     relayNoClose=false; sendCtlLoop(3000,0,{});
     CHECK(faultCode==2 && pinLvl[21]==1);
   }
+  if(sc=='e'){            // синхронизация без управления дольше таймаута связи
+    for(int k=0;k<30;k++){ Bytes a=ask(mkCfg(100+k,1,0,k%8,0,0),4); CHECK(a.size()==12); step(30); }   // ~1.8 с без CONTROL
+    CHECK(!killNow); CHECK(pinLvl[21]==0 && pinLvl[38]==1);
+    step(3300); CHECK(killNow && killReasonNow==3);                 // без управления связь всё же пропадает
+  }
   if(sc=='b'){            // потеряна PCA9685
     pcaPresent=false; sendCtlLoop(300,0,{{0,50}});
     sendCtlLoop(300,0,{});

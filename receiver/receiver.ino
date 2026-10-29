@@ -1067,6 +1067,15 @@ static bool hlSafeNow(unsigned long now) {
   return zero && !c.estop && !btnLatched && !faultCode;
 }
 
+static unsigned long lastCtlAt = 0;
+// Настройки/сеть во время синхронизации идут без пакетов управления: продлеваем связь, но не дольше 3 с после последнего управления
+static void cfgKeepAlive(unsigned long now) {
+  if (lastCtlAt == 0 || (now - lastCtlAt) >= 3000UL) return;
+  taskENTER_CRITICAL(&shMux);
+  if (ctlSh.have) ctlSh.rxAt = now ? now : 1;
+  taskEXIT_CRITICAL(&shMux);
+}
+
 static void handleControl(const uint8_t* p, size_t len, unsigned long now) {
   if (len < 7) return;
   uint8_t flags = p[0] & 0x0F, mask = p[4];
@@ -1077,7 +1086,7 @@ static void handleControl(const uint8_t* p, size_t len, unsigned long now) {
   lastRssi = (int8_t)constrain(rssiI, -127, 0);
   uint8_t seq = p[3];
   if (haveSeq) { uint8_t gap = (uint8_t)(seq - lastCtlSeq - 1); if (gap < 128) { int m = missedCnt + gap; missedCnt = (uint8_t)(m > 255 ? 255 : m); } }
-  haveSeq = true; lastCtlSeq = seq;
+  haveSeq = true; lastCtlSeq = seq; lastCtlAt = now ? now : 1;
   int8_t v[NUM_CH] = { 0 };
   int k = 5;
   bool nz = false;
@@ -1101,6 +1110,7 @@ static void handleControl(const uint8_t* p, size_t len, unsigned long now) {
 
 static void handleCfg(const uint8_t* p, size_t len, unsigned long now) {
   if (len != 12) return;
+  cfgKeepAlive(now);
   uint8_t tag = p[3], op = p[4], prm = p[5], ch = p[6], d = p[7];
   uint16_t val = (uint16_t)(p[8] | (p[9] << 8));
   bool save = (p[0] & 1) != 0;
@@ -1160,6 +1170,7 @@ static void handleCfg(const uint8_t* p, size_t len, unsigned long now) {
 
 static void handleNet(const uint8_t* p, size_t len) {
   if (len < 10) return;
+  cfgKeepAlive(millis());
   uint8_t tag = p[3], slot = p[4];
   uint8_t ls = p[6];
   if (6 + 1 + (size_t)ls + 1 > len) return;
