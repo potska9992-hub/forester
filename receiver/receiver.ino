@@ -1105,6 +1105,16 @@ static bool hlSafeNow(unsigned long now) {
   return zero && !c.estop && !btnLatched && !faultCode;
 }
 
+// Wi-Fi (обновление) можно включить и при аварии реле: выходы в аварии уже выключены. Нужны нулевые рычаги, нет E-Stop и аварийной кнопки
+static bool hlWifiOk(unsigned long now) {
+  CtlShared c;
+  taskENTER_CRITICAL(&shMux);
+  c = ctlSh;
+  taskEXIT_CRITICAL(&shMux);
+  bool zero = (c.nzAt == 0) || ((now - c.nzAt) >= 300UL);
+  return zero && !c.estop && !btnLatched;
+}
+
 static volatile uint32_t stCtl = 0, stCfg = 0, stNet = 0, stCrcBad = 0, stPairBad = 0, stShort = 0, stTxOk = 0, stTxErr = 0, stAck = 0, stTel = 0;
 static volatile uint8_t stLastCfgTag = 0, stLastCfgOp = 0, stLastCfgPrm = 0;
 static unsigned long lastCtlAt = 0;
@@ -1190,7 +1200,7 @@ static void handleCfg(const uint8_t* p, size_t len, unsigned long now) {
       case HLC_WIFI_PHONE:
       case HLC_WIFI_GH:
         if (wifiSt != HLW_OFF || wifiReq) st = 3;
-        else if (!hlSafeNow(now)) st = 2;
+        else if (!hlWifiOk(now)) st = 2;
         else wifiReq = (prm == HLC_WIFI_PHONE) ? 1 : 2;
         break;
       case HLC_WIFI_OFF:

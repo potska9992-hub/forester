@@ -64,6 +64,12 @@ int main(int argc,char**argv){
     CHECK(!killNow); CHECK(pinLvl[21]==0 && pinLvl[38]==1);
     step(3300); CHECK(killNow && killReasonNow==3);                 // без управления связь всё же пропадает
   }
+  if(sc=='f'){            // Wi-Fi можно включить при аварии реле
+    relayNoClose=true; fbV=0; step(900); sendCtlLoop(7000,0,{});
+    CHECK(faultCode==2);
+    Bytes a=ask(mkCfg(1,3,0x20,0,0,0),4); CHECK(a.size()==12 && a[4]==0);
+    sendCtlLoop(300,0,{}); Bytes t=telem(); CHECK(t[32]==2);
+  }
   if(sc=='b'){            // потеряна PCA9685
     pcaPresent=false; sendCtlLoop(300,0,{{0,50}});
     sendCtlLoop(300,0,{});
