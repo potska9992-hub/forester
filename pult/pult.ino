@@ -1,5 +1,10 @@
 // ============================================================
 // Пульт гидрораспределителя. Журнал версий
+//  1.0 - РАДИО (HydroLink v1, SX1262 868 МГц, SF7 BW250): пакеты управления с маской каналов и heartbeat, телеметрия по запросу
+//        (TELEM RATE), настройки приёмника с подтверждением и повторами (SetConfig / Ack / Batch), полная синхронизация
+//        после включения и по CRC конфигурации, привязка по радио (Bind), Wi-Fi приёмника командами (Phone: Update/Test,
+//        GitHub), Safe Start после возврата связи. Источник приёмника в Transmitter -> RX: Radio / Sim link / Sim lost
+//        (имитация оставлена для отладки экранов, убрать после полевых испытаний).
 //  0.8 - подготовка к радио: стартовый и максимальный ШИМ в единицах 0.1 % (шаг 0.5 %, стартовый по умолчанию 5 %);
 //        Receiver -> Wi-Fi: "Phone: Update/Test" (вкладки Update и Test на странице приёмника, имитация статусов
 //        Client connected / Test active / Uploading); ток приёмника подписан как ток в импульсе (Ipulse);
@@ -44,6 +49,8 @@
 #include <Adafruit_MCP23X17.h>
 #include <Adafruit_ADS1X15.h>
 #include <esp_system.h>
+#include <SPI.h>
+#include <RadioLib.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Update.h>
@@ -123,7 +130,7 @@
 #define HB_FLASH_MS     100        // длительность вспышки пульса
 
 // ============ ВЕРСИЯ ПРОШИВКИ ============
-#define FW_VERSION      "0.8"
+#define FW_VERSION      "1.0"
 #define PBAR_W          108             // ширина полосы загрузки (значок батареи справа)
 #define GH_REPO         "potska9992-hub/forester"   // репозиторий с готовыми прошивками
 #define GH_TAG          "pult-latest"               // релиз с последней прошивкой пульта
@@ -139,7 +146,7 @@
 #define NUM_SCR         6          // рабочих экранов
 #define NUM_DP          6          // страниц Debug
 #define TX_PWR_DEF      10         // dBm по умолчанию
-#define RF_FREQ_TXT     "868.1MHz SF7 BW250"   // справочно, пока радио не подключено
+#define RF_FREQ_TXT     "868.0MHz SF7 BW250"   // справочно (настоящие значения RF_* в блоке радио)
 
 // ============ БАТАРЕЯ ============
 #define DEF_DIVIDER     3.3503f    // коэффициент делителя по умолчанию
@@ -204,7 +211,7 @@ enum MenuScr {
 enum ChItem { CI_TYPE, CI_REV, CI_EN, CI_EXPO, CI_MAX, CI_LED, CI_BACK };
 enum EvItem { EI_EN, EI_COLOR, EI_PAT, EI_INT, EI_WHERE, EI_SCR, EI_FIXED, EI_BACK };
 enum BatKind { BE_DIV, BE_FULL, BE_EMPTY, BE_WARN, BE_CRIT };
-enum SimMode { SIM_OFF, SIM_LINK, SIM_LOST };
+enum SimMode { SIM_RADIO, SIM_LINK, SIM_LOST };   // источник приёмника: настоящее радио или имитация (отладка)
 struct Nav { bool armed; unsigned long since; unsigned long held; unsigned long last; int dir; };
 struct EvCfg { uint8_t en, color, pat, whereAll, ival, scr; };
 struct GObs { float x; uint8_t kind; bool on; };      // 0 малый кактус, 1 большой, 2 двойной, 3 птица (присесть), 4 птица высоко   // тип выше функций (Arduino делает прототипы)
@@ -235,7 +242,45 @@ struct Telem {
   uint8_t vrx;              // напряжение приёмника, 0.1 В
   int8_t  rssi;             // RSSI приёмника, dBm
   uint8_t kill, reason;     // killswitch: 0/1; причина 0..3
+  int8_t  snr;              // SNR, с которым приёмник слышит пульт, дБ
+  uint8_t missed;           // пропущено пакетов управления с прошлой телеметрии
+  uint8_t boots;            // счётчик перезагрузок приёмника
+  uint8_t cfgCrc;           // CRC8 сохранённой конфигурации приёмника
+  uint8_t wifi, wifiArg;    // состояние Wi-Fi приёмника и параметр (процент / код ошибки)
 };
+// ---- радио HydroLink: константы (описание протокола ниже, в блоке РАДИО) ----
+#define HL_PROTO        1
+#define RF_FREQ_MHZ     868.0f
+#define RF_BW_KHZ       250.0f         // BW и SF одинаковые в пульте и приёмнике, меняются только в коде
+#define RF_SF           7
+#define RF_CR           5
+#define RF_SYNC         0x12
+#define RF_PREAMBLE     8
+#define RF_TCXO_V       1.8f
+#define HL_PIN_NSS      8
+#define HL_PIN_SCK      9
+#define HL_PIN_MOSI     10
+#define HL_PIN_MISO     11
+#define HL_PIN_RST      12
+#define HL_PIN_BUSY     13
+#define HL_PIN_DIO1     14
+#define HL_RESP_MS      90             // ждать ответ (телеметрия, подтверждение) после конца передачи
+#define HL_GAP_MS       2              // пауза между пакетами управления
+#define HL_HB_MS        66             // heartbeat 15 раз в секунду
+#define HL_HB_AFTER_MS  300            // рычаги в нуле дольше этого времени: heartbeat
+#define HL_SEARCH_MS    150            // поиск приёмника: запрос телеметрии
+#define HL_BIND_MS      150
+#define HL_CFG_TRIES    3
+#define HL_RXBATT_LOW   105            // 10.5 В: ниже событие Batt RX
+enum { HLT_CONTROL = 1, HLT_TELEM, HLT_CFG, HLT_ACK, HLT_BATCH, HLT_NET, HLT_INFO, HLT_BIND, HLT_BINDOK };
+enum { HLF_ESTOP = 1, HLF_REQT = 2, HLF_LEVER = 4, HLF_BOOT = 8 };
+enum { HLO_SET, HLO_GET, HLO_BATCH, HLO_CMD, HLO_NET };
+enum { HLC_PROTO = 1, HLC_CHMASK, HLC_CHTYPES, HLC_TXPWR, HLC_FACTORY = 0x10, HLC_WIFI_PHONE = 0x20, HLC_WIFI_GH, HLC_WIFI_OFF, HLC_WIFI_YES };
+enum { HLW_OFF = 0, HLW_PH_WAIT = 2, HLW_PH_CONN, HLW_PH_TEST, HLW_PH_UP, HLW_PH_DONE,
+       HLW_GH_CONN = 10, HLW_GH_CHECK, HLW_GH_ASK, HLW_GH_DL, HLW_GH_VERIFY, HLW_GH_DONE, HLW_ERR = 20 };
+#define HL_FACTORY_KEY  0xA55A
+
+struct HlCfg { uint8_t op, param, ch, dir; uint16_t val; bool save; uint8_t kind, tag, tries; uint16_t old; };   // запрос настройки в очереди радио
 
 const RxParamDef RXP[NUM_RXP] = {
   { "LIMIT",     PS_SOL,    5,  100,  1,  20, F_AMP   },   // 0.5..10.0 А, по умолчанию 2.0 А
@@ -799,7 +844,7 @@ unsigned long gameFlashUntil = 0;   // до этого момента все к�
 bool    evFromLed = false;      // открыто ярлыком Heartbeat -> назад в LED & Alerts
 int     testEv = 0;             // событие на экране Test alerts
 int     screenNo = 0;
-SimMode simMode = SIM_OFF;      // имитация приёмника (пока нет радио)
+SimMode simMode = SIM_RADIO;    // источник приёмника: SIM_RADIO = настоящее радио
 unsigned long restoredAt = 0;   // когда была вспышка «связь восстановлена»
 unsigned long bootStart = 0;
 unsigned long safeSince = 0;
@@ -833,7 +878,10 @@ const char* stateName() {
   return "?";
 }
 
-bool rxLinked() { return simMode == SIM_LINK; }   // позже: свежая телеметрия от приёмника
+bool hlUp = false;                // радио: свежая телеметрия от приёмника есть
+bool hlSyncBusy = false;          // радио: идёт полное чтение настроек приёмника
+bool rxLinked() { return simMode == SIM_LINK || (simMode == SIM_RADIO && hlUp); }
+bool rxReady() { return rxLinked() && !hlSyncBusy; }   // меню Receiver доступно
 
 // ---- короткие сообщения внизу экрана ----
 char toastText[20] = "";
@@ -1140,9 +1188,17 @@ uint16_t rxQuery(int ch, int dir, int param) {
 
 // Применить значение (на радио: SetConfig -> Ack). commit = сохранить в память приёмника.
 // Возвращает значение, которое реально применил приёмник.
+bool hlCfgPut(uint8_t op, uint8_t param, uint8_t ch, uint8_t dir, uint16_t val, bool save, uint8_t kind, uint16_t old);
 uint16_t rxSet(int ch, int dir, int param, int value, bool commit) {
   rxNorm(param, ch, dir);
   value = constrain(value, (int)RXP[param].mn, (int)RXP[param].mx);
+  if (simMode == SIM_RADIO) {                          // радио: копия меняется сразу, приёмник подтвердит (ACK) или значение вернётся
+    uint16_t old = simRam[param][ch][dir];
+    simRam[param][ch][dir] = value;
+    if (param == RXP_MODE) rxModeCache = value;
+    hlCfgPut(HLO_SET, (uint8_t)param, (uint8_t)ch, (uint8_t)dir, (uint16_t)value, commit, 0, old);
+    return value;
+  }
   simRam[param][ch][dir] = value;
   if (commit) simNvs[param][ch][dir] = value;
   if (param == RXP_MODE) rxModeCache = value;
@@ -1164,7 +1220,10 @@ void rxCfgRequest() {
 }
 
 // сброс настроек приёмника (привязка не затрагивается)
-void rxFactoryReset() { simInit(); rxModeCache = simRam[RXP_MODE][0][0]; }
+void rxFactoryReset() {
+  if (simMode == SIM_RADIO) { hlCfgPut(HLO_CMD, HLC_FACTORY, 0, 0, HL_FACTORY_KEY, false, 0, 0); return; }   // приёмник проверит условия и ответит
+  simInit(); rxModeCache = simRam[RXP_MODE][0][0];
+}
 
 int  rxTopic = RT_LIMIT;           // что выбрано в меню Receiver
 int  rxParam = RXP_LIMIT, rxCh = 0, rxDir = 0;
@@ -1199,6 +1258,11 @@ unsigned long rfAgeMs = 0;
 uint16_t rxId = 0x3F2A;
 
 void simTelemetry(unsigned long now) {
+  if (simMode == SIM_RADIO) {                            // телеметрия приходит по радио (hlStep), здесь только сброс при потере связи
+    telValid = hlUp;
+    if (!hlUp) memset(&tel, 0, sizeof(tel));
+    return;
+  }
   memset(&tel, 0, sizeof(tel));
   if (!rxLinked()) {
     telValid = false;
@@ -1252,6 +1316,506 @@ void simTelemetry(unsigned long now) {
   rfAgeMs = now % 300;
 }
 
+// ============================================================
+// РАДИО: HydroLink v1 (SX1262, 868 МГц). Пульт (передатчик).
+// Все числа little-endian. Первый байт: старший полубайт = тип пакета, младший = флаги.
+// Байты 1..2 = ID пары (из bindId), в конце CRC16-CCITT (poly 0x1021, init 0xFFFF) по всем предыдущим байтам.
+//  CONTROL (1) пульт -> RX: [0]=0x1F, [1..2]=пара, [3]=номер, [4]=маска каналов, [5..]=значения int8 по возрастанию номера канала, CRC16.
+//     Длина = 7 + n, n = число единиц в маске. Флаги: 1 E-Stop, 2 запрос телеметрии, 4 тест рычага, 8 пульт только что включён.
+//     Heartbeat = CONTROL с маской 0.
+//  TELEM (2) RX -> пульт, 36 байт: [3]=номер, [4]=последний принятый номер управления, [5]=SNR (int8, дБ), [6]=пропущено пакетов,
+//     [7..14]=ток в импульсе по 8 каналам (0.1 А), [15..22]=ШИМ int8 (минус = сторона B), [23]=лимит, [24]=перегрузка, [25]=обрыв (маски),
+//     [26]=сторона ошибки (бит на канал, 1 = B), [27]=статус (бит0 killswitch, биты1..2 причина: 0 пульт, 1 кнопка RX, 2 сбой RX, 3 нет связи),
+//     [28]=напряжение RX (0.1 В), [29]=RSSI (int8, дБм), [30]=счётчик перезагрузок RX, [31]=CRC8 сохранённой конфигурации,
+//     [32]=состояние Wi-Fi, [33]=параметр Wi-Fi (процент или код ошибки), CRC16.
+//  CFG (3) пульт -> RX, 12 байт: [0] флаг 1 = сохранить в память RX, [3]=метка, [4]=операция (0 SET, 1 GET, 2 BATCH, 3 CMD, 4 NET внутр.),
+//     [5]=параметр/команда, [6]=канал, [7]=сторона, [8..9]=значение, CRC16. Значение 0xFFFF в SET не используется.
+//  ACK (4) RX -> пульт, 12 байт: [3]=метка, [4]=статус (0 ок, 1 ошибка, 2 отказ сейчас, 3 занят), [5..7]=параметр/канал/сторона, [8..9]=значение.
+//  BATCH (5) RX -> пульт: [3]=метка, [4]=параметр, [5]=число значений n, [6..]=n значений uint16, CRC16. Для параметров на соленоид n=16 (канал*2+сторона),
+//     на канал n=8, общие n=1.
+//  NET (6) пульт -> RX: [3]=метка, [4]=слот, [5]=всего сетей, [6]=длина имени, имя, длина пароля, пароль, CRC16. Ответ: ACK с параметром 0xE0.
+//  INFO (7) RX -> пульт: [3]=0, [4]=вид (1 версия на GitHub, 2 имя сети RX-xxxx), [5]=длина, текст, CRC16.
+//  BIND (8) пульт -> все: [1..2]=0xFFFF, [3]=номер, [4..7]=новый bindId, CRC16. BINDOK (9) RX -> пульт: [1..2]=новая пара, [3]=номер, [4..7]=bindId.
+// ============================================================
+SX1262 hlRadio = new Module(HL_PIN_NSS, HL_PIN_DIO1, HL_PIN_RST, HL_PIN_BUSY);
+volatile bool hlIrq = false;
+void IRAM_ATTR hlIsr() { hlIrq = true; }
+
+bool hlInit = false, hlTxBusy = false;
+int  hlErr = 0;
+uint8_t  hlSeq = 0, hlTag = 0, hlBindSeq = 0;
+unsigned long hlTxStart = 0, hlTxEnd = 0, hlNextTx = 0, hlLastReq = 0, hlLastRx = 0, hlWaitUntil = 0, hlLastNonZero = 0, hlRateAt = 0;
+unsigned long hlReqAt = 0, hlBootAt = 0;
+uint32_t hlRateCnt = 0;
+int  hlRtt = 0;
+uint8_t hlWait = 0;                    // 0 нет, 1 ждём телеметрию, 2 ждём подтверждение, 3 ждём BATCH
+bool hlMissReq = false;                // последний запрос телеметрии остался без ответа
+bool hlBootFlag = true;                // пульт только что включён (до первой телеметрии)
+bool hlHbSched = false;                // следующая передача запланирована как heartbeat
+bool hlWaitEs = false;                 // ожидаемый пакет управления уже содержал E-Stop
+
+// синхронизация (раздел 26)
+bool hlSynced = false;                 // после включения пульта конфигурация считана
+int  hlSyncStep = 0;
+uint8_t hlBoots = 0;                   // счётчик перезагрузок приёмника при последней синхронизации
+uint8_t hlBootsNow = 0;                // счётчик перезагрузок в телеметрии, с которой началась синхронизация
+uint8_t hlCrcIgnore = 0;               // CRC приёмника, которое не совпадает с копией и повторно не читается
+bool hlCrcIgnoreOn = false;
+unsigned long hlSyncRetryAt = 0;
+bool hlMirrorDirty = false;
+unsigned long hlMirrorAt = 0;
+#define HL_SYNC_STEPS   (4 + NUM_RXP)
+
+// очередь настроек
+HlCfg hlQ[8];
+int   hlQn = 0;
+HlCfg hlCur;
+bool  hlCurOn = false;
+
+// привязка
+bool hlBindOn = false, hlBindDone = false;
+uint32_t hlBindNew = 0;
+unsigned long hlBindAt = 0;
+
+// Wi-Fi приёмника (по телеметрии и INFO)
+char hlRxVer[24] = "";                 // версия на GitHub (INFO 1)
+bool hlWifiAck = false;                // приёмник принял команду Wi-Fi
+uint8_t hlWifiAckSt = 0;
+
+bool rxLeverParam(int p);
+
+uint16_t hlCrc16(const uint8_t* d, size_t n) {
+  uint16_t c = 0xFFFF;
+  for (size_t i = 0; i < n; i++) {
+    c ^= (uint16_t)d[i] << 8;
+    for (int k = 0; k < 8; k++) c = (c & 0x8000) ? (uint16_t)((c << 1) ^ 0x1021) : (uint16_t)(c << 1);
+  }
+  return c;
+}
+
+uint16_t hlPair() {
+  uint32_t b = bindId;
+  uint16_t p = (uint16_t)(b ^ (b >> 16));
+  if (p == 0 || p == 0xFFFF) p ^= 0x5A5A;
+  return p;
+}
+
+static size_t hlFinish(uint8_t* b, size_t n) {
+  uint16_t c = hlCrc16(b, n);
+  b[n] = (uint8_t)(c & 0xFF); b[n + 1] = (uint8_t)(c >> 8);
+  return n + 2;
+}
+
+static bool hlTx(const uint8_t* b, size_t n, unsigned long now) {
+  if (hlRadio.startTransmit((uint8_t*)b, n) == RADIOLIB_ERR_NONE) { hlTxBusy = true; hlTxStart = now; return true; }
+  hlRadio.startReceive();
+  return false;
+}
+
+// CRC8 сохранённой конфигурации приёмника (копия пульта): те же значения и тот же порядок на приёмнике
+uint8_t hlCfgCrc() {
+  uint8_t c = 0;
+  for (int p = 0; p < NUM_RXP; p++) {
+    int nc = (RXP[p].scope == PS_GLOB) ? 1 : NUM_CH;
+    int nd = (RXP[p].scope == PS_SOL) ? 2 : 1;
+    for (int ch = 0; ch < nc; ch++)
+      for (int d = 0; d < nd; d++) {
+        uint16_t v = simNvs[p][ch][d];
+        for (int k = 0; k < 2; k++) {
+          c ^= (uint8_t)(k ? (v >> 8) : (v & 0xFF));
+          for (int j = 0; j < 8; j++) c = (c & 0x80) ? (uint8_t)((c << 1) ^ 0x07) : (uint8_t)(c << 1);
+        }
+      }
+  }
+  return c;
+}
+
+void hlMirrorSave() {
+  prefs.begin("rxcopy", false);
+  prefs.putBytes("nvs", simNvs, sizeof(simNvs));
+  prefs.putUChar("boots", hlBoots);
+  prefs.end();
+  hlMirrorDirty = false;
+}
+
+void hlMirrorLoad() {
+  prefs.begin("rxcopy", true);
+  size_t n = prefs.getBytes("nvs", simNvs, sizeof(simNvs));
+  hlBoots = prefs.getUChar("boots", 0);
+  prefs.end();
+  if (n != sizeof(simNvs)) { simInit(); return; }          // нет копии: значения по умолчанию
+  memcpy(simRam, simNvs, sizeof(simRam));
+  rxModeCache = simRam[RXP_MODE][0][0];
+}
+
+void hlMirrorForget() {
+  prefs.begin("rxcopy", false);
+  prefs.clear();
+  prefs.end();
+  simInit();
+  rxModeCache = simRam[RXP_MODE][0][0];
+  hlSynced = false;
+  hlSyncBusy = false;
+  hlCurOn = false; hlQn = 0;
+  hlCrcIgnoreOn = false;
+}
+
+// ---- радио ----
+void hlSetPower() {
+  if (!hlInit) return;
+  hlRadio.setOutputPower((int8_t)txPower);
+  hlRadio.setCurrentLimit(txPower > 14 ? 140.0f : 60.0f);
+}
+
+void hlBegin() {
+  SPI.begin(HL_PIN_SCK, HL_PIN_MISO, HL_PIN_MOSI, HL_PIN_NSS);
+  int st = hlRadio.begin(RF_FREQ_MHZ, RF_BW_KHZ, RF_SF, RF_CR, RF_SYNC, (int8_t)txPower, RF_PREAMBLE, RF_TCXO_V);
+  if (st != RADIOLIB_ERR_NONE) st = hlRadio.begin(RF_FREQ_MHZ, RF_BW_KHZ, RF_SF, RF_CR, RF_SYNC, (int8_t)txPower, RF_PREAMBLE, 0.0f);
+  if (st == RADIOLIB_ERR_NONE) {
+    hlRadio.setDio2AsRfSwitch(true);
+    hlRadio.setDio1Action(hlIsr);
+    st = hlRadio.startReceive();
+  }
+  hlErr = st;
+  hlInit = (st == RADIOLIB_ERR_NONE);
+  if (hlInit) hlSetPower();
+  LOGF("Radio: %s (%d)", hlInit ? "started" : "init failed", st);
+  hlBootAt = millis();
+  hlNextTx = millis() + 50;
+}
+
+bool hlRadioMode() { return simMode == SIM_RADIO; }
+
+unsigned long hlLostMs() { return 3000UL / telemRate + 450UL; }
+
+// ---- очередь настроек ----
+void hlCfgClear() { hlQn = 0; hlCurOn = false; if (hlWait == 2 || hlWait == 3) hlWait = 0; }
+
+bool hlCfgPut(uint8_t op, uint8_t param, uint8_t ch, uint8_t dir, uint16_t val, bool save, uint8_t kind, uint16_t old = 0) {
+  if (op == HLO_SET)                                       // повторная правка того же параметра: заменить ещё не отправленную
+    for (int i = 0; i < hlQn; i++)
+      if (hlQ[i].op == HLO_SET && hlQ[i].param == param && hlQ[i].ch == ch && hlQ[i].dir == dir && hlQ[i].kind == kind) {
+        hlQ[i].val = val; hlQ[i].save = hlQ[i].save || save;
+        return true;
+      }
+  if (hlQn >= 8) return false;
+  HlCfg &q = hlQ[hlQn++];
+  q.op = op; q.param = param; q.ch = ch; q.dir = dir; q.val = val; q.save = save; q.kind = kind; q.tag = 0; q.tries = 0; q.old = old;
+  return true;
+}
+
+// Приёмник ответил (статус 0) или нет: применить результат к копии пульта
+void hlCfgDone(const HlCfg &c, uint8_t status, uint16_t applied) {
+  if (c.kind == 1) {                                       // синхронизация
+    if (status != 0 && !(c.op == HLO_CMD && c.param == HLC_TXPWR)) {
+      LOGF("Sync: step failed (op %d p %d st %d)", c.op, c.param, status);
+      hlSyncBusy = false; hlSynced = false; hlSyncRetryAt = millis() + 2000UL;
+      if (c.op == HLO_CMD && c.param == HLC_PROTO) toast("Protocol mismatch");
+      return;
+    }
+    return;
+  }
+  if (c.op == HLO_SET) {
+    if (status == 0) {
+      simRam[c.param][c.ch][c.dir] = applied;
+      if (c.param == RXP_MODE) rxModeCache = applied;
+      if (c.save) { simNvs[c.param][c.ch][c.dir] = applied; hlMirrorDirty = true; hlMirrorAt = millis(); }
+      if (menuScr == MS_RXEDIT && rxParam == c.param && rxCh == c.ch && rxDir == c.dir && rxCur != (int)applied) rxCur = applied;
+    } else {
+      simRam[c.param][c.ch][c.dir] = c.old;                // не получилось: возвращаем прежнее
+      if (c.param == RXP_MODE) rxModeCache = c.old;
+      toast(status == 2 ? "RX refused" : "RX error");
+    }
+  } else if (c.op == HLO_CMD) {
+    if (c.param == HLC_FACTORY) {
+      if (status == 0) { hlMirrorForget(); toast("RX reset"); }
+      else toast("RX refused");
+    } else if (c.param == HLC_WIFI_PHONE || c.param == HLC_WIFI_GH) {
+      hlWifiAck = true; hlWifiAckSt = status;
+    }
+  } else if (c.op == HLO_NET) {
+    if (status != 0) { hlWifiAck = true; hlWifiAckSt = status; hlQn = 0; }
+  }
+}
+
+static void hlSendCfg(unsigned long now) {
+  HlCfg &c = hlCur;
+  uint8_t b[128];
+  size_t n;
+  memset(b, 0, sizeof(b));
+  b[0] = (uint8_t)((HLT_CFG << 4) | (c.save ? 1 : 0));
+  uint16_t pr = hlPair();
+  b[1] = (uint8_t)(pr & 0xFF); b[2] = (uint8_t)(pr >> 8);
+  b[3] = c.tag;
+  if (c.op == HLO_NET) {
+    b[0] = (uint8_t)(HLT_NET << 4);
+    int slot = c.ch;
+    b[4] = (uint8_t)slot; b[5] = (uint8_t)netCount();
+    uint8_t ls = (uint8_t)strlen(netSsid[slot]), lp = (uint8_t)strlen(netPass[slot]);
+    b[6] = ls; memcpy(b + 7, netSsid[slot], ls);
+    b[7 + ls] = lp; memcpy(b + 8 + ls, netPass[slot], lp);
+    n = hlFinish(b, 8 + ls + lp);
+  } else {
+    b[4] = c.op; b[5] = c.param; b[6] = c.ch; b[7] = c.dir;
+    b[8] = (uint8_t)(c.val & 0xFF); b[9] = (uint8_t)(c.val >> 8);
+    n = hlFinish(b, 10);
+  }
+  hlWait = (c.op == HLO_BATCH) ? 3 : 2;
+  hlWaitUntil = now + 1000UL;
+  hlHbSched = false;
+  if (!hlTx(b, n, now)) { hlWait = 0; hlNextTx = now + 20; }
+}
+
+static void hlSendControl(unsigned long now) {
+  uint8_t b[16];
+  uint8_t mask = 0;
+  bool syncZero = hlSyncBusy || hlBindOn;
+  for (int i = 0; i < NUM_CH; i++) if (ctl[i] != 0 && !syncZero) mask |= (uint8_t)(1 << i);
+  bool es = (state == ST_ESTOP) || estop.state;
+  bool lever = (state == ST_MENU && menuScr == MS_RXEDIT && rxLeverParam(rxParam) && leverArmed);
+  bool req;
+  if (!hlUp || hlMissReq) req = ((long)(now - hlLastReq) >= (long)HL_SEARCH_MS);
+  else                    req = ((long)(now - hlLastReq) >= (long)(1000UL / telemRate));
+  uint8_t fl = 0;
+  if (es) fl |= HLF_ESTOP;
+  if (req) fl |= HLF_REQT;
+  if (lever) fl |= HLF_LEVER;
+  if (hlBootFlag) fl |= HLF_BOOT;
+  b[0] = (uint8_t)((HLT_CONTROL << 4) | fl);
+  uint16_t pr = hlPair();
+  b[1] = (uint8_t)(pr & 0xFF); b[2] = (uint8_t)(pr >> 8);
+  b[3] = ++hlSeq;
+  b[4] = mask;
+  size_t n = 5;
+  for (int i = 0; i < NUM_CH; i++)
+    if (mask & (1 << i)) b[n++] = (uint8_t)(int8_t)constrain(ctl[i], -100, 100);
+  n = hlFinish(b, n);
+  if (req) { hlWait = 1; hlWaitUntil = now + 1000UL; hlLastReq = now; hlReqAt = now; hlWaitEs = es; }
+  bool fast = (mask != 0) || es || lever;
+  hlHbSched = !fast && (now - hlLastNonZero) >= HL_HB_AFTER_MS;
+  if (!hlTx(b, n, now)) { hlWait = 0; hlNextTx = now + 20; return; }
+  hlRateCnt++;
+  rfTx++;
+}
+
+static void hlSendBind(unsigned long now) {
+  uint8_t b[16];
+  b[0] = (uint8_t)(HLT_BIND << 4);
+  b[1] = 0xFF; b[2] = 0xFF;
+  b[3] = ++hlBindSeq;
+  b[4] = (uint8_t)(hlBindNew & 0xFF); b[5] = (uint8_t)(hlBindNew >> 8);
+  b[6] = (uint8_t)(hlBindNew >> 16); b[7] = (uint8_t)(hlBindNew >> 24);
+  size_t n = hlFinish(b, 8);
+  hlWait = 0;
+  if (!hlTx(b, n, now)) hlNextTx = now + 20;
+}
+
+// следующий шаг синхронизации (кладёт запрос в очередь)
+static void hlSyncNext() {
+  if (!hlSyncBusy || hlCurOn || hlQn > 0) return;
+  int s = hlSyncStep;
+  if (s >= HL_SYNC_STEPS) {                                // готово
+    hlSyncBusy = false; hlSynced = true; rxCfgKnown = true;
+    hlBoots = hlBootsNow;
+    memcpy(simRam, simNvs, sizeof(simRam));
+    rxModeCache = simRam[RXP_MODE][0][0];
+    hlMirrorSave();
+    LOGF("Sync: done, cfg crc %02X", hlCfgCrc());
+    return;
+  }
+  hlSyncStep++;
+  if (s == 0)      hlCfgPut(HLO_CMD, HLC_PROTO, 0, 0, HL_PROTO, false, 1);
+  else if (s == 1) { uint16_t m = 0; for (int i = 0; i < NUM_CH; i++) if (chEn[i]) m |= (1 << i); hlCfgPut(HLO_CMD, HLC_CHMASK, 0, 0, m, false, 1); }
+  else if (s == 2) { uint16_t m = 0; for (int i = 0; i < NUM_CH; i++) if (chType[i] == T_SW3) m |= (1 << i); hlCfgPut(HLO_CMD, HLC_CHTYPES, 0, 0, m, false, 1); }
+  else if (s == 3) hlCfgPut(HLO_CMD, HLC_TXPWR, 0, 0, txPower, false, 1);
+  else             hlCfgPut(HLO_BATCH, (uint8_t)(s - 4), 0, 0, 0, false, 1);
+}
+
+void hlSyncStart(const char* why) {
+  if (hlSyncBusy) return;
+  LOGF("Sync: start (%s)", why);
+  hlSyncBusy = true; hlSyncStep = 0;
+  hlCfgClear();
+}
+
+int hlSyncPct() { return hlSyncStep * 100 / HL_SYNC_STEPS; }
+
+static void hlOnTelem(const uint8_t* p, size_t len, unsigned long now) {
+  if (len != 36) return;
+  Telem t;
+  memset(&t, 0, sizeof(t));
+  t.snr = (int8_t)p[5];
+  t.missed = p[6];
+  for (int i = 0; i < NUM_CH; i++) { t.cur[i] = p[7 + i]; t.pwm[i] = (int8_t)p[15 + i]; }
+  t.mLim = p[23]; t.mOvl = p[24]; t.mOpen = p[25]; t.side = p[26];
+  t.kill = p[27] & 1; t.reason = (p[27] >> 1) & 3;
+  t.vrx = p[28]; t.rssi = (int8_t)p[29];
+  t.boots = p[30]; t.cfgCrc = p[31]; t.wifi = p[32]; t.wifiArg = p[33];
+  bool first = !hlUp;
+  hlBootsNow = t.boots;
+  tel = t;
+  telValid = true;
+  hlUp = true;
+  hlMissReq = false;
+  hlBootFlag = false;
+  hlLastRx = now;
+  rfRssi = (int)lroundf(hlRadio.getRSSI());
+  rfSnr10 = (int)lroundf(hlRadio.getSNR() * 10.0f);
+  rfLost += p[6];
+  rfRx++;
+  rfAgeMs = 0;
+  if (hlWait == 1) { hlWait = 0; hlRtt = (int)(now - hlReqAt); hlNextTx = now + 1; }
+  if (first) LOGF("Link: up (rssi %d snr %.1f)", rfRssi, rfSnr10 / 10.0f);
+  // синхронизация: полная после включения пульта или перезагрузки приёмника, иначе по CRC конфигурации
+  if (!hlSyncBusy && now > hlSyncRetryAt) {
+    if (!hlSynced)                                          hlSyncStart("first link");
+    else if (t.boots != hlBoots)                            hlSyncStart("rx rebooted");
+    else if (t.cfgCrc != hlCfgCrc() && !(hlCrcIgnoreOn && hlCrcIgnore == t.cfgCrc)) hlSyncStart("cfg crc");
+  }
+  if (!hlSyncBusy && hlSynced) {
+    hlBoots = t.boots;
+    if (t.cfgCrc != hlCfgCrc()) { hlCrcIgnore = t.cfgCrc; hlCrcIgnoreOn = true; }
+  }
+}
+
+static void hlOnAck(const uint8_t* p, size_t len, unsigned long now) {
+  if (len != 12 || !hlCurOn || p[3] != hlCur.tag || (hlWait != 2 && hlWait != 3)) return;
+  hlLastRx = now; hlWait = 0; hlMissReq = false;
+  hlCurOn = false;
+  hlCfgDone(hlCur, p[4], (uint16_t)(p[8] | (p[9] << 8)));
+  hlNextTx = now + 1;
+}
+
+static void hlOnBatch(const uint8_t* p, size_t len, unsigned long now) {
+  if (len < 8 || !hlCurOn || hlCur.op != HLO_BATCH || p[3] != hlCur.tag || hlWait != 3) return;
+  int prm = p[4], n = p[5];
+  if (prm != hlCur.param || prm >= NUM_RXP || len != (size_t)(8 + 2 * n)) return;
+  hlLastRx = now; hlWait = 0; hlMissReq = false;
+  hlCurOn = false;
+  for (int k = 0; k < n; k++) {
+    uint16_t v = (uint16_t)(p[6 + 2 * k] | (p[7 + 2 * k] << 8));
+    if (RXP[prm].scope == PS_SOL) { if (k < 16) simNvs[prm][k / 2][k % 2] = v; }
+    else if (RXP[prm].scope == PS_CH) { if (k < NUM_CH) simNvs[prm][k][0] = v; }
+    else { simNvs[prm][0][0] = v; }
+  }
+  hlNextTx = now + 1;
+}
+
+static void hlOnInfo(const uint8_t* p, size_t len) {
+  if (len < 8) return;
+  int kind = p[4], l = p[5];
+  if (len != (size_t)(8 + l)) return;
+  char t[24];
+  int m = l < 23 ? l : 23;
+  memcpy(t, p + 6, m); t[m] = 0;
+  if (kind == 1) snprintf(hlRxVer, sizeof(hlRxVer), "%s", t);
+  else if (kind == 2) snprintf(rxWifiSsid, sizeof(rxWifiSsid), "%s", t);
+}
+
+static void hlRead(unsigned long now) {
+  size_t len = hlRadio.getPacketLength();
+  uint8_t p[64];
+  if (len > sizeof(p) || len < 6) { uint8_t d[64]; hlRadio.readData(d, len > sizeof(d) ? sizeof(d) : len); return; }
+  if (hlRadio.readData(p, len) != RADIOLIB_ERR_NONE) return;
+  uint16_t c = hlCrc16(p, len - 2);
+  if (c != (uint16_t)(p[len - 2] | (p[len - 1] << 8))) return;
+  int type = p[0] >> 4;
+  uint16_t pr = (uint16_t)(p[1] | (p[2] << 8));
+  if (type == HLT_BINDOK) {
+    if (hlBindOn && len == 10) {
+      uint32_t id = (uint32_t)p[4] | ((uint32_t)p[5] << 8) | ((uint32_t)p[6] << 16) | ((uint32_t)p[7] << 24);
+      if (id == hlBindNew) hlBindDone = true;
+    }
+    return;
+  }
+  if (pr != hlPair()) return;
+  switch (type) {
+    case HLT_TELEM: hlOnTelem(p, len, now); break;
+    case HLT_ACK:   hlOnAck(p, len, now); break;
+    case HLT_BATCH: hlOnBatch(p, len, now); break;
+    case HLT_INFO:  hlOnInfo(p, len); break;
+    default: break;
+  }
+}
+
+// Радио работает на каждом проходе главного цикла (ответ приходит быстро, пульт должен успеть на приём)
+void hlStep(unsigned long now) {
+  if (!hlRadioMode() || !hlInit) return;
+  if (state == ST_WIFI || state == ST_GH) {                 // Wi-Fi пульта: радио молчит, приёмник сам остановится по таймауту
+    if (hlUp) { hlUp = false; hlSyncBusy = false; hlCfgClear(); }
+    return;
+  }
+  if (hlIrq) {
+    hlIrq = false;
+    if (hlTxBusy) {
+      hlRadio.finishTransmit();
+      hlTxBusy = false;
+      hlRadio.startReceive();
+      hlTxEnd = now;
+      if (hlWait) hlWaitUntil = now + HL_RESP_MS;
+      else hlNextTx = hlHbSched ? (hlTxStart + HL_HB_MS) : (now + HL_GAP_MS);
+    } else {
+      hlRead(now);
+    }
+  }
+  // таймаут ожидания ответа
+  if (hlWait && !hlTxBusy && (long)(now - hlWaitUntil) >= 0) {
+    if (hlWait == 1) { hlWait = 0; hlMissReq = true; hlNextTx = now + 1; }
+    else {                                                  // нет подтверждения: повтор до 3 раз
+      hlWait = 0;
+      hlCur.tries++;
+      if (hlCur.tries >= HL_CFG_TRIES) {
+        hlCurOn = false;
+        LOGF("Cfg: no answer (op %d p %d)", hlCur.op, hlCur.param);
+        if (hlCur.kind == 1) { hlSyncBusy = false; hlSynced = false; hlSyncRetryAt = now + 2000UL; }
+        else {
+          if (hlCur.op == HLO_SET) { simRam[hlCur.param][hlCur.ch][hlCur.dir] = hlCur.old; if (hlCur.param == RXP_MODE) rxModeCache = hlCur.old; }
+          if (hlCur.op == HLO_CMD || hlCur.op == HLO_NET) { hlWifiAck = true; hlWifiAckSt = 255; }
+          toast("RX no answer");
+        }
+      }
+      hlNextTx = now + 1;
+    }
+  }
+  // связь потеряна
+  if (hlUp && (long)(now - hlLastRx) > (long)hlLostMs()) {
+    hlUp = false; hlSyncBusy = false; hlCfgClear();
+    LOGF("Link: lost (age %lu ms)", now - hlLastRx);
+  }
+  if (now - hlRateAt >= 1000UL) { rfRate = (int)hlRateCnt; hlRateCnt = 0; hlRateAt = now; }
+  if (hlUp) rfAgeMs = now - hlLastRx;
+  // быстрые передачи: рычаг, E-Stop или тест рычага не ждут интервала heartbeat
+  bool es = (state == ST_ESTOP) || estop.state;
+  bool anyNZ = false;
+  for (int i = 0; i < NUM_CH; i++) if (ctl[i] != 0) anyNZ = true;
+  if (anyNZ || es) hlLastNonZero = now;
+  if (es && hlWait == 1 && !hlWaitEs && !hlTxBusy) { hlWait = 0; hlMissReq = true; hlNextTx = now; }   // E-Stop не ждёт ответа
+  if (hlHbSched && !hlWait && (anyNZ || es) && !hlSyncBusy && !hlBindOn) { unsigned long t = hlTxEnd + (unsigned long)HL_GAP_MS; if ((long)(t - hlNextTx) < 0) hlNextTx = t; }
+  if (hlTxBusy || hlWait || (long)(now - hlNextTx) < 0) return;
+  // что отправить
+  if (hlBindOn) {
+    if ((long)(now - hlBindAt) >= 0) { hlBindAt = now + HL_BIND_MS; hlSendBind(now); }
+    return;
+  }
+  if (hlSyncBusy) hlSyncNext();
+  if (!hlCurOn && hlQn > 0 && (hlUp || hlSyncBusy)) {
+    hlCur = hlQ[0];
+    for (int i = 1; i < hlQn; i++) hlQ[i - 1] = hlQ[i];
+    hlQn--;
+    if (++hlTag == 0) hlTag = 1;
+    hlCur.tag = hlTag;
+    hlCur.tries = 0;
+    hlCurOn = true;
+  }
+  static unsigned long lastCtl = 0;
+  if (hlCurOn) {
+    bool leverTest = anyNZ && state == ST_MENU && menuScr == MS_RXEDIT && rxLeverParam(rxParam) && leverArmed;
+    if (!(leverTest && (long)(now - lastCtl) >= 60)) { hlSendCfg(now); return; }   // тест рычага: управление чередуется с настройкой
+  }
+  hlSendControl(now);
+  lastCtl = now;
+}
+
 // Фронты событий: связь, телеметрия, батарея -> журнал
 void eventsTick(unsigned long now) {
   static bool pLinked = false;
@@ -1262,7 +1826,8 @@ void eventsTick(unsigned long now) {
   if (linked && !pLinked) {
     restoredAt = now ? now : 1;
     logEvent(LT_LINKOK, 0, 0, 0);
-    rxCfgRequest();                      // режим CONTROL и т.п. берём у приёмника
+    if (simMode == SIM_RADIO) { if (hlSynced) rxCfgKnown = true; }   // иначе станет известен после синхронизации
+    else rxCfgRequest();                 // имитация: режим CONTROL и т.п. берём у приёмника
   }
   if (!linked && pLinked) {
     rxRevertAll();                       // несохранённое откатывается
@@ -1272,6 +1837,14 @@ void eventsTick(unsigned long now) {
   }
   pLinked = linked;
 
+  static bool pKillRx = false, pKillFault = false, pRxBatt = false;
+  bool kRx = telValid && tel.kill && tel.reason == 1;
+  bool kFt = telValid && tel.kill && tel.reason == 2;
+  bool bRx = telValid && tel.vrx != 0 && tel.vrx < HL_RXBATT_LOW;
+  if (kRx && !pKillRx)    logEvent(LT_RXALARM, 0, 0, 0);
+  if (kFt && !pKillFault) logEvent(LT_RXFAULT, 0, 0, 0);
+  if (bRx && !pRxBatt)    logEvent(LT_BATTRX, 0, 0, tel.vrx);
+  pKillRx = kRx; pKillFault = kFt; pRxBatt = bRx;
   uint8_t ovl = telValid ? tel.mOvl : 0;
   uint8_t opn = telValid ? tel.mOpen : 0;
   uint8_t lim = telValid ? tel.mLim : 0;
@@ -1488,8 +2061,8 @@ void startConfirm(ConfAct act, MenuScr back, int idx) {
 }
 
 void factoryResetTx() {
-  static const char* ns[] = { "joy", "chcfg", "led", "alerts", "bat", "screens", "radio", "log", "wifi", "game" };
-  for (int i = 0; i < 10; i++) {
+  static const char* ns[] = { "joy", "chcfg", "led", "alerts", "bat", "screens", "radio", "log", "wifi", "game", "rxcopy" };
+  for (int i = 0; i < 11; i++) {
     prefs.begin(ns[i], false);
     prefs.clear();
     prefs.end();
@@ -1511,6 +2084,7 @@ void doConfirm() {
     case CA_FORGET:
       bindId = DEF_BIND_ID;
       saveBind();
+      hlMirrorForget();                    // копия настроек приёмника стирается, при следующей связи полная синхронизация
       logLine("Bind forgotten");
       toast("Bind forgotten");
       gotoScr(confBack, confIdx);
@@ -1531,12 +2105,12 @@ void doConfirm() {
       factoryResetTx();               // экран остаётся до перезагрузки
       break;
     case CA_FR_RX:
-      if (!rxLinked() || !othersCentered()) {
+      if (!rxReady() || !othersCentered()) {
         toast("Not possible now");
       } else {
         rxFactoryReset();
         logLine("FACTORY RESET: RX");
-        toast("RX reset");
+        toast(simMode == SIM_RADIO ? "RX reset sent" : "RX reset");
       }
       gotoScr(confBack, confIdx);
       break;
@@ -1573,13 +2147,26 @@ void pinStep(int a, int b) {
 void startBind() {
   bindStart = millis();
   bindPhase = 0;
+  if (simMode == SIM_RADIO) {                  // приёмник в режиме привязки (долгое нажатие PRG) принимает новый ID
+    hlBindNew = (uint32_t)esp_random();
+    if (hlBindNew == DEF_BIND_ID || hlBindNew == 0) hlBindNew ^= 0x1B2D3F5UL;
+    hlBindOn = true; hlBindDone = false; hlBindAt = millis();
+  }
   logLine("Bind: started");
   gotoScr(MS_BINDRUN, 0);
 }
 
 void bindTick(unsigned long now) {
   if (bindPhase == 0) {
-    if (simMode == SIM_LINK && (now - bindStart) >= 3000UL) {
+    if (simMode == SIM_RADIO && hlBindDone) {
+      bindId = hlBindNew;
+      saveBind();
+      hlBindOn = false; hlBindDone = false;
+      hlMirrorForget();                        // после привязки: полная синхронизация
+      bindPhase = 1;
+      bindDoneAt = now;
+      LOGF("Bind OK %08lX", (unsigned long)bindId);
+    } else if (simMode == SIM_LINK && (now - bindStart) >= 3000UL) {
       bindId = (uint32_t)esp_random();
       if (bindId == DEF_BIND_ID) bindId ^= 1UL;
       saveBind();
@@ -1588,6 +2175,7 @@ void bindTick(unsigned long now) {
       LOGF("Bind OK %08lX", (unsigned long)bindId);
     } else if ((now - bindStart) >= BIND_TIMEOUT_MS) {
       bindPhase = 2;
+      hlBindOn = false;
       bindDoneAt = now;
       logLine("Bind: timeout");
     }
@@ -1743,7 +2331,7 @@ void menuLabel(int i, char* b, size_t n) {
   static const char* mainL[] = { "Transmitter", "Receiver", "Dino", "Exit" };
   static const char* calL[]  = { "Set Center", "Set Min/Max", "Dead Zone", "Back" };
   static const char* ledM[]  = { "Both", "Red", "Green", "Off" };
-  static const char* simN[]  = { "OFF", "LINK", "LOST" };
+  static const char* simN[]  = { "Radio", "Sim link", "Sim lost" };
   static const char* ledL[]  = { "Presets", "Alert events", "Status LEDs", "Test alerts", "Reset alerts", "Back" };
   static const char* rxL[]   = { "Current Limits", "Start Duty", "Max Duty", "Ramps", "Channels On/Off", "Global", "RX Status", "Wi-Fi", "Back" };
   static const char* dbgL[]  = { "Radio", "Telemetry", "Limits", "RAW ADC", "System", "Log", "Back" };
@@ -1764,7 +2352,7 @@ void menuLabel(int i, char* b, size_t n) {
         case TX_DBG:   snprintf(b, n, "Debug"); break;
         case TX_WIFI:  snprintf(b, n, "Wi-Fi"); break;
         case TX_FR:    snprintf(b, n, "Factory Reset"); break;
-        case TX_SIM:   snprintf(b, n, "Sim RX: %s", simN[simMode]); break;
+        case TX_SIM:   snprintf(b, n, "RX: %s", simN[simMode]); break;
         default:       snprintf(b, n, "Back"); break;
       }
       break;
@@ -2025,6 +2613,7 @@ void batEditSave() {
 // ---- Receiver ----
 void enterReceiver() {
   if (!rxLinked())          { toast("RX not connected"); return; }
+  if (hlSyncBusy)           { toast("Syncing...");       return; }
   if (!othersCentered())    { toast("Center controls");  return; }
   gotoScr(MS_RX, idxRx);
 }
@@ -2258,6 +2847,7 @@ void menuSelect(int i) {
       idxRxWifi = i;
       if (i == RW_BACK)           gotoScr(MS_RX, idxRx);
       else if (!rxLinked())       toast("RX not connected");
+      else if (hlSyncBusy)        toast("Syncing...");
       else if (!othersCentered()) toast("Center controls");
       else if (i == RW_GH && netCount() == 0) toast("No saved network");
       else                        rxWifiBegin(i == RW_GH ? 1 : 0);
@@ -2302,6 +2892,7 @@ void menuSelect(int i) {
       if (i == 0)      startTxPwrEdit();
       else if (i == 1) {
         if (!rxLinked()) toast("RX not connected");
+        else if (hlSyncBusy) toast("Syncing...");
         else             startRxEdit(RXP_PWR, 0, 0, MS_POWER);
       } else gotoScr(MS_TX, idxTx);
       break;
@@ -2363,6 +2954,7 @@ void menuSelect(int i) {
       if (i == 0)      startConfirm(CA_FR_TX, MS_FRTARGET, idxFr);
       else if (i == 1) {
         if (!rxLinked())            toast("RX not connected");
+        else if (hlSyncBusy)        toast("Syncing...");
         else if (!othersCentered()) toast("Center controls");
         else                        startConfirm(CA_FR_RX, MS_FRTARGET, idxFr);
       } else gotoScr(MS_TX, idxTx);
@@ -2406,7 +2998,7 @@ void menuBack() {
     case MS_SCRMOVE:  saveScreens(); gotoScr(MS_SCRITEM, 0); break;
     case MS_TXPWR:    gotoScr(MS_POWER, idxPower); break;
     case MS_TRATE:    gotoScr(MS_TX, idxTx); break;
-    case MS_BINDRUN:
+    case MS_BINDRUN:  hlBindOn = false; gotoScr(MS_BIND, idxBind); break;
     case MS_BINDID:   gotoScr(MS_BIND, idxBind); break;
     case MS_DBGDESC:
     case MS_DBGPAGE:  gotoScr(MS_DBGLIST, idxDbg); break;
@@ -2417,7 +3009,8 @@ void menuBack() {
     case MS_RXGLOB:   gotoScr(MS_RX, idxRx); break;
     case MS_RXEDIT:   rxEditCancel(); break;
     case MS_RXSTAT:   gotoScr(MS_RX, idxRx); break;
-    case MS_RXWIFI:   if (rxWifiSt == 5) break;                   // во время загрузки прошивки выход заблокирован
+    case MS_RXWIFI:   if (rxWifiSt == 5 || (simMode == SIM_RADIO && (rxWifiSt == HLW_PH_UP || rxWifiSt == HLW_GH_DL || rxWifiSt == HLW_GH_VERIFY))) break;   // во время загрузки прошивки выход заблокирован
+                      if (simMode == SIM_RADIO) hlCfgPut(HLO_CMD, HLC_WIFI_OFF, 0, 0, 0, false, 0, 0);
                       rxWifiSt = 0; gotoScr(MS_RXWIFIM, idxRxWifi); break;
     case MS_RXWIFIM:  gotoScr(MS_RX, idxRx); break;
     case MS_GAME:     gotoScr(MS_MAIN, idxMain); break;
@@ -2481,6 +3074,7 @@ void navStep(unsigned long now) {
         if (b > 0) {
           txPower = TXP_LIST[editInt];
           saveRadio();
+          hlSetPower();
           LOGF("TX power -> %d dBm", txPower);
           toast("Saved");
           gotoScr(MS_POWER, idxPower);
@@ -2505,9 +3099,12 @@ void navStep(unsigned long now) {
   switch (menuScr) {
     case MS_DBGPAGE:
     case MS_RXSTAT:
-    case MS_RXWIFI:
     case MS_BINDID:
       if (b < 0) menuBack();                     // нечего подтверждать: выходит только "-"
+      return;
+    case MS_RXWIFI:
+      if (b > 0 && simMode == SIM_RADIO && rxWifiSt == HLW_GH_ASK) { hlCfgPut(HLO_CMD, HLC_WIFI_YES, 0, 0, 1, false, 0, 0); toast("Install sent"); }
+      if (b < 0) menuBack();
       return;
     case MS_GAME:
       gameStep(now, b);
@@ -3275,6 +3872,18 @@ void rxWifiBegin(int mode) {
   rxWifiSt = 1;
   rxWifiAt = millis();
   rxWifiSsid[0] = 0;
+  if (simMode == SIM_RADIO) {                  // настоящая команда: приёмник сам открывает Wi-Fi, состояние берём из телеметрии
+    hlRxVer[0] = 0; hlWifiAck = false; hlWifiAckSt = 0;
+    if (mode == 1) {
+      for (int i = 0; i < NET_MAX; i++) if (netSsid[i][0]) hlCfgPut(HLO_NET, 0, (uint8_t)i, 0, 0, false, 0, 0);
+      hlCfgPut(HLO_CMD, HLC_WIFI_GH, 0, 0, 0, false, 0, 0);
+    } else {
+      hlCfgPut(HLO_CMD, HLC_WIFI_PHONE, 0, 0, 0, false, 0, 0);
+    }
+    gotoScr(MS_RXWIFI, 0);
+    logLine(mode ? "RX GitHub update: requested" : "RX Wi-Fi (Update/Test): requested");
+    return;
+  }
   gotoScr(MS_RXWIFI, 0);
   logLine(mode ? "RX GitHub update: requested (simulated)" : "RX Wi-Fi Update: requested (simulated)");
 }
@@ -3284,6 +3893,26 @@ void rxWifiBegin(int mode) {
 // Пока Test active, пульт управление не отправляет (нули), E-Stop закрывает Wi-Fi.
 int rxUpPct = 0;
 void rxWifiTick(unsigned long now) {
+  if (simMode == SIM_RADIO) {
+    if (rxWifiSt == 1) {
+      if (hlWifiAck && hlWifiAckSt != 0) {
+        toast(hlWifiAckSt == 255 ? "RX no answer" : "RX refused");
+        rxWifiSt = 0; gotoScr(MS_RXWIFIM, idxRxWifi);
+      } else if (telValid && tel.wifi != 0) {
+        rxWifiSt = tel.wifi; rxWifiAt = now;
+      } else if ((now - rxWifiAt) >= 5000UL) {
+        toast("RX no answer");
+        rxWifiSt = 0; gotoScr(MS_RXWIFIM, idxRxWifi);
+      }
+    } else if (rxWifiSt >= 2) {
+      if (telValid && tel.wifi != 0) rxWifiSt = tel.wifi;
+      else if (telValid && tel.wifi == 0) {            // приёмник закрыл Wi-Fi (таймаут, ошибка, E-Stop, перезагрузка)
+        rxWifiSt = 0; toast("RX Wi-Fi closed");
+        gotoScr(MS_RXWIFIM, idxRxWifi);
+      }
+    }
+    return;
+  }
   if (rxWifiSt == 1 && (now - rxWifiAt) >= 800) {
     rxWifiSt = 2; rxWifiAt = now;
     snprintf(rxWifiSsid, sizeof(rxWifiSsid), "RX-SIM1");
@@ -3350,9 +3979,9 @@ uint8_t evChAct[NUM_EV];
 void collectEvents(unsigned long now) {
   for (int e = 0; e < NUM_EV; e++) { evAllAct[e] = false; evChAct[e] = 0; }
   evAllAct[EV_ESTOP]    = (state == ST_ESTOP);
-  evAllAct[EV_NOLINK]   = (simMode == SIM_LOST);
+  evAllAct[EV_NOLINK]   = (simMode == SIM_LOST) || (simMode == SIM_RADIO && !hlUp && (now - hlBootAt) > 4000UL);
   evAllAct[EV_RESTORED] = (restoredAt != 0 && (now - restoredAt) < RESTORED_MS);
-  evAllAct[EV_HEART]    = (simMode == SIM_LINK);
+  evAllAct[EV_HEART]    = (simMode == SIM_LINK) || (simMode == SIM_RADIO && hlUp);
   evAllAct[EV_BATTTX]   = (batLevel >= 1);
   if (state == ST_SAFE) {
     for (int i = 0; i < NUM_CH; i++) if (chBad(i)) evChAct[EV_NOTCTR] |= (1 << i);
@@ -3362,7 +3991,11 @@ void collectEvents(unsigned long now) {
     evChAct[EV_OPEN]     |= tel.mOpen;
     evChAct[EV_LIMIT]    |= tel.mLim;
   }
-  // TODO радио: EV_RXALARM, EV_RXFAULT, EV_BATTRX
+  if (telValid) {
+    evAllAct[EV_RXALARM] = tel.kill && tel.reason == 1;
+    evAllAct[EV_RXFAULT] = tel.kill && tel.reason == 2;
+    evAllAct[EV_BATTRX]  = tel.vrx != 0 && tel.vrx < HL_RXBATT_LOW;
+  }
 }
 
 // ============ ЭКРАН ТРЕВОГ (только рабочий режим) ============
@@ -3507,6 +4140,15 @@ void buildControl() {
 }
 
 // ============ ЭКРАНЫ ============
+void drawTick(int cx, int cy, int r) {
+  display.drawCircle(cx, cy, r, SH110X_WHITE);
+  display.drawCircle(cx, cy, r - 1, SH110X_WHITE);
+  display.drawLine(cx - 5, cy, cx - 2, cy + 4, SH110X_WHITE);
+  display.drawLine(cx - 5, cy + 1, cx - 2, cy + 5, SH110X_WHITE);
+  display.drawLine(cx - 2, cy + 4, cx + 5, cy - 4, SH110X_WHITE);
+  display.drawLine(cx - 2, cy + 5, cx + 5, cy - 3, SH110X_WHITE);
+}
+
 void drawCross(int cx, int cy, int r) {
   display.drawCircle(cx, cy, r, SH110X_WHITE);
   display.drawCircle(cx, cy, r - 1, SH110X_WHITE);
@@ -3642,17 +4284,23 @@ void drawRun1() {
   startScreen();
   display.setTextSize(2);
   display.setCursor(2, 6);   display.print("LINK");
-  drawCross(92, 14, 9);
+  if (rxLinked()) drawTick(92, 14, 9); else drawCross(92, 14, 9);
 
   display.drawLine(0, 28, 108, 28, SH110X_WHITE);
 
   display.setCursor(2, 34);  display.print("RX");
   display.setTextSize(1);
   display.setCursor(32, 38);
-  if (simMode == SIM_OFF)       display.print("NO RADIO");
+  if (simMode == SIM_RADIO) {
+    if (!hlInit)             display.print("RADIO ERROR");
+    else if (!hlUp)          display.print("NO SIGNAL");
+    else if (hlSyncBusy)     display.printf("SYNC %d%%", hlSyncPct());
+    else if (tel.kill)       display.print("STOPPED");
+    else                     display.print("READY");
+  }
   else if (simMode == SIM_LINK) display.print("SIM: READY");
   else                          display.print("NO SIGNAL");
-  drawCross(92, 42, 9);
+  if (rxLinked() && !hlSyncBusy && !(simMode == SIM_RADIO && tel.kill)) drawTick(92, 42, 9); else drawCross(92, 42, 9);
 
   drawHintText("hold MENU = menu", 56);
   drawBattery();
@@ -3713,11 +4361,17 @@ void drawLinkScreen() {
   startScreen();
   display.setCursor(0, 0);   display.print("LINK");
   display.setCursor(0, 10);
-  if (simMode == SIM_LINK)      display.print("Status: OK");
-  else if (simMode == SIM_LOST) display.print("Status: NO SIGNAL");
-  else                          display.print("Status: NO RADIO");
+  if (simMode == SIM_RADIO) {
+    if (!hlInit)         display.print("Status: RADIO ERROR");
+    else if (!hlUp)      display.print("Status: NO SIGNAL");
+    else if (hlSyncBusy) display.printf("Sync: reading %d%%", hlSyncPct());
+    else                 display.print("Status: OK");
+  }
+  else if (simMode == SIM_LINK) display.print("Status: OK");
+  else                          display.print("Status: NO SIGNAL");
   display.setCursor(0, 19);
-  if (telValid) display.printf("RSSI%d SNR%.1f", rfRssi, rfSnr10 / 10.0f);
+  if (simMode == SIM_RADIO && telValid) display.printf("RSSI%d/%d SNR%d/%d", rfRssi, (int)tel.rssi, (rfSnr10 + (rfSnr10 < 0 ? -5 : 5)) / 10, (int)tel.snr);
+  else if (telValid) display.printf("RSSI%d SNR%.1f", rfRssi, rfSnr10 / 10.0f);
   else          display.print("RSSI-- SNR--");
   display.setCursor(0, 28);
   if (telValid) {
@@ -3725,7 +4379,8 @@ void drawLinkScreen() {
     display.printf("Lost %lu (%.1f%%)", (unsigned long)rfLost, tot ? rfLost * 100.0f / tot : 0.0f);
   } else display.print("Lost --");
   display.setCursor(0, 37);
-  if (telValid) display.printf("%d/s Age %.1fs", rfRate, rfAgeMs / 1000.0f);
+  if (telValid && simMode == SIM_RADIO) display.printf("%d/s Age%.1f RTT%d", rfRate, rfAgeMs / 1000.0f, hlRtt);
+  else if (telValid) display.printf("%d/s Age %.1fs", rfRate, rfAgeMs / 1000.0f);
   else          display.print("-- /s  Age --");
   display.setCursor(0, 46);
   if (telValid) display.printf("ID %04X TX%d RX%d", rxId, txPower, (int)rxQuery(0, 0, RXP_PWR));
@@ -3868,9 +4523,85 @@ void drawWifi() {
   oledCommit();
 }
 
+static const char* ghErrText(int c) {
+  switch (c) {
+    case 1: return "No network in range";
+    case 2: return "Wrong password";
+    case 3: return "GitHub not reachable";
+    case 4: return "Release not found";
+    case 5: return "Download failed";
+    case 6: return "Checksum error";
+    case 7: return "Wrong firmware";
+    case 8: return "Update error";
+    case 9: return "GitHub busy";
+    default: return "Receiver error";
+  }
+}
+
+// Wi-Fi приёмника по радио: состояние приходит в телеметрии (tel.wifi / tel.wifiArg), имя сети и версия в пакетах INFO
+void drawRxWifiRadio() {
+  int w = rxWifiSt;
+  int pct = constrain((int)tel.wifiArg, 0, 100);
+  if (w == 1) {
+    display.setCursor(0, 20);  display.print("Asking receiver...");
+  } else if (w == HLW_PH_WAIT) {
+    display.setCursor(0, 12);  display.printf("Net:  %s", rxWifiSsid);
+    display.setCursor(0, 22);  display.print("Pass: " WIFI_PASS);
+    display.setCursor(0, 32);  display.print("Open: " WIFI_ADDR);
+    display.setCursor(0, 42);  display.print("Tabs: Update, Test");
+  } else if (w == HLW_PH_CONN) {
+    display.setCursor(0, 14);  display.print("Phone connected");
+    display.setCursor(0, 26);  display.print("Tab: Update");
+    display.setCursor(0, 40);  display.print("Receiver outputs off");
+  } else if (w == HLW_PH_TEST) {
+    display.setCursor(0, 12);  display.print("TEST ACTIVE");
+    display.setCursor(0, 24);  display.print("RX outputs LIVE");
+    display.setCursor(0, 34);  display.print("E-Stop works");
+    display.setCursor(0, 44);  display.print("Pult sends no control");
+  } else if (w == HLW_PH_UP || w == HLW_GH_DL || w == HLW_GH_VERIFY) {
+    display.setCursor(0, 14);
+    if (w == HLW_GH_VERIFY) display.print("Verifying...");
+    else if (w == HLW_GH_DL) display.printf("Downloading %d%%", pct);
+    else display.printf("Uploading %d%%", pct);
+    display.drawRect(0, 26, PBAR_W, 12, SH110X_WHITE);
+    display.fillRect(2, 28, (PBAR_W - 4) * pct / 100, 8, SH110X_WHITE);
+    display.setCursor(0, 44);  display.print("Do not switch off");
+  } else if (w == HLW_PH_DONE || w == HLW_GH_DONE) {
+    display.setCursor(0, 14);  display.print("Installed");
+    display.setCursor(0, 26);  display.print("Receiver restarts");
+  } else if (w == HLW_GH_CONN) {
+    display.setCursor(0, 16);  display.printf("%d saved networks", netCount());
+    display.setCursor(0, 28);  display.print("Receiver connecting");
+    display.setCursor(0, 40);  display.print("Receiver outputs off");
+  } else if (w == HLW_GH_CHECK) {
+    display.setCursor(0, 28);  display.print("Receiver checks GitHub");
+    display.setCursor(0, 40);  display.print("Receiver outputs off");
+  } else if (w == HLW_GH_ASK) {
+    display.setCursor(0, 12);  display.print("Found on GitHub:");
+    display.setCursor(0, 24);  display.printf("%.21s", hlRxVer);
+    display.setCursor(0, 38);  display.print("6 + = install");
+    display.setCursor(0, 47);  display.print("6 - / MENU = cancel");
+  } else if (w == HLW_ERR) {
+    display.setCursor(0, 14);  display.print("Receiver Wi-Fi error");
+    display.setCursor(0, 26);  display.printf("%.21s", ghErrText(tel.wifiArg));
+    display.setCursor(0, 38);  display.printf("code %d", (int)tel.wifiArg);
+  } else {
+    display.setCursor(0, 20);  display.printf("State %d", w);
+  }
+}
+
 void drawRxWifi() {
   startScreen();
   display.setCursor(0, 0);   display.print(rxWifiMode ? "RECEIVER GITHUB" : "RECEIVER PHONE");
+  if (simMode == SIM_RADIO) {
+    drawRxWifiRadio();
+    bool busy = (rxWifiSt == HLW_PH_UP || rxWifiSt == HLW_GH_DL || rxWifiSt == HLW_GH_VERIFY);
+    if (busy) { drawBattery(); oledCommit(); return; }
+    if (rxWifiSt != HLW_GH_ASK) exitHint("exit", 56);
+    drawBattery();
+    oledCommit();
+    return;
+  }
   if (rxWifiSt == 1) {
     display.setCursor(0, 20);  display.print("Asking receiver...");
   } else if (rxWifiMode == 1) {
@@ -4361,7 +5092,7 @@ void drawRxEdit() {
 
 void drawRxStat() {
   startScreen();
-  display.setCursor(0, 0);   display.print("RX STATUS (sim)");
+  display.setCursor(0, 0);   display.print(simMode == SIM_RADIO ? "RX STATUS" : "RX STATUS (sim)");
   display.setCursor(0, 11);  display.printf("Link: %s", rxLinked() ? "OK" : "LOST");
   display.setCursor(0, 21);
   if (telValid) display.printf("VBAT-RX: %.1fV", tel.vrx / 10.0f);
@@ -4428,7 +5159,8 @@ void drawDbgPage() {
       if (telValid) display.printf("TX%ddBm RX%ddBm", txPower, (int)rxQuery(0, 0, RXP_PWR));
       else          display.printf("TX%ddBm RX--", txPower);
       display.setCursor(0, 28);
-      if (telValid) display.printf("RSSI%d SNR%.1f", rfRssi, rfSnr10 / 10.0f);
+      if (telValid && simMode == SIM_RADIO) display.printf("RSSI%d/%d SNR%d/%d", rfRssi, (int)tel.rssi, (rfSnr10 + (rfSnr10 < 0 ? -5 : 5)) / 10, (int)tel.snr);
+      else if (telValid) display.printf("RSSI%d SNR%.1f", rfRssi, rfSnr10 / 10.0f);
       else          display.print("RSSI-- SNR--");
       display.setCursor(0, 37);
       if (telValid) {
@@ -4625,8 +5357,12 @@ void drawBindRun() {
     display.setCursor(0, 11);  display.print("Hold PRG on RX ~3s");
     display.setCursor(0, 21);  display.printf("Waiting... %ds", left);
     display.setCursor(0, 31);  display.print("Keep pult close");
-    display.setCursor(0, 41);  display.print("No radio yet. Sim");
-    display.setCursor(0, 50);  display.print("LINK fakes success");
+    if (simMode == SIM_RADIO) {
+      display.setCursor(0, 41);  display.print("Sending new pair ID");
+    } else {
+      display.setCursor(0, 41);  display.print("Sim mode: LINK");
+      display.setCursor(0, 50);  display.print("fakes success");
+    }
   } else if (bindPhase == 1) {
     display.setTextSize(2);
     display.setCursor(0, 16);  display.print("BOUND!");
@@ -4788,7 +5524,7 @@ void stepLogic(unsigned long now) {
   prevLinked = lk;
   switch (state) {
     case ST_SAFE: {
-      bool ok = true;
+      bool ok = !hlSyncBusy;                                   // пока идёт синхронизация с приёмником, управление не передаётся
       for (int i = 0; i < NUM_CH; i++) if (chBad(i)) ok = false;
       if (ok) {
         if (safeSince == 0) safeSince = now;
@@ -4876,7 +5612,7 @@ void i2cScan() {
 
 // ============ SETUP ============
 void setup() {
-  LOGF("=== PULT FW %s (no radio, RX simulator) ===", FW_VERSION);
+  LOGF("=== PULT FW %s (radio) ===", FW_VERSION);
   LOGF("%s", FW_TAG);                          // ссылка на метку: без неё линкер выбросит её из файла
 
   pinMode(BTN_MENU_PIN, INPUT_PULLUP);
@@ -4914,9 +5650,11 @@ void setup() {
   loadConfig();
   netLoad();
   simInit();
+  hlMirrorLoad();                              // копия настроек приёмника из памяти (до первой синхронизации только для просмотра)
   for (int i = 0; i < NUM_CH; i++) { raw[i] = cenV[i]; ctl[i] = 0; }
 
   batTick(millis());
+  hlBegin();                                   // радио SX1262
   bootStart = millis();
   state = ST_BOOT;
 }
@@ -4945,6 +5683,7 @@ void loop() {
   handleMenuButton();
   wifiTick(now);
   ghTick(now);
+  hlStep(now);                                 // радио: на каждом проходе цикла
 
   static unsigned long lastRead = 0;
   if ((now - lastRead) >= READ_PERIOD_MS) {
