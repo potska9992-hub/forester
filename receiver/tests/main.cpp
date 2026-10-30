@@ -121,7 +121,7 @@ int main(){
   CHECK(telem()[31]!=crc8Defaults());
   a=ask(mkCfg(6,0,0,2,1,500),4); CHECK((a[8]|(a[9]<<8))==100);       // предел
   a=ask(mkCfg(7,0,40,0,0,1),4);  CHECK(a[4]==1);                     // нет такого параметра
-  a=ask(mkCfg(8,0,12,0,0,1),4);  CHECK(a[4]==2);                     // CURRENT: нет быстрого АЦП
+  a=ask(mkCfg(8,0,12,0,0,1),4);  CHECK(a[4]==0);                     // CURRENT разрешён
   a=ask(mkCfg(9,3,2,0,0,0xFF),4); CHECK(a[4]==0);                    // CHMASK
   Bytes a2=ask(mkCfg(9,3,2,0,0,0xFF),4); CHECK(a2==a);               // повтор той же метки
   a=ask(mkCfg(10,3,1,0,0,1),4);  CHECK(a[4]==0);                     // PROTO

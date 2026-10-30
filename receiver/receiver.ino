@@ -608,7 +608,7 @@ static uint8_t modActive() {
 }
 
 // слой измерения: быстрый АЦП (MCP3208) пока не установлен. Когда появится, функция возвращает true:
-// включаются обнаружение обрыва и режим CURRENT (на ADS1115 эти функции недостоверны: импульс 2-15 % короче замера)
+// включается обнаружение обрыва (на ADS1115 оно недостоверно: импульс 2-15 % короче замера). Режим CURRENT от этого не зависит
 static bool currentBackendFast() { return false; }
 
 static void keyName(char* k, const char* base, uint8_t m) { snprintf(k, 8, "%s%u", base, (unsigned)m); }
@@ -669,7 +669,7 @@ static void runReset() {
 
 static inline float paramPct(int p, int ch, int side) { return ramP[p][ch][side] / 10.0f; }
 
-static bool modeCurrent() { return ramP[RXP_MODE][0][0] == 1 && currentBackendFast(); }
+static bool modeCurrent() { return ramP[RXP_MODE][0][0] == 1; }   // режим CURRENT работает штатно и на ADS1115, и на быстром АЦП
 
 static float triWave(unsigned long now, float hz) {
   float ph = fmodf((float)now * hz / 1000.0f, 1.0f);
@@ -1161,7 +1161,6 @@ static void handleCfg(const uint8_t* p, size_t len, unsigned long now) {
     paramNorm(prm, c, dd);
     if (op == HLO_GET) { sendAck(tag, 0, prm, ch, d, ramP[prm][c][dd], false); return; }
     int vv = constrain((int)val, (int)RXP[prm].mn, (int)RXP[prm].mx);
-    if (prm == RXP_MODE && vv == 1 && !currentBackendFast()) { sendAck(tag, 2, prm, ch, d, ramP[prm][c][dd], false); return; }   // режим CURRENT ждёт быстрый АЦП
     ramP[prm][c][dd] = (uint16_t)vv;
     if (save) { nvsP[prm][c][dd] = (uint16_t)vv; cfgSavePending = true; }
     if (prm == RXP_PWR) pwrDirty = true;
