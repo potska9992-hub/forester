@@ -1,6 +1,6 @@
 // ============================================================
 // Пульт гидрораспределителя. Журнал версий
-//  1.2 - из меню Transmitter убрана имитация приёмника (RX: Radio/Sim link/Sim lost): всегда настоящее радио; экран Boot check (шина I2C, ADS) показывается только при ошибке; радио запускается после заставки и Safe Start; экран Safe Start показывается только если какой-то канал не в центре (или ошибка ADS), иначе проверка идёт в фоне
+//  1.2 - из меню Transmitter убрана имитация приёмника (RX: Radio/Sim link/Sim lost): всегда настоящее радио; экран Boot check (шина I2C, ADS) показывается только при ошибке; радио запускается после заставки и Safe Start; экран Safe Start показывается только если какой-то канал не в центре (или ошибка ADS), иначе проверка идёт в фоне; на экранах связи вместо заглушки ID 3F2A показан короткий код пары
 //  1.1 - радио опрашивается и во время чтения каналов джойстиков (раньше ждало конца чтения, ~10 мс): больше пакетов управления в секунду, быстрее приём ответов
 //  1.0 - РАДИО (HydroLink v1, SX1262 868 МГц, SF7 BW250): пакеты управления с маской каналов и heartbeat, телеметрия по запросу
 //        (TELEM RATE), настройки приёмника с подтверждением и повторами (SetConfig / Ack / Batch), полная синхронизация
@@ -1265,7 +1265,6 @@ uint16_t simPeak[NUM_CH];
 uint32_t rfTx = 0, rfRx = 0, rfLost = 0;
 int   rfRssi = -63, rfSnr10 = 95, rfRate = 26;
 unsigned long rfAgeMs = 0;
-uint16_t rxId = 0x3F2A;
 
 void simTelemetry(unsigned long now) {
   if (simMode == SIM_RADIO) {                            // телеметрия приходит по радио (hlStep), здесь только сброс при потере связи
@@ -4387,7 +4386,7 @@ void drawLinkScreen() {
   else if (telValid) display.printf("%d/s Age %.1fs", rfRate, rfAgeMs / 1000.0f);
   else          display.print("-- /s  Age --");
   display.setCursor(0, 46);
-  if (telValid) display.printf("ID %04X TX%d RX%d", rxId, txPower, (int)rxQuery(0, 0, RXP_PWR));
+  if (telValid) display.printf("ID %04X TX%d RX%d", (unsigned)(bindId & 0xFFFF), txPower, (int)rxQuery(0, 0, RXP_PWR));
   else          display.printf("TX%ddBm", txPower);
   drawHintText("MENU = next screen", 56);
   drawBattery();
@@ -5172,7 +5171,7 @@ void drawDbgPage() {
         display.printf("Lost %lu (%.1f%%) %d/s", (unsigned long)rfLost, tot ? rfLost * 100.0f / tot : 0.0f, rfRate);
       } else display.print("Lost --");
       display.setCursor(0, 46);
-      if (telValid) display.printf("Age %.1fs ID %04X", rfAgeMs / 1000.0f, rxId);
+      if (telValid) display.printf("Age %.1fs ID %04X", rfAgeMs / 1000.0f, (unsigned)(bindId & 0xFFFF));
       else          display.print("Age -- ID ----");
       drawHintText(h, 56);
       drawBattery();
