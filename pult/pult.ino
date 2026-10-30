@@ -1,6 +1,6 @@
 // ============================================================
 // Пульт гидрораспределителя. Журнал версий
-//  1.2 - из меню Transmitter убрана имитация приёмника (RX: Radio/Sim link/Sim lost): всегда настоящее радио; экран Boot check (шина I2C, ADS) показывается только при ошибке; радио запускается после заставки и Safe Start; экран Safe Start показывается только если какой-то канал не в центре (или ошибка ADS), иначе проверка идёт в фоне; на экранах связи вместо заглушки ID 3F2A показан короткий код пары
+//  1.2 - меню Receiver в режиме CURRENT: после Max Current добавлены Start Duty и Max Duty (в PWM как раньше); из меню Transmitter убрана имитация приёмника (RX: Radio/Sim link/Sim lost): всегда настоящее радио; экран Boot check (шина I2C, ADS) показывается только при ошибке; радио запускается после заставки и Safe Start; экран Safe Start показывается только если какой-то канал не в центре (или ошибка ADS), иначе проверка идёт в фоне; на экранах связи вместо заглушки ID 3F2A показан короткий код пары
 //  1.1 - радио опрашивается и во время чтения каналов джойстиков (раньше ждало конца чтения, ~10 мс): больше пакетов управления в секунду, быстрее приём ответов
 //  1.0 - РАДИО (HydroLink v1, SX1262 868 МГц, SF7 BW250): пакеты управления с маской каналов и heartbeat, телеметрия по запросу
 //        (TELEM RATE), настройки приёмника с подтверждением и повторами (SetConfig / Ack / Batch), полная синхронизация
@@ -221,7 +221,8 @@ struct NetFound { char ssid[33]; int8_t rssi; };      // найденная Wi-F
 
 // порядок = порядок в меню: частое и важное сверху, опасное и временное внизу, Back последний
 enum TxItem { TX_CAL, TX_CHSET, TX_PWR, TX_BIND, TX_TRT, TX_SCR, TX_LED, TX_BAT, TX_LOG, TX_DBG, TX_WIFI, TX_FR, TX_BACK, TX_COUNT };
-enum RxTopic { RT_LIMIT, RT_DUTY, RT_MAXD, RT_RAMP, RT_CHEN, RT_GLOB, RT_STAT, RT_WIFI, RT_BACK, RT_COUNT };
+enum RxTopic { RT_LIMIT, RT_DUTY, RT_MAXD, RT_RAMP, RT_CHEN, RT_GLOB, RT_STAT, RT_WIFI, RT_BACK, RT_COUNT,
+               RT_DUTY2, RT_MAXD2 };   // RT_DUTY2/RT_MAXD2: Start Duty / Max Duty, показываются в меню только в режиме CURRENT
 enum WifiItem { WF_PHONE, WF_GH, WF_NETS, WF_BACK, WF_COUNT };
 enum RxWifiItem { RW_PHONE, RW_GH, RW_BACK, RW_COUNT };
 enum ScrId { SC_MAIN, SC_TX, SC_RX, SC_LINK, SC_POWER, SC_LOG };
@@ -1924,7 +1925,7 @@ int menuCount() {
     case MS_WIFI:    return WF_COUNT;
     case MS_NETACT:  return 3;
     case MS_NETPICK: return pickScanning ? 1 : pickN + 2;
-    case MS_RX:      return RT_COUNT;
+    case MS_RX:      return RT_COUNT + (rxCurMode() ? 2 : 0);
     case MS_RXWIFIM: return RW_COUNT;
     case MS_RXCH:    return NUM_CH + 1;
     case MS_RXDIR:   return 3;
@@ -1942,6 +1943,7 @@ void adjustTop() {
 void gotoScr(MenuScr s, int index) {
   menuScr = s;
   sel = index;
+  { int mc = menuCount(); if (sel >= mc) sel = mc > 0 ? mc - 1 : 0; }   // индекс мог остаться от другого режима (меню Receiver длиннее в CURRENT)
   menuTop = 0;
   adjustTop();
   navReset();
@@ -2018,11 +2020,21 @@ bool rxCurMode() { return rxCfgKnown && rxModeCache != 0; }   // пока реж
 // параметры, при правке которых работает тестовый рычаг
 bool rxLeverParam(int p) { return p == RXP_LIMIT || p == RXP_DUTY || p == RXP_STARTI; }
 
+// строка меню Receiver -> тема. PWM: как есть. CURRENT: после Max Current добавлены Start Duty и Max Duty
+int rxRowTopic(int row) {
+  if (!rxCurMode() || row <= RT_MAXD) return row;
+  if (row == RT_MAXD + 1) return RT_DUTY2;
+  if (row == RT_MAXD + 2) return RT_MAXD2;
+  return row - 2;
+}
+
 int rxTopicParam(int topic) {
   switch (topic) {
     case RT_LIMIT: return RXP_LIMIT;
     case RT_DUTY:  return rxCurMode() ? RXP_STARTI : RXP_DUTY;
     case RT_MAXD:  return rxCurMode() ? RXP_MAXI : RXP_MAXD;
+    case RT_DUTY2: return RXP_DUTY;
+    case RT_MAXD2: return RXP_MAXD;
     case RT_CHEN:  return RXP_CHEN;
     default:       return RXP_RAMPUP;
   }
@@ -2436,9 +2448,14 @@ void menuLabel(int i, char* b, size_t n) {
       break;
     }
     case MS_RX:
-      if (i == RT_DUTY)      snprintf(b, n, "%s", rxCurMode() ? "Start Current" : "Start Duty");
-      else if (i == RT_MAXD) snprintf(b, n, "%s", rxCurMode() ? "Max Current" : "Max Duty");
-      else                   snprintf(b, n, "%s", rxL[i]);
+      {
+        int t = rxRowTopic(i);
+        if (t == RT_DUTY)       snprintf(b, n, "%s", rxCurMode() ? "Start Current" : "Start Duty");
+        else if (t == RT_MAXD)  snprintf(b, n, "%s", rxCurMode() ? "Max Current" : "Max Duty");
+        else if (t == RT_DUTY2) snprintf(b, n, "Start Duty");
+        else if (t == RT_MAXD2) snprintf(b, n, "Max Duty");
+        else                    snprintf(b, n, "%s", rxL[t]);
+      }
       break;
     case MS_RXCH:
       if (i < NUM_CH) {
@@ -2839,11 +2856,11 @@ void menuSelect(int i) {
       break;
     case MS_RX:
       idxRx = i;
-      rxTopic = i;
-      if (i == RT_GLOB)      gotoScr(MS_RXGLOB, idxRxGlob);
-      else if (i == RT_STAT) gotoScr(MS_RXSTAT, 0);
-      else if (i == RT_WIFI) gotoScr(MS_RXWIFIM, idxRxWifi);
-      else if (i == RT_BACK) gotoScr(MS_MAIN, idxMain);
+      rxTopic = rxRowTopic(i);
+      if (rxTopic == RT_GLOB)      gotoScr(MS_RXGLOB, idxRxGlob);
+      else if (rxTopic == RT_STAT) gotoScr(MS_RXSTAT, 0);
+      else if (rxTopic == RT_WIFI) gotoScr(MS_RXWIFIM, idxRxWifi);
+      else if (rxTopic == RT_BACK) gotoScr(MS_MAIN, idxMain);
       else                   gotoScr(MS_RXCH, idxRxCh);
       break;
     case MS_RXWIFIM:
@@ -4923,13 +4940,15 @@ void drawMenu() {
     case MS_RXCH: {
       static const char* tt[] = { "CURRENT LIMITS", "START DUTY", "MAX DUTY", "RAMPS", "CHANNELS ON/OFF" };
       static const char* ti[] = { "CURRENT LIMITS", "START CURRENT", "MAX CURRENT", "RAMPS", "CHANNELS ON/OFF" };
-      display.print((rxCurMode() ? ti : tt)[rxTopic < 5 ? rxTopic : 0]);
+      if (rxTopic == RT_DUTY2)      display.print("START DUTY");
+      else if (rxTopic == RT_MAXD2) display.print("MAX DUTY");
+      else display.print((rxCurMode() ? ti : tt)[rxTopic < 5 ? rxTopic : 0]);
       break;
     }
     case MS_RXDIR: {
       static const char* dt[] = { "LIMIT", "DUTY", "MAX DUTY", "RAMPS" };
       static const char* di[] = { "LIMIT", "START I", "MAX I", "RAMPS" };
-      display.printf("CH%d %s", rxCh + 1, (rxCurMode() ? di : dt)[rxTopic < 4 ? rxTopic : 0]);
+      display.printf("CH%d %s", rxCh + 1, rxTopic == RT_DUTY2 ? "DUTY" : rxTopic == RT_MAXD2 ? "MAX DUTY" : (rxCurMode() ? di : dt)[rxTopic < 4 ? rxTopic : 0]);
       break;
     }
     case MS_RXGLOB:  display.print("RX GLOBAL"); break;
