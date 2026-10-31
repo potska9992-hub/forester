@@ -1123,6 +1123,7 @@ void drawBattery() {
 
   char s[8];
   if (batUsb) snprintf(s, sizeof(s), "USB");
+  else if (vbatPct >= 100) snprintf(s, sizeof(s), "100");   // без знака %, иначе подпись заходит на подсказку внизу
   else        snprintf(s, sizeof(s), "%d%%", vbatPct);
   int16_t x1, y1; uint16_t w, h;
   display.setTextSize(1);
@@ -2286,16 +2287,16 @@ const char* const DESC_RAW[] = {
   "ADS8 = time to read", "all 8 channels.", "DZ = dead zone,", "in ADC counts." };
 const char* const DESC_RADIO[] = {
   "RADIO", "First line: radio", "settings (freq, SF,", "bandwidth).", "TX/RX = power of", "pult and receiver.", "",
-  "RSSI = signal level.", "Closer to 0 is", "better: -63 good,", "-110 bad.", "SNR = signal/noise.", "",
+  "RSSI = signal", "Closer to 0 is", "better: -63 good,", "-110 bad.", "SNR = signal/noise.", "",
   "Lost = lost packets", "and percent.", "26/s = packets", "per second.", "Age = time since", "last telemetry.", "ID = receiver code." };
 const char* const DESC_TELEM[] = {
-  "TELEMETRY RAW", "Ip = pulse current", "of each channel, in", "0.1 A (not average).", "P = PWM, -100..100.", "Minus = side B.", "",
+  "TELEMETRY RAW", "Ip = pulse current", "of each channel, in", "0.1 A, not average", "P = PWM, -100..100.", "Minus = side B.", "",
   "L = limit reached", "O = overload", "X = open circuit", "Each is a mask: one", "bit per channel.",
   "s = faulty side", "bit: 0=A, 1=B.", "",
   "Vrx = receiver", "battery, volts.", "R = receiver RSSI.", "K = killswitch:", "no, or the reason." };
 const char* const DESC_SYS[] = {
   "SYSTEM", "FW: version, date.", "Up: run time.", "Temp: chip temp.", "Heap: free memory.",
-  "I2C: devices found.", "Draw a+b: a = render", "time, b = time to", "send the frame, ms." };
+  "I2C: devices found.", "Draw a+b: a=render", "time, b = time to", "send the frame, ms." };
 const char* const DESC_LOG[] = {
   "LOG", "Last lines of the", "serial log, newest", "at the bottom.", "Same text as on the", "USB serial monitor." };
 const char* const DESC_LIM[] = {
@@ -4486,7 +4487,7 @@ void drawSafe() {
     }
   }
   if (!any) display.print("none, hold still");
-  if (adsFail) { display.setCursor(0, 44); display.print("ADS error (check I2C)"); }
+  if (adsFail) { display.setCursor(0, 44); display.print("ADS fail: check I2C"); }
 
   drawHintText("hold MENU = menu", 56);
   drawBattery();
@@ -4541,7 +4542,7 @@ void drawRun2() {
   oledCommit();
 }
 
-// RX CHANNELS: по 9 символов на канал: номер, сторона A/B, ток в импульсе (А), ШИМ со знаком, пометка ! L O
+// RX CHANNELS: по 9 символов на канал: номер, пометка ! L O, ток в импульсе (А), ШИМ со знаком
 void drawRxChannels() {
   startScreen();
   display.setCursor(0, 0);
@@ -4555,41 +4556,47 @@ void drawRxChannels() {
       } else {
         int pwm = tel.pwm[c];
         bool ovl = (tel.mOvl >> c) & 1;
-        char side = (pwm != 0 || ovl) ? (((tel.side >> c) & 1) ? 'B' : 'A') : ' ';
         char fl = ovl ? '!' : (((tel.mLim >> c) & 1) ? 'L' : (((tel.mOpen >> c) & 1) ? 'O' : ' '));
         int ci = tel.cur[c];
         if (ci > 99) ci = 99;
-        snprintf(buf, sizeof(buf), "%d%c%d.%d%+3d%c", c + 1, side, ci / 10, ci % 10, pwm, fl);
+        // номер, пометка, ток, ШИМ (минус = сторона B); при нулевом ШИМ с пометкой вместо него сторона A/B. Всего 9 символов, чтобы не заходить на значок батареи
+        if (pwm == 0 && fl != ' ') snprintf(buf, sizeof(buf), "%d%c%d.%d   %c", c + 1, fl, ci / 10, ci % 10, ((tel.side >> c) & 1) ? 'B' : 'A');
+        else                       snprintf(buf, sizeof(buf), "%d%c%d.%d%+4d", c + 1, fl, ci / 10, ci % 10, pwm);
       }
       display.setCursor(col * 60, 11 + r * 10);
       display.print(buf);
     }
   }
-  drawHintText("!=Ovl L=Lim O=Open", 56);
+  drawHintText("!Ovl L=Lim O=Open", 56);
   drawBattery();
   oledCommit();
 }
 
 void drawLinkScreen() {
   startScreen();
-  display.setCursor(0, 0);   display.print("LINK");
-  display.setCursor(0, 10);
+  // статус в заголовке: освобождает строку, чтобы RSSI и SNR (до 24 символов в сумме) шли двумя строками и не заходили на значок батареи
+  display.setCursor(0, 0);
   if (simMode == SIM_RADIO) {
-    if (!hlInit)         display.print("Status: RADIO ERROR");
-    else if (!hlUp)      display.print("Status: NO SIGNAL");
-    else if (hlSyncBusy) display.printf("Sync: reading %d%%", hlSyncPct());
-    else                 display.print("Status: OK");
+    if (!hlInit)         display.print("LINK: RADIO ERROR");
+    else if (!hlUp)      display.print("LINK: NO SIGNAL");
+    else if (hlSyncBusy) display.printf("LINK: sync %d%%", hlSyncPct());
+    else                 display.print("LINK: OK");
   }
-  else if (simMode == SIM_LINK) display.print("Status: OK");
-  else                          display.print("Status: NO SIGNAL");
+  else if (simMode == SIM_LINK) display.print("LINK: OK");
+  else                          display.print("LINK: NO SIGNAL");
+  display.setCursor(0, 10);
+  if (simMode == SIM_RADIO && telValid) display.printf("RSSI %d/%d dBm", rfRssi, (int)tel.rssi);
+  else if (telValid)                    display.printf("RSSI %d dBm", rfRssi);
+  else                                  display.print("RSSI --");
   display.setCursor(0, 19);
-  if (simMode == SIM_RADIO && telValid) display.printf("RSSI%d/%d SNR%d/%d", rfRssi, (int)tel.rssi, (rfSnr10 + (rfSnr10 < 0 ? -5 : 5)) / 10, (int)tel.snr);
-  else if (telValid) display.printf("RSSI%d SNR%.1f", rfRssi, rfSnr10 / 10.0f);
-  else          display.print("RSSI-- SNR--");
+  if (simMode == SIM_RADIO && telValid) display.printf("SNR %d/%d dB", (rfSnr10 + (rfSnr10 < 0 ? -5 : 5)) / 10, (int)tel.snr);
+  else if (telValid)                    display.printf("SNR %.1f dB", rfSnr10 / 10.0f);
+  else                                  display.print("SNR --");
   display.setCursor(0, 28);
   if (telValid) {
     uint32_t tot = rfRx + rfLost;
-    display.printf("Lost %lu (%.1f%%)", (unsigned long)rfLost, tot ? rfLost * 100.0f / tot : 0.0f);
+    if (rfLost > 99999UL) display.print("Lost >99999");
+    else display.printf("Lost %lu (%.1f%%)", (unsigned long)rfLost, tot ? rfLost * 100.0f / tot : 0.0f);
   } else display.print("Lost --");
   display.setCursor(0, 37);
   if (telValid && simMode == SIM_RADIO) display.printf("%d/s Age%.1f RTT%d", rfRate, rfAgeMs / 1000.0f, hlRtt);
@@ -4598,7 +4605,7 @@ void drawLinkScreen() {
   display.setCursor(0, 46);
   if (telValid) display.printf("ID %04X TX%d RX%d", (unsigned)(bindId & 0xFFFF), txPower, (int)rxQuery(0, 0, RXP_PWR));
   else          display.printf("TX%ddBm", txPower);
-  drawHintText("MENU = next screen", 56);
+  drawHintText("MENU: next screen", 56);
   drawBattery();
   oledCommit();
 }
@@ -4623,7 +4630,7 @@ void drawPowerScreen() {
   if (!telValid)       display.print("Kill: --");
   else if (!tel.kill)  display.print("Kill: no");
   else                 display.printf("Kill: %s", reasons[tel.reason & 3]);
-  drawHintText("MENU = next screen", 56);
+  drawHintText("MENU: next screen", 56);
   drawBattery();
   oledCommit();
 }
@@ -4640,7 +4647,7 @@ void drawLogScreen() {
     display.setCursor(0, 11 + r * 9);
     display.print(t);
   }
-  drawHintText("MENU = next screen", 56);
+  drawHintText("MENU: next screen", 56);
   drawBattery();
   oledCommit();
 }
@@ -4668,11 +4675,11 @@ void drawAlert() {
     case EV_RXALARM:  title = "RX ALARM";  snprintf(l1, sizeof(l1), "Alarm button on RX"); snprintf(l2, sizeof(l2), "Outputs stopped"); break;
     case EV_NOLINK:   title = "NO LINK";   snprintf(l1, sizeof(l1), "No signal from RX"); snprintf(l2, sizeof(l2), "Controls locked"); break;
     case EV_RXFAULT:  title = "RX FAULT";  snprintf(l1, sizeof(l1), "Receiver fault"); snprintf(l2, sizeof(l2), "Check receiver"); break;
-    case EV_OVERLOAD: title = "OVERLOAD";  snprintf(l1, sizeof(l1), "CH%d %c pulse %d.%dA", sl + 1, side, cur / 10, cur % 10); hint = "Center lever to reset"; break;
-    case EV_OPEN:     title = "OPEN COIL"; snprintf(l1, sizeof(l1), "CH%d %c", sl + 1, side); hint = "Check solenoid wiring"; break;
-    case EV_LIMIT:    title = "CUR LIMIT"; snprintf(l1, sizeof(l1), "CH%d %c pulse %d.%dA", sl + 1, side, cur / 10, cur % 10); hint = "Current is limited"; break;
+    case EV_OVERLOAD: title = "OVERLOAD";  snprintf(l1, sizeof(l1), "CH%d %c pulse %d.%dA", sl + 1, side, cur / 10, cur % 10); hint = "Center the lever"; break;
+    case EV_OPEN:     title = "OPEN COIL"; snprintf(l1, sizeof(l1), "CH%d %c", sl + 1, side); hint = "Check coil wiring"; break;
+    case EV_LIMIT:    title = "CUR LIMIT"; snprintf(l1, sizeof(l1), "CH%d %c pulse %d.%dA", sl + 1, side, cur / 10, cur % 10); hint = "Current limited"; break;
     case EV_RESTORED: title = "LINK BACK"; snprintf(l1, sizeof(l1), "Link restored"); break;
-    case EV_BATTTX:   title = "TX BATT";   snprintf(l1, sizeof(l1), "Pult battery %d%%", vbatPct); hint = batLevel >= 2 ? "Critical, charge now" : "Charge soon"; break;
+    case EV_BATTTX:   title = "TX BATT";   snprintf(l1, sizeof(l1), "Pult battery %d%%", vbatPct); hint = batLevel >= 2 ? "Critical: charge!" : "Charge soon"; break;
     case EV_BATTRX:   title = "RX BATT";   snprintf(l1, sizeof(l1), "Receiver supply low"); break;
     default: break;
   }
@@ -4692,7 +4699,7 @@ void drawAlert() {
 
 static void exitHint(const char* what, int y) {     // "MENU or 6 = exit": выход кнопкой меню или рычагом CH6
   char h[24];
-  snprintf(h, sizeof(h), "MENU or %d = %s", MENU_ENTER_CH + 1, what);
+  snprintf(h, sizeof(h), "MENU/%d = %s", MENU_ENTER_CH + 1, what);
   drawHintText(h, y);
 }
 
@@ -4728,7 +4735,8 @@ void drawWifi() {
     long left = (long)(WIFI_IDLE_MS - (now - wifiAct)) / 1000;
     if (left < 0) left = 0;
     display.setCursor(0, 14);  display.print("Page open");
-    display.setCursor(0, 26);  display.print("Choose the file on the phone");
+    display.setCursor(0, 26);  display.print("Choose the file on");
+    display.setCursor(0, 35);  display.print("the phone");
     display.setCursor(0, 44);  display.printf("idle exit %ld:%02ld", left / 60, left % 60);
     exitHint("exit", 56);
   }
@@ -4765,12 +4773,12 @@ void drawRxWifiRadio() {
   } else if (w == HLW_PH_CONN) {
     display.setCursor(0, 14);  display.print("Phone connected");
     display.setCursor(0, 26);  display.print("Tab: Update");
-    display.setCursor(0, 40);  display.print("Receiver outputs off");
+    display.setCursor(0, 40);  display.print("RX outputs off");
   } else if (w == HLW_PH_TEST) {
     display.setCursor(0, 12);  display.print("TEST ACTIVE");
     display.setCursor(0, 24);  display.print("RX outputs LIVE");
     display.setCursor(0, 34);  display.print("E-Stop works");
-    display.setCursor(0, 44);  display.print("Pult sends no control");
+    display.setCursor(0, 44);  display.print("Pult: no control");
   } else if (w == HLW_PH_UP || w == HLW_GH_DL || w == HLW_GH_VERIFY) {
     display.setCursor(0, 14);
     if (w == HLW_GH_VERIFY) display.print("Verifying...");
@@ -4785,18 +4793,18 @@ void drawRxWifiRadio() {
   } else if (w == HLW_GH_CONN) {
     display.setCursor(0, 16);  display.printf("%d saved networks", netCount());
     display.setCursor(0, 28);  display.print("Receiver connecting");
-    display.setCursor(0, 40);  display.print("Receiver outputs off");
+    display.setCursor(0, 40);  display.print("RX outputs off");
   } else if (w == HLW_GH_CHECK) {
-    display.setCursor(0, 28);  display.print("Receiver checks GitHub");
-    display.setCursor(0, 40);  display.print("Receiver outputs off");
+    display.setCursor(0, 28);  display.print("RX checks GitHub");
+    display.setCursor(0, 40);  display.print("RX outputs off");
   } else if (w == HLW_GH_ASK) {
     display.setCursor(0, 12);  display.print("Found on GitHub:");
-    display.setCursor(0, 24);  display.printf("%.21s", hlRxVer);
+    display.setCursor(0, 24);  display.printf("%.19s", hlRxVer);
     display.setCursor(0, 38);  display.print("6 + = install");
     display.setCursor(0, 47);  display.print("6 - / MENU = cancel");
   } else if (w == HLW_ERR) {
-    display.setCursor(0, 14);  display.print("Receiver Wi-Fi error");
-    display.setCursor(0, 26);  display.printf("%.21s", ghErrText(tel.wifiArg));
+    display.setCursor(0, 14);  display.print("RX Wi-Fi error");
+    display.setCursor(0, 26);  display.printf("%.19s", ghErrText(tel.wifiArg));
     display.setCursor(0, 38);  display.printf("code %d", (int)tel.wifiArg);
   } else {
     display.setCursor(0, 20);  display.printf("State %d", w);
@@ -4818,19 +4826,19 @@ void drawRxWifi() {
   if (rxWifiSt == 1) {
     display.setCursor(0, 20);  display.print("Asking receiver...");
   } else if (rxWifiMode == 1) {
-    static const char* st[] = { "", "", "Sending networks", "Receiver connecting", "Receiver checks GitHub", "Simulation: no radio" };
+    static const char* st[] = { "", "", "Sending networks", "Receiver connecting", "RX checks GitHub", "Sim: no radio" };
     display.setCursor(0, 16);  display.printf("%d saved networks", netCount());
     display.setCursor(0, 28);  display.print(st[rxWifiSt < 6 ? rxWifiSt : 5]);
-    display.setCursor(0, 40);  display.print(rxWifiSt >= 5 ? "works with radio 1.0" : "Receiver outputs off");
+    display.setCursor(0, 40);  display.print(rxWifiSt >= 5 ? "needs radio 1.0" : "RX outputs off");
   } else if (rxWifiSt == 3) {
     display.setCursor(0, 14);  display.print("Phone connected");
     display.setCursor(0, 26);  display.print("Tab: Update");
-    display.setCursor(0, 40);  display.print("Receiver outputs off");
+    display.setCursor(0, 40);  display.print("RX outputs off");
   } else if (rxWifiSt == 4) {
     display.setCursor(0, 12);  display.print("TEST ACTIVE");
     display.setCursor(0, 24);  display.print("RX outputs LIVE");
     display.setCursor(0, 34);  display.print("E-Stop works");
-    display.setCursor(0, 44);  display.print("Pult sends no control");
+    display.setCursor(0, 44);  display.print("Pult: no control");
   } else if (rxWifiSt == 5) {
     display.setCursor(0, 14);  display.printf("Uploading %d%%", rxUpPct);
     display.drawRect(0, 26, PBAR_W, 12, SH110X_WHITE);
@@ -4839,7 +4847,7 @@ void drawRxWifi() {
   } else if (rxWifiSt == 6) {
     display.setCursor(0, 14);  display.print("Installed");
     display.setCursor(0, 26);  display.print("Receiver restarts");
-    display.setCursor(0, 40);  display.print("Simulation: no radio");
+    display.setCursor(0, 40);  display.print("Sim: no radio");
   } else {
     display.setCursor(0, 12);  display.printf("Net:  %s", rxWifiSsid);
     display.setCursor(0, 22);  display.print("Pass: " WIFI_PASS);
@@ -5306,23 +5314,23 @@ void drawGh() {
   switch (ghStage) {
     case G_TEST:
       display.setCursor(0, 14);  display.print(ghFresh ? "Saved and connected" : "Connected");
-      display.setCursor(0, 26);  display.printf("%.21s", ghNet);
+      display.setCursor(0, 26);  display.printf("%.19s", ghNet);
       display.setCursor(0, 36);  display.printf("%d dBm  pass:%d", ghRssi, ghPassLen);
       display.setCursor(0, 46);  display.printf("IP %s", ghIp);
       exitHint("exit", 56);
       break;
     case G_SCAN:
-      display.setCursor(0, 16);  display.print("Looking for networks");
-      display.setCursor(0, 28);  display.print("saved in the pult...");
+      display.setCursor(0, 16);  display.print("Looking for saved");
+      display.setCursor(0, 28);  display.print("networks...");
       exitHint("cancel", 56);
       break;
     case G_CONN:
       display.setCursor(0, 16);  display.print("Connecting to");
-      display.setCursor(0, 28);  display.printf("%.21s", ghNet);
+      display.setCursor(0, 28);  display.printf("%.19s", ghNet);
       exitHint("cancel", 56);
       break;
     case G_API:
-      display.setCursor(0, 16);  display.printf("%.21s", ghNet);
+      display.setCursor(0, 16);  display.printf("%.19s", ghNet);
       display.setCursor(0, 28);  display.print("Connected");
       display.setCursor(0, 40);  display.print("Checking GitHub...");
       break;
@@ -5349,7 +5357,7 @@ void drawGh() {
       break;
     case G_ERR:
       display.setCursor(0, 14);  display.print(ghErr);
-      display.setCursor(0, 26);  display.printf("%.21s", ghErr2);
+      display.setCursor(0, 26);  display.printf("%.19s", ghErr2);
       if (ghErrCode > 0) { display.setCursor(0, 38); display.printf("code %d  pass:%d", ghErrCode, ghPassLen); }
       else if (ghErrInfo[0]) { display.setCursor(0, 38); display.printf("code: %s", ghErrInfo); }
       exitHint("exit", 56);
@@ -5387,7 +5395,7 @@ void drawMenu() {
     case MS_EVLIST:  display.print("ALERT EVENTS"); break;
     case MS_EVEDIT:
       display.print(EV_NAME[evSel]);
-      if (evSel == EV_RXALARM || evSel == EV_NOLINK) display.print(" (fixed ON)");
+      if (evSel == EV_RXALARM || evSel == EV_NOLINK) display.print(" (fixed)");
       break;
     case MS_PRESET:  display.printf("PRESET: %s", presetName()); break;
     case MS_SCREENS: display.print("SCREENS (*=start)"); break;
@@ -5399,7 +5407,7 @@ void drawMenu() {
     case MS_DBGLIST: display.print("DEBUG"); break;
     case MS_FRTARGET: display.print("FACTORY RESET"); break;
     case MS_WIFI:    display.print("WI-FI"); break;
-    case MS_NETACT:  display.printf("%.21s", netSsid[netSlot < NET_MAX ? netSlot : 0]); break;
+    case MS_NETACT:  display.printf("%.19s", netSsid[netSlot < NET_MAX ? netSlot : 0]); break;
     case MS_NETS:    display.printf("NETWORKS %d/%d", netCount(), NET_MAX); break;
     case MS_NETPICK: display.print("SELECT NETWORK"); break;
     case MS_RX:      display.print("RECEIVER"); break;
@@ -5528,8 +5536,8 @@ void drawTest() {
   EvCfg c = cfgOf(testEv);
   startScreen();
   display.setCursor(0, 0);   display.printf("TEST ALERTS %d/%d", testEv + 1, NUM_EV);
-  display.setTextSize(2);
-  display.setCursor(0, 14);  display.print(EV_NAME[testEv]);
+  display.setTextSize(strlen(EV_NAME[testEv]) * 12 <= 108 ? 2 : 1);   // длинные имена мельче, иначе заходят на значок батареи
+  display.setCursor(0, strlen(EV_NAME[testEv]) * 12 <= 108 ? 14 : 18);  display.print(EV_NAME[testEv]);
   display.setTextSize(1);
   display.setCursor(0, 36);
   if (testEv == EV_HEART) display.printf("%s every %ds", COL_NAME[c.color], HB_SEC[c.ival]);
@@ -5565,7 +5573,7 @@ void drawRxEdit() {
   } else if (rxParam == RXP_PWMFREQ) {
     display.print("all channels");
   } else if (rxParam == RXP_MODE) {
-    display.print("PWM=open, CURRENT=PI");
+    display.print("PWM=open CUR=PI");
   }
   hintLine("%d:+/- %d:ok/cancel");
   drawBattery();
@@ -5591,15 +5599,15 @@ void drawRxBulk() {
 void drawRxStat() {
   startScreen();
   display.setCursor(0, 0);   display.print(simMode == SIM_RADIO ? "RX STATUS" : "RX STATUS (sim)");
-  display.setCursor(0, 11);  display.printf("Link: %s", rxLinked() ? "OK" : "LOST");
-  display.setCursor(0, 21);
+  display.setCursor(0, 10);  display.printf("Link: %s", rxLinked() ? "OK" : "LOST");
+  display.setCursor(0, 19);
   if (telValid) display.printf("VBAT-RX: %.1fV", tel.vrx / 10.0f);
   else          display.print("VBAT-RX: --");
-  display.setCursor(0, 31);
+  display.setCursor(0, 28);
   if (telValid) display.printf("RSSI: %d dBm", rfRssi);
   else          display.print("RSSI: --");
-  display.setCursor(0, 41);  display.printf("Lost pkts: %lu", (unsigned long)rfLost);
-  display.setCursor(0, 51);
+  display.setCursor(0, 37);  display.printf("Lost pkts: %lu", (unsigned long)rfLost);
+  display.setCursor(0, 46);
   if (rxCfgKnown) display.printf("Control: %s", rxModeCache ? "CURRENT" : "PWM");
   else            display.print("Control: --");
   hintLine("%d:back");
@@ -5663,11 +5671,12 @@ void drawDbgPage() {
       display.setCursor(0, 37);
       if (telValid) {
         uint32_t tot = rfRx + rfLost;
-        display.printf("Lost %lu (%.1f%%) %d/s", (unsigned long)rfLost, tot ? rfLost * 100.0f / tot : 0.0f, rfRate);
+        if (rfLost > 99999UL) display.print("Lost >99999");
+        else display.printf("Lost %lu (%.1f%%)", (unsigned long)rfLost, tot ? rfLost * 100.0f / tot : 0.0f);
       } else display.print("Lost --");
       display.setCursor(0, 46);
-      if (telValid) display.printf("Age %.1fs ID %04X", rfAgeMs / 1000.0f, (unsigned)(bindId & 0xFFFF));
-      else          display.print("Age -- ID ----");
+      if (telValid) display.printf("%d/s Age%.1f ID%04X", rfRate, rfAgeMs / 1000.0f, (unsigned)(bindId & 0xFFFF));
+      else          display.print("-/s Age-- ID----");
       drawHintText(h, 56);
       drawBattery();
       break;
@@ -5676,16 +5685,13 @@ void drawDbgPage() {
       if (!telValid) {
         display.setCursor(0, 20);  display.print("no telemetry");
       } else {
-        display.setCursor(0, 10);
-        display.print("Ip");
-        for (int c = 0; c < NUM_CH; c++) display.printf("%d ", tel.cur[c]);
-        display.setCursor(0, 19);
-        display.print("P");
-        for (int c = 0; c < NUM_CH; c++) display.printf("%d ", tel.pwm[c]);
-        display.setCursor(0, 28);
-        display.printf("L%02X O%02X X%02X s%02X", tel.mLim, tel.mOvl, tel.mOpen, tel.side);
-        display.setCursor(0, 37);
-        display.printf("Vrx%.1f R%d K:%s", tel.vrx / 10.0f, tel.rssi, tel.kill ? "YES" : "no");
+        // по 4 канала в строке: 8 значений в одной строке не помещаются на экран
+        display.setCursor(0, 8);   display.printf("Ip1-4 %d %d %d %d", tel.cur[0], tel.cur[1], tel.cur[2], tel.cur[3]);
+        display.setCursor(0, 16);  display.printf("Ip5-8 %d %d %d %d", tel.cur[4], tel.cur[5], tel.cur[6], tel.cur[7]);
+        display.setCursor(0, 24);  display.printf("P1-3 %d %d %d", tel.pwm[0], tel.pwm[1], tel.pwm[2]);
+        display.setCursor(0, 32);  display.printf("P4-6 %d %d %d", tel.pwm[3], tel.pwm[4], tel.pwm[5]);
+        display.setCursor(0, 40);  display.printf("P7-8 %d %d", tel.pwm[6], tel.pwm[7]);
+        display.setCursor(0, 48);  display.printf("L%02X O%02X X%02X s%02X", tel.mLim, tel.mOvl, tel.mOpen, tel.side);
       }
       drawHintText(h, 56);
       drawBattery();
@@ -5757,7 +5763,7 @@ void drawPinScreen() {
     }
   }
   display.setTextSize(1);
-  hintLine("%d:digit %d:next/back");
+  hintLine("%d:digit %d:ok/back");
   drawBattery();
   oledCommit();
 }
@@ -5765,7 +5771,7 @@ void drawPinScreen() {
 void drawText() {
   startScreen();
   display.setCursor(0, 0);
-  if (txtStage == 0) display.print("HIDDEN NETWORK NAME");
+  if (txtStage == 0) display.print("HIDDEN SSID");
   else               display.printf("PASS: %.14s", txtSsid);
   // введённый текст: последние 20 символов и курсор
   char line[24];
@@ -5789,7 +5795,7 @@ void drawText() {
       display.setTextSize(1);
       display.setTextColor(SH110X_WHITE);
     } else {
-      display.setCursor(64 + k * 22 - (k > 0 ? 0 : 0) - (int)strlen(t) * 3 + (k > 0 ? 6 : -6), 34);
+      display.setCursor(64 + k * 18 - (int)strlen(t) * 3 + (k > 0 ? 6 : -6), 34);
       display.print(t);
     }
   }
@@ -5803,7 +5809,7 @@ void drawConfirm() {
   switch (confAct) {
     case CA_CLEARLOG:
       display.setCursor(0, 0);   display.print("CLEAR LOG?");
-      display.setCursor(0, 14);  display.print("Erases the event log");
+      display.setCursor(0, 14);  display.print("Clears the log");
       display.setCursor(0, 24);  display.print("(RAM and saved)");
       break;
     case CA_FORGET:
@@ -5825,7 +5831,7 @@ void drawConfirm() {
       break;
     case CA_NETDEL:
       display.setCursor(0, 0);   display.print("DELETE NETWORK?");
-      display.setCursor(0, 14);  display.printf("%.21s", netSsid[confIdx < NET_MAX ? confIdx : 0]);
+      display.setCursor(0, 14);  display.printf("%.19s", netSsid[confIdx < NET_MAX ? confIdx : 0]);
       display.setCursor(0, 24);  display.print("Name and password");
       display.setCursor(0, 34);  display.print("are erased.");
       break;
@@ -5836,9 +5842,9 @@ void drawConfirm() {
       break;
     case CA_COPYALL:
       display.setCursor(0, 0);   display.printf("COPY CH%d TO ALL?", rxCopySrc + 1);
-      display.setCursor(0, 14);  display.print("All settings of this");
-      display.setCursor(0, 24);  display.print("channel go to the");
-      display.setCursor(0, 34);  display.print("other 7. Enable kept.");
+      display.setCursor(0, 14);  display.print("Settings of this");
+      display.setCursor(0, 24);  display.print("channel go to all");
+      display.setCursor(0, 34);  display.print("others. Enable kept");
       break;
     case CA_FR_RX:
       display.setCursor(0, 0);   display.print("RESET RECEIVER?");
@@ -5915,8 +5921,8 @@ void drawTRate() {
   display.setTextSize(2);
   display.setCursor(0, 12);  display.printf("%d/s", editInt);
   display.setTextSize(1);
-  display.setCursor(0, 33);  display.print("RX replies on request");
-  display.setCursor(0, 42);  display.printf("was %d/s, default %d/s", telemRate, TELEM_RATE_DEF);
+  display.setCursor(0, 33);  display.print("RX sends on request");
+  display.setCursor(0, 42);  display.printf("was %d/s, def %d/s", telemRate, TELEM_RATE_DEF);
   hintLine("%d:+/- %d:ok/cancel");
   drawBattery();
   oledCommit();
