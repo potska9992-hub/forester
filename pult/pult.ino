@@ -4895,15 +4895,15 @@ void gameCtlSave() {
   prefs.end();
 }
 // действие нажато: рычаг отклонён в запомненную сторону
-bool gameBindOn(int a) { return valBase(gBind[a].ch) * gBind[a].dir >= NAV_ON; }
+bool gameBindOn(int a) { return valBase(gBind[a].ch) * gBind[a].dir > 0; }   // срабатывает сразу при выходе из мёртвой зоны (когда горит красный светодиод канала)
 
 // назначение: сначала все рычаги (кроме CH6) в центр, потом отклонить нужный; 5 с без движения = отмена
 static int gameLevFound(int8_t* dir) {
   for (int c = 0; c < NUM_CH; c++) {
     if (c == MENU_ENTER_CH) continue;
     int v = valBase(c);
-    if (v >= NAV_ON)  { *dir = 1;  return c; }
-    if (v <= -NAV_ON) { *dir = -1; return c; }
+    if (v > 0) { *dir = 1;  return c; }
+    if (v < 0) { *dir = -1; return c; }
   }
   return -1;
 }
