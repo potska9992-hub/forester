@@ -5581,7 +5581,7 @@ void drawTest() {
 static void rxLiveLine() {
   if (!rxLinked()) { display.print("Duty: no data"); return; }
   int p = tel.pwm[rxCh], c = tel.cur[rxCh];
-  display.printf("Duty %d%% I %d.%dA", abs(p), c / 10, c % 10);
+  display.printf("Duty %+d%% I %d.%dA", p, c / 10, c % 10);
 }
 
 void drawRxEdit() {
