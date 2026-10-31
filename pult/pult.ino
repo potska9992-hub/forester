@@ -4673,15 +4673,14 @@ void drawLogScreen() {
   oledCommit();
 }
 
-void drawEstop() {
+void drawEstop() {                                  // аварийный экран: без значка батареи, весь экран под текст
   startScreen();
   display.setTextSize(2);
-  display.setCursor(0, 4);   display.print("EMERGENCY");
-  display.setCursor(0, 22);  display.print("STOP");
+  display.setCursor(10, 8);  display.print("EMERGENCY");
+  display.setCursor(40, 26); display.print("STOP");
   display.setTextSize(1);
-  display.setCursor(0, 46);  display.print("Release button");
-  display.setCursor(0, 56);  display.print("then center all");
-  drawBattery();
+  display.setCursor(20, 46); display.print("Release button");
+  display.setCursor(20, 56); display.print("then center all");
   oledCommit();
 }
 
