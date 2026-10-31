@@ -2447,7 +2447,7 @@ void menuLabel(int i, char* b, size_t n) {
   static const char* dbgL[]  = { "Radio", "Telemetry", "Limits", "RAW ADC", "System", "Log", "Back" };
   switch (menuScr) {
     case MS_MAIN: snprintf(b, n, "%s", mainL[i]); break;
-    case MS_GAMES: snprintf(b, n, "%s", i == 0 ? "Dino" : i == 1 ? "Blocks" : i == 2 ? "Controls" : "Back"); break;
+    case MS_GAMES: snprintf(b, n, "%s", i == 0 ? "Dino" : i == 1 ? "Blocks" : "Back"); break;
     case MS_GSUB:  snprintf(b, n, "%s", i == 0 ? "Play" : i == 1 ? "Controls" : "Back"); break;
     case MS_GCTRL: {
       static const char* an[GA_N] = { "Jump", "Duck", "Left", "Right", "Rotate", "Drop" };
