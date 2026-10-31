@@ -1,6 +1,6 @@
 // ============================================================
 // Пульт гидрораспределителя. Журнал версий
-//  1.3 - главное меню: Transmitter, Receiver, Games, Exit; Games = Dino и Blocks (падающие фигуры, поле 10x16); меню Receiver переделано: All Channels (одно значение на все каналы и обе стороны, Test setup, Copy to All с подтверждением) и Channel 1..8 (все настройки канала в одном списке)
+//  1.3 - Receiver: одна строка Channels со списком каналов; на экране правки живые ШИМ и ток с приёмника; главное меню: Transmitter, Receiver, Games, Exit; Games = Dino и Blocks (падающие фигуры, поле 10x16); меню Receiver переделано: All Channels (одно значение на все каналы и обе стороны, Test setup, Copy to All с подтверждением) и Channel 1..8 (все настройки канала в одном списке)
 //  1.2 - меню Receiver в режиме CURRENT: после Max Current добавлены Start Duty и Max Duty (в PWM как раньше); из меню Transmitter убрана имитация приёмника (RX: Radio/Sim link/Sim lost): всегда настоящее радио; экран Boot check (шина I2C, ADS) показывается только при ошибке; радио запускается после заставки и Safe Start; экран Safe Start показывается только если какой-то канал не в центре (или ошибка ADS), иначе проверка идёт в фоне; на экранах связи вместо заглушки ID 3F2A показан короткий код пары
 //  1.1 - радио опрашивается и во время чтения каналов джойстиков (раньше ждало конца чтения, ~10 мс): больше пакетов управления в секунду, быстрее приём ответов
 //  1.0 - РАДИО (HydroLink v1, SX1262 868 МГц, SF7 BW250): пакеты управления с маской каналов и heartbeat, телеметрия по запросу
@@ -208,7 +208,7 @@ enum MenuScr {
   MS_BIND, MS_BINDRUN, MS_BINDID, MS_EVLOG,
   MS_DBGLIST, MS_DBGDESC, MS_DBGPAGE,
   MS_PIN, MS_FRTARGET, MS_CONFIRM,
-  MS_RX, MS_RXCH, MS_RXDIR, MS_RXGLOB, MS_RXEDIT, MS_RXSTAT, MS_RXWIFI,
+  MS_RX, MS_RXPICK, MS_RXCH, MS_RXDIR, MS_RXGLOB, MS_RXEDIT, MS_RXSTAT, MS_RXWIFI,
   MS_NETS, MS_NETPICK, MS_TEXTIN, MS_WIFI, MS_NETACT, MS_RXWIFIM, MS_GAME,
   MS_GAMES, MS_BLOCKS, MS_RXBULK, MS_GCTRL, MS_GSUB, MS_GLEARN
 };
@@ -836,7 +836,7 @@ State   state = ST_BOOT;
 MenuScr menuScr = MS_MAIN;
 int     sel = 0, menuTop = 0;
 int     idxMain = 0, idxTx = 0, idxCal = 0, idxChList = 0, idxChEdit = 0, idxBat = 0;
-int     idxLed = 0, idxEvList = 0, idxEvEdit = 0, idxPreset = 0, idxRx = 0, idxRxWifi = 0, idxRxCh = 0, idxRxDir = 0;
+int     idxLed = 0, idxEvList = 0, idxEvEdit = 0, idxPreset = 0, idxRx = 0, idxRxWifi = 0, idxRxCh = 0, idxRxDir = 0, idxRxPick = 0;
 int     idxNets = 0, idxWifi = 0, netSlot = 0;
 // выбор сети (скан) и ввод текста с пульта
 NetFound pickNet[8];
@@ -1290,7 +1290,7 @@ MenuScr rxRetScr = MS_RXDIR;       // куда вернуться после п�
 bool leverArmed = false;           // тестовый джойстик разрешён, когда побывал в центре
 
 bool isRxScreen() {
-  return menuScr == MS_RX || menuScr == MS_RXCH || menuScr == MS_RXDIR || menuScr == MS_RXGLOB ||
+  return menuScr == MS_RX || menuScr == MS_RXPICK || menuScr == MS_RXCH || menuScr == MS_RXDIR || menuScr == MS_RXGLOB ||
          menuScr == MS_RXEDIT || menuScr == MS_RXSTAT || menuScr == MS_RXWIFI || menuScr == MS_RXWIFIM || menuScr == MS_RXBULK;
 }
 
@@ -1985,7 +1985,8 @@ int menuCount() {
     case MS_WIFI:    return WF_COUNT;
     case MS_NETACT:  return 3;
     case MS_NETPICK: return pickScanning ? 1 : pickN + 2;
-    case MS_RX:      return 13;                    // All Channels, Channel 1..8, Global, RX Status, Wi-Fi, Back
+    case MS_RX:      return 6;                     // All Channels, Channels, Global, RX Status, Wi-Fi, Back
+    case MS_RXPICK:  return NUM_CH + 1;            // Channel 1..8, Back
     case MS_RXWIFIM: return RW_COUNT;
     case MS_RXCH:    { RxItem it[16]; return rxItems(it); }
     case MS_RXDIR:   return 3;
@@ -2546,13 +2547,14 @@ void menuLabel(int i, char* b, size_t n) {
       snprintf(b, n, "%s", pn[i]);
       break;
     }
-    case MS_RX:
-      if (i == 0)       snprintf(b, n, "All Channels");
-      else if (i <= NUM_CH) snprintf(b, n, "Channel %d", i);
-      else {
-        static const char* rl[] = { "Global", "RX Status", "Wi-Fi", "Back" };
-        snprintf(b, n, "%s", rl[i - NUM_CH - 1 < 4 ? i - NUM_CH - 1 : 3]);
-      }
+    case MS_RX: {
+      static const char* rl[] = { "All Channels", "Channels", "Global", "RX Status", "Wi-Fi", "Back" };
+      snprintf(b, n, "%s", rl[i < 6 ? i : 5]);
+      break;
+    }
+    case MS_RXPICK:
+      if (i < NUM_CH) snprintf(b, n, "Channel %d", i + 1);
+      else            snprintf(b, n, "Back");
       break;
     case MS_RXCH: {
       RxItem it[16];
@@ -3046,11 +3048,16 @@ void menuSelect(int i) {
     case MS_RX:
       idxRx = i;
       if (i == 0)                 { rxAll = true;  gotoScr(MS_RXCH, 0); }
-      else if (i <= NUM_CH)       { rxAll = false; rxCh = i - 1; gotoScr(MS_RXCH, 0); }
-      else if (i == NUM_CH + 1)   gotoScr(MS_RXGLOB, idxRxGlob);
-      else if (i == NUM_CH + 2)   gotoScr(MS_RXSTAT, 0);
-      else if (i == NUM_CH + 3)   gotoScr(MS_RXWIFIM, idxRxWifi);
+      else if (i == 1)            gotoScr(MS_RXPICK, idxRxPick);
+      else if (i == 2)            gotoScr(MS_RXGLOB, idxRxGlob);
+      else if (i == 3)            gotoScr(MS_RXSTAT, 0);
+      else if (i == 4)            gotoScr(MS_RXWIFIM, idxRxWifi);
       else                        gotoScr(MS_MAIN, idxMain);
+      break;
+    case MS_RXPICK:
+      idxRxPick = i;
+      if (i < NUM_CH)             { rxAll = false; rxCh = i; gotoScr(MS_RXCH, 0); }
+      else                        gotoScr(MS_RX, idxRx);
       break;
     case MS_RXWIFIM:
       idxRxWifi = i;
@@ -3065,7 +3072,7 @@ void menuSelect(int i) {
       idxRxCh = i;
       RxItem it[16];
       int cnt = rxItems(it);
-      if (i >= cnt) { gotoScr(MS_RX, idxRx); break; }
+      if (i >= cnt) { gotoScr(rxAll ? MS_RX : MS_RXPICK, rxAll ? idxRx : idxRxPick); break; }
       const RxItem &x = it[i];
       switch (x.kind) {
         case RI_ENABLE:  startRxEdit(RXP_CHEN, rxCh, 0, MS_RXCH); break;
@@ -3076,7 +3083,7 @@ void menuSelect(int i) {
           rxCopySrc = rxAll ? rxTestCh : rxCh;
           startConfirm(CA_COPYALL, MS_RXCH, idxRxCh);
           break;
-        case RI_BACK:    gotoScr(MS_RX, idxRx); break;
+        case RI_BACK:    gotoScr(rxAll ? MS_RX : MS_RXPICK, rxAll ? idxRx : idxRxPick); break;
         default:
           if (rxAll) startRxEditAll(x.param);
           else       startRxEdit(x.param, rxCh, x.dir, MS_RXCH);
@@ -3223,7 +3230,8 @@ void menuBack() {
     case MS_DBGPAGE:  gotoScr(MS_DBGLIST, idxDbg); break;
     case MS_CONFIRM:  gotoScr(confBack, confIdx); break;
     case MS_RX:       gotoScr(MS_MAIN, idxMain); break;
-    case MS_RXCH:     gotoScr(MS_RX, idxRx); break;
+    case MS_RXCH:     gotoScr(rxAll ? MS_RX : MS_RXPICK, rxAll ? idxRx : idxRxPick); break;
+    case MS_RXPICK:   gotoScr(MS_RX, idxRx); break;
     case MS_RXBULK:   bulkAbort(); break;
     case MS_RXDIR:    gotoScr(MS_RXCH, idxRxCh); break;
     case MS_RXGLOB:   gotoScr(MS_RX, idxRx); break;
@@ -5431,6 +5439,7 @@ void drawMenu() {
     case MS_NETS:    display.printf("NETWORKS %d/%d", netCount(), NET_MAX); break;
     case MS_NETPICK: display.print("SELECT NETWORK"); break;
     case MS_RX:      display.print("RECEIVER"); break;
+    case MS_RXPICK:  display.print("CHANNELS"); break;
     case MS_RXWIFIM: display.print("RECEIVER WI-FI"); break;
     case MS_RXCH:
       if (rxAll) display.printf("ALL CH %s", rxCurMode() ? "CURRENT" : "PWM");
@@ -5568,6 +5577,13 @@ void drawTest() {
   oledCommit();
 }
 
+// Живое значение с приёмника для проверяемого канала: реальный ШИМ и ток в импульсе из телеметрии (а не положение рычага)
+static void rxLiveLine() {
+  if (!rxLinked()) { display.print("Out: no data"); return; }
+  int p = tel.pwm[rxCh], c = tel.cur[rxCh];
+  display.printf("Out %+d%% %d.%dA", p, c / 10, c % 10);
+}
+
 void drawRxEdit() {
   const RxParamDef &d = RXP[rxParam];
   char t[28], v[14], w[14];
@@ -5586,8 +5602,8 @@ void drawRxEdit() {
   display.setCursor(0, 40);
   if (rxLeverParam(rxParam)) {
     if (!leverArmed) display.printf("Center lever CH%d!", TEST_LEVER_CH + 1);
-    else if (rxEditAllF) display.printf("Test CH%d %c %+d", rxCh + 1, rxDir ? 'R' : 'E', ctl[rxCh]);
-    else             display.printf("Lever CH%d: %+d", TEST_LEVER_CH + 1, ctl[rxCh]);
+    else if (rxEditAllF) rxLiveLine();
+    else             rxLiveLine();
   } else if (rxParam == RXP_PWR && rxCur > 14) {
     display.print("check local limits");
   } else if (rxParam == RXP_PWMFREQ) {
