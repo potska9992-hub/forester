@@ -1107,9 +1107,9 @@ void batTick(unsigned long now) {
 }
 
 void drawBatteryBig() {
-  const int battW = 10, battH = 30, nubW = 4, nubH = 3;
+  const int battW = 10, battH = 51, nubW = 4, nubH = 3;   // от самого верха экрана до подписи внизу
   int battX = SCREEN_W - 12;
-  int battY = SCREEN_H - battH - nubH - 10;
+  int battY = 0;
 
   bool show = !(batLevel == 2 && ((millis() / 500) % 2 == 1));   // критический: значок мигает
   if (show) {
@@ -4519,7 +4519,7 @@ void drawRun1() {
   startScreen();
   display.setTextSize(2);
   display.setCursor(2, 6);   display.print("LINK");
-  if (rxLinked()) drawTick(92, 14, 9); else drawCross(92, 14, 9);
+  if (rxLinked()) drawTick(102, 14, 9); else drawCross(102, 14, 9);
 
   display.drawLine(0, 28, 108, 28, SH110X_WHITE);
 
@@ -4527,7 +4527,7 @@ void drawRun1() {
   display.setTextSize(1);
   display.setCursor(32, 38);
   if (simMode == SIM_RADIO) {
-    if (!hlInit)             display.print("RADIO ERROR");
+    if (!hlInit)             display.print("RADIO ERR");
     else if (!hlUp)          display.print("NO SIGNAL");
     else if (hlSyncBusy)     display.printf("SYNC %d%%", hlSyncPct());
     else if (tel.kill)       display.print("STOPPED");
@@ -4535,7 +4535,7 @@ void drawRun1() {
   }
   else if (simMode == SIM_LINK) display.print("SIM: READY");
   else                          display.print("NO SIGNAL");
-  if (rxLinked() && !hlSyncBusy && !(simMode == SIM_RADIO && tel.kill)) drawTick(92, 42, 9); else drawCross(92, 42, 9);
+  if (rxLinked() && !hlSyncBusy && !(simMode == SIM_RADIO && tel.kill)) drawTick(102, 42, 9); else drawCross(102, 42, 9);
 
   drawHintText("hold MENU = menu", 56);
   drawBatteryBig();
