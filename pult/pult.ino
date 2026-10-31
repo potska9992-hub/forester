@@ -1,5 +1,6 @@
 // ============================================================
 // Пульт гидрораспределителя. Журнал версий
+//  1.3 - главное меню: Transmitter, Receiver, Games, Exit; Games = Dino и Blocks (падающие фигуры, поле 10x16); меню Receiver переделано: All Channels (одно значение на все каналы и обе стороны, Test setup, Copy to All с подтверждением) и Channel 1..8 (все настройки канала в одном списке)
 //  1.2 - меню Receiver в режиме CURRENT: после Max Current добавлены Start Duty и Max Duty (в PWM как раньше); из меню Transmitter убрана имитация приёмника (RX: Radio/Sim link/Sim lost): всегда настоящее радио; экран Boot check (шина I2C, ADS) показывается только при ошибке; радио запускается после заставки и Safe Start; экран Safe Start показывается только если какой-то канал не в центре (или ошибка ADS), иначе проверка идёт в фоне; на экранах связи вместо заглушки ID 3F2A показан короткий код пары
 //  1.1 - радио опрашивается и во время чтения каналов джойстиков (раньше ждало конца чтения, ~10 мс): больше пакетов управления в секунду, быстрее приём ответов
 //  1.0 - РАДИО (HydroLink v1, SX1262 868 МГц, SF7 BW250): пакеты управления с маской каналов и heartbeat, телеметрия по запросу
@@ -132,7 +133,7 @@
 #define HB_FLASH_MS     100        // длительность вспышки пульса
 
 // ============ ВЕРСИЯ ПРОШИВКИ ============
-#define FW_VERSION      "1.2"
+#define FW_VERSION      "1.3"
 #define PBAR_W          108             // ширина полосы загрузки (значок батареи справа)
 #define GH_REPO         "potska9992-hub/forester"   // репозиторий с готовыми прошивками
 #define GH_TAG          "pult-latest"               // релиз с последней прошивкой пульта
@@ -208,7 +209,8 @@ enum MenuScr {
   MS_DBGLIST, MS_DBGDESC, MS_DBGPAGE,
   MS_PIN, MS_FRTARGET, MS_CONFIRM,
   MS_RX, MS_RXCH, MS_RXDIR, MS_RXGLOB, MS_RXEDIT, MS_RXSTAT, MS_RXWIFI,
-  MS_NETS, MS_NETPICK, MS_TEXTIN, MS_WIFI, MS_NETACT, MS_RXWIFIM, MS_GAME
+  MS_NETS, MS_NETPICK, MS_TEXTIN, MS_WIFI, MS_NETACT, MS_RXWIFIM, MS_GAME,
+  MS_GAMES, MS_BLOCKS, MS_RXBULK
 };
 enum ChItem { CI_TYPE, CI_REV, CI_EN, CI_EXPO, CI_MAX, CI_LED, CI_BACK };
 enum EvItem { EI_EN, EI_COLOR, EI_PAT, EI_INT, EI_WHERE, EI_SCR, EI_FIXED, EI_BACK };
@@ -221,13 +223,15 @@ struct NetFound { char ssid[33]; int8_t rssi; };      // найденная Wi-F
 
 // порядок = порядок в меню: частое и важное сверху, опасное и временное внизу, Back последний
 enum TxItem { TX_CAL, TX_CHSET, TX_PWR, TX_BIND, TX_TRT, TX_SCR, TX_LED, TX_BAT, TX_LOG, TX_DBG, TX_WIFI, TX_FR, TX_BACK, TX_COUNT };
-enum RxTopic { RT_LIMIT, RT_DUTY, RT_MAXD, RT_RAMP, RT_CHEN, RT_GLOB, RT_STAT, RT_WIFI, RT_BACK, RT_COUNT,
-               RT_DUTY2, RT_MAXD2 };   // RT_DUTY2/RT_MAXD2: Start Duty / Max Duty, показываются в меню только в режиме CURRENT
+// меню Receiver (All Channels / Channel N): виды строк
+enum RxItemKind { RI_PARAM, RI_ENABLE, RI_TESTCH, RI_TESTDIR, RI_COPY, RI_BACK };
+struct RxItem { uint8_t kind, param, dir; };
+struct BulkItem { uint8_t param, ch, dir; uint16_t val; };   // тип выше функций (Arduino делает прототипы)
 enum WifiItem { WF_PHONE, WF_GH, WF_NETS, WF_BACK, WF_COUNT };
 enum RxWifiItem { RW_PHONE, RW_GH, RW_BACK, RW_COUNT };
 enum ScrId { SC_MAIN, SC_TX, SC_RX, SC_LINK, SC_POWER, SC_LOG };
 enum DbgPage { DP_RADIO, DP_TELEM, DP_LIM, DP_RAW, DP_SYS, DP_LOG };
-enum ConfAct { CA_CLEARLOG, CA_FORGET, CA_FR_TX, CA_FR_RX, CA_NETDEL, CA_NETALL };
+enum ConfAct { CA_CLEARLOG, CA_FORGET, CA_FR_TX, CA_FR_RX, CA_NETDEL, CA_NETALL, CA_COPYALL };
 // LT_SHORT больше не создаётся (решение 28.10.2026), номер оставлен, чтобы не сломать старые записи журнала в NVS
 enum LogType { LT_ESTOP, LT_RXALARM, LT_NOLINK, LT_LINKOK, LT_RXFAULT, LT_LIMIT, LT_BATTTX, LT_OVL, LT_SHORT, LT_OPEN, LT_BATTRX, LT_COUNT };
 // параметры приёмника (SetConfig): SOL = на соленоид (канал x сторона A/B), CH = на канал, GLOB = общие
@@ -861,6 +865,7 @@ unsigned long bootStart = 0;
 unsigned long safeSince = 0;
 
 // ---- состояния меню ----
+int  idxGames = 0;
 int  idxScr = 0, idxPower = 0, idxBind = 0, idxEvLog = 0, idxDbg = 0, idxFr = 0, idxRxGlob = 0;
 int  scrSel = 0;                 // позиция выбранного экрана в scrOrder
 int  dbgPage = 0, dbgTop = 0;    // страница Debug и первая видимая строка описания
@@ -922,6 +927,8 @@ void wifiBegin();
 void wifiStop(const char* why);
 void rxWifiBegin(int mode);
 void gameEnter();
+void blocksEnter();
+void blocksStep(unsigned long now, int b);
 void gameStep(unsigned long now, int b);
 bool gameOn();
 
@@ -1236,7 +1243,13 @@ void rxFactoryReset() {
   simInit(); rxModeCache = simRam[RXP_MODE][0][0];
 }
 
-int  rxTopic = RT_LIMIT;           // что выбрано в меню Receiver
+bool rxEditAllF = false;           // правка из меню All Channels: сохранённое значение пишется во все каналы
+bool rxAll = false;               // true = меню All Channels (одно значение на все каналы), false = Channel N
+int  rxTestCh = 0, rxTestDir = 0;  // All Channels -> Test setup: канал и сторона, на которых работает тестовый джойстик
+int  rxCopySrc = 0;                // канал-источник для Copy to All
+// массовая запись настроек в приёмник (All Channels и Copy to All): очередь HlCfg маленькая, поэтому пакеты подаются по мере освобождения
+BulkItem bulkQ[96];
+struct BulkState { bool on; uint8_t n, pos, kind; unsigned long t0; } bulk = { false, 0, 0, 0, 0 };
 int  rxParam = RXP_LIMIT, rxCh = 0, rxDir = 0;
 int  rxCur = 0, rxOrig = 0;        // текущее (из Ack) и исходное значение
 MenuScr rxRetScr = MS_RXDIR;       // куда вернуться после правки
@@ -1244,7 +1257,7 @@ bool leverArmed = false;           // тестовый джойстик разр
 
 bool isRxScreen() {
   return menuScr == MS_RX || menuScr == MS_RXCH || menuScr == MS_RXDIR || menuScr == MS_RXGLOB ||
-         menuScr == MS_RXEDIT || menuScr == MS_RXSTAT || menuScr == MS_RXWIFI || menuScr == MS_RXWIFIM;
+         menuScr == MS_RXEDIT || menuScr == MS_RXSTAT || menuScr == MS_RXWIFI || menuScr == MS_RXWIFIM || menuScr == MS_RXBULK;
 }
 
 // все включённые каналы, кроме тумблеров навигации и тестового джойстика, в центре
@@ -1393,6 +1406,14 @@ bool hlWifiAck = false;                // приёмник принял кома
 uint8_t hlWifiAckSt = 0;
 
 bool rxLeverParam(int p);
+int rxItems(RxItem* it);
+void bulkCopy(int src);
+void bulkSetAll(int param, uint16_t val);
+void bulkAbort();
+void rxBulkTick(unsigned long now);
+void startRxEditAll(int param);
+void drawRxBulk();
+void drawBlocks();
 
 uint16_t hlCrc16(const uint8_t* d, size_t n) {
   uint16_t c = 0xFFFF;
@@ -1820,7 +1841,8 @@ void hlStep(unsigned long now) {
   static unsigned long lastCtl = 0;
   if (hlCurOn) {
     bool leverTest = anyNZ && state == ST_MENU && menuScr == MS_RXEDIT && rxLeverParam(rxParam) && leverArmed;
-    if (!(leverTest && (long)(now - lastCtl) >= 60)) { hlSendCfg(now); return; }   // тест рычага: управление чередуется с настройкой
+    unsigned long gap = leverTest ? 60UL : 250UL;
+    if (!((leverTest || bulk.on) && (long)(now - lastCtl) >= (long)gap)) { hlSendCfg(now); return; }   // тест рычага и массовая запись: управление чередуется с настройкой, чтобы связь не терялась
   }
   hlSendControl(now);
   lastCtl = now;
@@ -1903,6 +1925,7 @@ int evItems(int e, uint8_t* ids) {
 int menuCount() {
   switch (menuScr) {
     case MS_MAIN:    return 4;
+    case MS_GAMES:   return 3;
     case MS_TX:      return TX_COUNT;
     case MS_CAL:     return 4;
     case MS_CHLIST:  return NUM_CH + 1;
@@ -1925,9 +1948,9 @@ int menuCount() {
     case MS_WIFI:    return WF_COUNT;
     case MS_NETACT:  return 3;
     case MS_NETPICK: return pickScanning ? 1 : pickN + 2;
-    case MS_RX:      return RT_COUNT + (rxCurMode() ? 2 : 0);
+    case MS_RX:      return 13;                    // All Channels, Channel 1..8, Global, RX Status, Wi-Fi, Back
     case MS_RXWIFIM: return RW_COUNT;
-    case MS_RXCH:    return NUM_CH + 1;
+    case MS_RXCH:    { RxItem it[16]; return rxItems(it); }
     case MS_RXDIR:   return 3;
     case MS_RXGLOB:  return 7;
     default:         return 0;
@@ -2020,24 +2043,49 @@ bool rxCurMode() { return rxCfgKnown && rxModeCache != 0; }   // пока реж
 // параметры, при правке которых работает тестовый рычаг
 bool rxLeverParam(int p) { return p == RXP_LIMIT || p == RXP_DUTY || p == RXP_STARTI; }
 
-// строка меню Receiver -> тема. PWM: как есть. CURRENT: после Max Current добавлены Start Duty и Max Duty
-int rxRowTopic(int row) {
-  if (!rxCurMode() || row <= RT_MAXD) return row;
-  if (row == RT_MAXD + 1) return RT_DUTY2;
-  if (row == RT_MAXD + 2) return RT_MAXD2;
-  return row - 2;
+const char* rxShortName(int p) {
+  switch (p) {
+    case RXP_LIMIT:  return "Limit";
+    case RXP_DUTY:   return "Start duty";
+    case RXP_MAXD:   return "Max duty";
+    case RXP_RAMPUP: return "Ramp up";
+    case RXP_RAMPDN: return "Ramp dn";
+    case RXP_STARTI: return "Start I";
+    case RXP_MAXI:   return "Max I";
+    default:         return RXP[p].name;
+  }
 }
 
-int rxTopicParam(int topic) {
-  switch (topic) {
-    case RT_LIMIT: return RXP_LIMIT;
-    case RT_DUTY:  return rxCurMode() ? RXP_STARTI : RXP_DUTY;
-    case RT_MAXD:  return rxCurMode() ? RXP_MAXI : RXP_MAXD;
-    case RT_DUTY2: return RXP_DUTY;
-    case RT_MAXD2: return RXP_MAXD;
-    case RT_CHEN:  return RXP_CHEN;
-    default:       return RXP_RAMPUP;
+// строки меню All Channels / Channel N. PWM: Limit, Start duty, Max duty; CURRENT: Limit, Start I, Max I, Start duty, Max duty
+int rxItems(RxItem* it) {
+  int n = 0;
+  uint8_t sol[5];
+  int ns = 0;
+  sol[ns++] = RXP_LIMIT;
+  if (rxCurMode()) { sol[ns++] = RXP_STARTI; sol[ns++] = RXP_MAXI; }
+  sol[ns++] = RXP_DUTY; sol[ns++] = RXP_MAXD;
+  if (!rxAll) { it[n].kind = RI_ENABLE; it[n].param = RXP_CHEN; it[n].dir = 0; n++; }
+  for (int i = 0; i < ns; i++)
+    for (int d = 0; d < (rxAll ? 1 : 2); d++) { it[n].kind = RI_PARAM; it[n].param = sol[i]; it[n].dir = d; n++; }
+  it[n].kind = RI_PARAM; it[n].param = RXP_RAMPUP; it[n].dir = 0; n++;
+  it[n].kind = RI_PARAM; it[n].param = RXP_RAMPDN; it[n].dir = 0; n++;
+  if (rxAll) {
+    it[n].kind = RI_TESTCH;  it[n].param = 0; it[n].dir = 0; n++;
+    it[n].kind = RI_TESTDIR; it[n].param = 0; it[n].dir = 0; n++;
   }
+  it[n].kind = RI_COPY; it[n].param = 0; it[n].dir = 0; n++;
+  it[n].kind = RI_BACK; it[n].param = 0; it[n].dir = 0; n++;
+  return n;
+}
+
+// значение параметра по всем каналам и сторонам: все одинаковые -> mixed = false
+uint16_t rxAllValue(int p, bool &mixed) {
+  uint16_t v0 = rxQuery(0, 0, p);
+  mixed = false;
+  for (int c = 0; c < NUM_CH; c++)
+    for (int d = 0; d < (RXP[p].scope == PS_SOL ? 2 : 1); d++)
+      if (rxQuery(c, d, p) != v0) mixed = true;
+  return v0;
 }
 
 // ---- экраны ----
@@ -2124,6 +2172,10 @@ void doConfirm() {
       break;
     case CA_FR_TX:
       factoryResetTx();               // экран остаётся до перезагрузки
+      break;
+    case CA_COPYALL:
+      if (!rxReady() || !othersCentered()) { toast("Not possible now"); gotoScr(confBack, confIdx); }
+      else { rxRetScr = MS_RXCH; bulkCopy(rxCopySrc); }
       break;
     case CA_FR_RX:
       if (!rxReady() || !othersCentered()) {
@@ -2349,7 +2401,7 @@ void textStep(int a, int b, int m) {
 }
 
 void menuLabel(int i, char* b, size_t n) {
-  static const char* mainL[] = { "Transmitter", "Receiver", "Dino", "Exit" };
+  static const char* mainL[] = { "Transmitter", "Receiver", "Games", "Exit" };
   static const char* calL[]  = { "Set Center", "Set Min/Max", "Dead Zone", "Back" };
   static const char* ledM[]  = { "Both", "Red", "Green", "Off" };
   static const char* ledL[]  = { "Presets", "Alert events", "Status LEDs", "Test alerts", "Reset alerts", "Back" };
@@ -2357,6 +2409,7 @@ void menuLabel(int i, char* b, size_t n) {
   static const char* dbgL[]  = { "Radio", "Telemetry", "Limits", "RAW ADC", "System", "Log", "Back" };
   switch (menuScr) {
     case MS_MAIN: snprintf(b, n, "%s", mainL[i]); break;
+    case MS_GAMES: snprintf(b, n, "%s", i == 0 ? "Dino" : i == 1 ? "Blocks" : "Back"); break;
     case MS_RXWIFIM: { static const char* rwL[] = { "Phone: Update/Test", "GitHub update", "Back" }; snprintf(b, n, "%s", rwL[i < 3 ? i : 2]); break; }
     case MS_TX:
       switch (i) {
@@ -2448,33 +2501,41 @@ void menuLabel(int i, char* b, size_t n) {
       break;
     }
     case MS_RX:
-      {
-        int t = rxRowTopic(i);
-        if (t == RT_DUTY)       snprintf(b, n, "%s", rxCurMode() ? "Start Current" : "Start Duty");
-        else if (t == RT_MAXD)  snprintf(b, n, "%s", rxCurMode() ? "Max Current" : "Max Duty");
-        else if (t == RT_DUTY2) snprintf(b, n, "Start Duty");
-        else if (t == RT_MAXD2) snprintf(b, n, "Max Duty");
-        else                    snprintf(b, n, "%s", rxL[t]);
+      if (i == 0)       snprintf(b, n, "All Channels");
+      else if (i <= NUM_CH) snprintf(b, n, "Channel %d", i);
+      else {
+        static const char* rl[] = { "Global", "RX Status", "Wi-Fi", "Back" };
+        snprintf(b, n, "%s", rl[i - NUM_CH - 1 < 4 ? i - NUM_CH - 1 : 3]);
       }
       break;
-    case MS_RXCH:
-      if (i < NUM_CH) {
-        if (rxTopic == RT_CHEN) snprintf(b, n, "Channel %d %s", i + 1, rxQuery(i, 0, RXP_CHEN) ? "ON" : "OFF");
-        else                    snprintf(b, n, "Channel %d", i + 1);
-      } else snprintf(b, n, "Back");
+    case MS_RXCH: {
+      RxItem it[16];
+      int cnt = rxItems(it);
+      if (i >= cnt) { snprintf(b, n, "Back"); break; }
+      const RxItem &x = it[i];
+      char v[14];
+      switch (x.kind) {
+        case RI_ENABLE: snprintf(b, n, "Enable %s", rxQuery(rxCh, 0, RXP_CHEN) ? "ON" : "OFF"); break;
+        case RI_TESTCH:  snprintf(b, n, "Test channel %d", rxTestCh + 1); break;
+        case RI_TESTDIR: snprintf(b, n, "Test side %s", rxTestDir ? "Retract" : "Extend"); break;
+        case RI_COPY:    snprintf(b, n, "Copy to All"); break;
+        case RI_BACK:    snprintf(b, n, "Back"); break;
+        default:
+          if (rxAll) {
+            bool mixed;
+            uint16_t val = rxAllValue(x.param, mixed);
+            if (mixed) snprintf(b, n, "%s mixed", rxShortName(x.param));
+            else { fmtParam(x.param, val, v, sizeof(v)); snprintf(b, n, "%s %s", rxShortName(x.param), v); }
+          } else {
+            fmtParam(x.param, rxQuery(rxCh, x.dir, x.param), v, sizeof(v));
+            if (RXP[x.param].scope == PS_SOL) snprintf(b, n, "%s %c %s", rxShortName(x.param), x.dir ? 'R' : 'E', v);
+            else                              snprintf(b, n, "%s %s", rxShortName(x.param), v);
+          }
+      }
       break;
+    }
     case MS_RXDIR:
-      if (i < 2) {
-        char v[12];
-        if (rxTopic == RT_RAMP) {
-          fmtParam(RXP_RAMPUP + i, rxQuery(rxCh, 0, RXP_RAMPUP + i), v, sizeof(v));
-          snprintf(b, n, "%s %s", i ? "Ramp down" : "Ramp up", v);
-        } else {
-          int p = rxTopicParam(rxTopic);
-          fmtParam(p, rxQuery(rxCh, i, p), v, sizeof(v));
-          snprintf(b, n, "%s %s", i ? "Retract" : "Extend", v);
-        }
-      } else snprintf(b, n, "Back");
+      snprintf(b, n, "Back");
       break;
     case MS_RXGLOB:
       if (i < 6) {
@@ -2647,10 +2708,17 @@ void startRxEdit(int param, int ch, int dir, MenuScr ret) {
   rxCh = ch;
   rxDir = dir;
   rxRetScr = ret;
+  rxEditAllF = false;
   rxOrig = rxQuery(ch, dir, param);           // на радио: SetConfig(0xFFFF) -> Ack
   rxCur = rxOrig;
   leverArmed = false;                         // джойстик заработает, когда будет в центре
   gotoScr(MS_RXEDIT, 0);
+}
+
+// All Channels: правка идёт на тестовом канале (живое значение, тестовый джойстик), при сохранении значение пишется во все каналы и стороны
+void startRxEditAll(int param) {
+  startRxEdit(param, rxTestCh, rxTestDir, MS_RXCH);
+  rxEditAllF = true;
 }
 
 void gotoRxRet() {
@@ -2681,14 +2749,73 @@ void rxEditStep(int a, int m) {
   rxCur = rxSet(rxCh, rxDir, rxParam, rxCur + a * d.step * k, false);   // применить сразу, без записи в память
 }
 
+void bulkStart(uint8_t kind, uint8_t n) {
+  bulk.on = true; bulk.n = n; bulk.pos = 0; bulk.kind = kind; bulk.t0 = millis();
+  gotoScr(MS_RXBULK, 0);
+}
+
+void bulkAbort() {
+  bulk.on = false;
+  hlCfgClear();
+  toast("Stopped");
+  gotoRxRet();
+}
+
+// записать одно значение параметра во все каналы (и обе стороны), только отличающиеся от нужного
+void bulkSetAll(int param, uint16_t val) {
+  int n = 0;
+  for (int c = 0; c < NUM_CH; c++)
+    for (int d = 0; d < (RXP[param].scope == PS_SOL ? 2 : 1); d++)
+      if (rxQuery(c, d, param) != val && n < 96) { bulkQ[n].param = param; bulkQ[n].ch = c; bulkQ[n].dir = d; bulkQ[n].val = val; n++; }
+  if (n == 0) { toast("Saved"); gotoRxRet(); return; }
+  bulkStart(1, n);
+}
+
+// копия всех настроек канала src (обе стороны) на все остальные каналы: Enable не копируется
+void bulkCopy(int src) {
+  static const uint8_t pl[7] = { RXP_LIMIT, RXP_DUTY, RXP_MAXD, RXP_STARTI, RXP_MAXI, RXP_RAMPUP, RXP_RAMPDN };
+  int n = 0;
+  for (int c = 0; c < NUM_CH; c++) {
+    if (c == src) continue;
+    for (int i = 0; i < 7; i++) {
+      int p = pl[i];
+      for (int d = 0; d < (RXP[p].scope == PS_SOL ? 2 : 1); d++) {
+        uint16_t v = rxQuery(src, d, p);
+        if (rxQuery(c, d, p) != v && n < 96) { bulkQ[n].param = p; bulkQ[n].ch = c; bulkQ[n].dir = d; bulkQ[n].val = v; n++; }
+      }
+    }
+  }
+  if (n == 0) { toast("Already equal"); gotoRxRet(); return; }
+  bulkStart(2, n);
+}
+
+// вызывается из loop: подаёт записи в очередь радио по мере освобождения, по окончании возвращает в меню
+void rxBulkTick(unsigned long now) {
+  if (!bulk.on) return;
+  if (state != ST_MENU || menuScr != MS_RXBULK) { bulk.on = false; return; }          // вышли из меню (E-Stop и т.п.)
+  if (!rxLinked()) { bulk.on = false; hlCfgClear(); toast("RX lost"); gotoRxRet(); return; }
+  while (bulk.pos < bulk.n && hlQn < 4) {
+    const BulkItem &q = bulkQ[bulk.pos++];
+    rxSet(q.ch, q.dir, q.param, q.val, true);
+  }
+  if (bulk.pos >= bulk.n && hlQn == 0 && !hlCurOn) {
+    bulk.on = false;
+    LOGF("RX bulk write done: %d values in %lu ms", (int)bulk.n, (unsigned long)(now - bulk.t0));
+    toast("Done");
+    gotoRxRet();
+  }
+}
+
 void rxEditSave() {
   rxCur = rxSet(rxCh, rxDir, rxParam, rxCur, true);        // записать в память приёмника
   LOGF("RX saved p%d ch%d d%d v%d", rxParam, rxCh + 1, rxDir, rxCur);
+  if (rxEditAllF && rxLinked()) { rxEditAllF = false; bulkSetAll(rxParam, (uint16_t)rxCur); return; }
   toast("Saved");
   gotoRxRet();
 }
 
 void rxEditCancel() {
+  rxEditAllF = false;
   rxSet(rxCh, rxDir, rxParam, rxOrig, false);              // вернуть исходное
   toast("Cancelled");
   gotoRxRet();
@@ -2700,8 +2827,14 @@ void menuSelect(int i) {
       idxMain = i;
       if (i == 0)      gotoScr(MS_TX, idxTx);
       else if (i == 1) enterReceiver();
-      else if (i == 2) { gameEnter(); gotoScr(MS_GAME, 0); }
+      else if (i == 2) gotoScr(MS_GAMES, idxGames);
       else             exitMenu();
+      break;
+    case MS_GAMES:
+      idxGames = i;
+      if (i == 0)      { gameEnter(); gotoScr(MS_GAME, 0); }
+      else if (i == 1) { blocksEnter(); gotoScr(MS_BLOCKS, 0); }
+      else             gotoScr(MS_MAIN, idxMain);
       break;
     case MS_TX:
       idxTx = i;
@@ -2856,12 +2989,12 @@ void menuSelect(int i) {
       break;
     case MS_RX:
       idxRx = i;
-      rxTopic = rxRowTopic(i);
-      if (rxTopic == RT_GLOB)      gotoScr(MS_RXGLOB, idxRxGlob);
-      else if (rxTopic == RT_STAT) gotoScr(MS_RXSTAT, 0);
-      else if (rxTopic == RT_WIFI) gotoScr(MS_RXWIFIM, idxRxWifi);
-      else if (rxTopic == RT_BACK) gotoScr(MS_MAIN, idxMain);
-      else                   gotoScr(MS_RXCH, idxRxCh);
+      if (i == 0)                 { rxAll = true;  gotoScr(MS_RXCH, 0); }
+      else if (i <= NUM_CH)       { rxAll = false; rxCh = i - 1; gotoScr(MS_RXCH, 0); }
+      else if (i == NUM_CH + 1)   gotoScr(MS_RXGLOB, idxRxGlob);
+      else if (i == NUM_CH + 2)   gotoScr(MS_RXSTAT, 0);
+      else if (i == NUM_CH + 3)   gotoScr(MS_RXWIFIM, idxRxWifi);
+      else                        gotoScr(MS_MAIN, idxMain);
       break;
     case MS_RXWIFIM:
       idxRxWifi = i;
@@ -2872,20 +3005,30 @@ void menuSelect(int i) {
       else if (i == RW_GH && netCount() == 0) toast("No saved network");
       else                        rxWifiBegin(i == RW_GH ? 1 : 0);
       break;
-    case MS_RXCH:
+    case MS_RXCH: {
       idxRxCh = i;
-      if (i < NUM_CH) {
-        rxCh = i;
-        if (rxTopic == RT_CHEN) startRxEdit(RXP_CHEN, rxCh, 0, MS_RXCH);
-        else                    gotoScr(MS_RXDIR, idxRxDir);
-      } else gotoScr(MS_RX, idxRx);
+      RxItem it[16];
+      int cnt = rxItems(it);
+      if (i >= cnt) { gotoScr(MS_RX, idxRx); break; }
+      const RxItem &x = it[i];
+      switch (x.kind) {
+        case RI_ENABLE:  startRxEdit(RXP_CHEN, rxCh, 0, MS_RXCH); break;
+        case RI_TESTCH:  rxTestCh = (rxTestCh + 1) % NUM_CH; break;
+        case RI_TESTDIR: rxTestDir ^= 1; break;
+        case RI_COPY:
+          if (!rxReady() || hlSyncBusy || !othersCentered()) { toast("Not possible now"); break; }
+          rxCopySrc = rxAll ? rxTestCh : rxCh;
+          startConfirm(CA_COPYALL, MS_RXCH, idxRxCh);
+          break;
+        case RI_BACK:    gotoScr(MS_RX, idxRx); break;
+        default:
+          if (rxAll) startRxEditAll(x.param);
+          else       startRxEdit(x.param, rxCh, x.dir, MS_RXCH);
+      }
       break;
+    }
     case MS_RXDIR:
-      idxRxDir = i;
-      if (i < 2) {
-        if (rxTopic == RT_RAMP) startRxEdit(RXP_RAMPUP + i, rxCh, 0, MS_RXDIR);
-        else                    startRxEdit(rxTopicParam(rxTopic), rxCh, i, MS_RXDIR);
-      } else gotoScr(MS_RXCH, idxRxCh);
+      gotoScr(MS_RXCH, idxRxCh);
       break;
     case MS_RXGLOB:
       idxRxGlob = i;
@@ -3025,6 +3168,7 @@ void menuBack() {
     case MS_CONFIRM:  gotoScr(confBack, confIdx); break;
     case MS_RX:       gotoScr(MS_MAIN, idxMain); break;
     case MS_RXCH:     gotoScr(MS_RX, idxRx); break;
+    case MS_RXBULK:   bulkAbort(); break;
     case MS_RXDIR:    gotoScr(MS_RXCH, idxRxCh); break;
     case MS_RXGLOB:   gotoScr(MS_RX, idxRx); break;
     case MS_RXEDIT:   rxEditCancel(); break;
@@ -3033,7 +3177,9 @@ void menuBack() {
                       if (simMode == SIM_RADIO) hlCfgPut(HLO_CMD, HLC_WIFI_OFF, 0, 0, 0, false, 0, 0);
                       rxWifiSt = 0; gotoScr(MS_RXWIFIM, idxRxWifi); break;
     case MS_RXWIFIM:  gotoScr(MS_RX, idxRx); break;
-    case MS_GAME:     gotoScr(MS_MAIN, idxMain); break;
+    case MS_GAME:     gotoScr(MS_GAMES, idxGames); break;
+    case MS_BLOCKS:   gotoScr(MS_GAMES, idxGames); break;
+    case MS_GAMES:    gotoScr(MS_MAIN, idxMain); break;
   }
 }
 
@@ -3128,6 +3274,12 @@ void navStep(unsigned long now) {
       return;
     case MS_GAME:
       gameStep(now, b);
+      return;
+    case MS_BLOCKS:
+      blocksStep(now, b);
+      return;
+    case MS_RXBULK:
+      if (b < 0) bulkAbort();
       return;
     case MS_BINDRUN:
       if (b < 0) menuBack();
@@ -4676,7 +4828,7 @@ uint16_t gScore = 0, gHi = 0;
 unsigned long gLast = 0, gT0 = 0;
 uint32_t gRnd = 12345;
 
-bool gameOn() { return state == ST_MENU && menuScr == MS_GAME; }
+bool gameOn() { return state == ST_MENU && (menuScr == MS_GAME || menuScr == MS_BLOCKS); }
 
 static uint32_t gameRand(uint32_t n) { gRnd = gRnd * 1664525UL + 1013904223UL; return (gRnd >> 8) % n; }
 
@@ -4836,6 +4988,214 @@ void drawGame() {
   oledCommit();
 }
 
+// ============ ИГРА BLOCKS (падающие фигуры) ============
+// Поле 10x16 клеток по 4 пикселя слева, справа счёт, уровень, линии и следующая фигура.
+// Управление: CH2 (джойстик) влево/вправо, CH3 вверх поворот, CH3 вниз ускорить падение, CH6 "+" старт и повтор, "-" и MENU выход.
+#define BLK_W           10
+#define BLK_H           16
+#define BLK_CELL        4
+#define BLK_X0          6
+#define BLK_MOVE_CH     1          // CH2: влево/вправо
+#define BLK_MOVE_SIGN   (1)        // поменять на -1, если направление наоборот
+#define BLK_ROT_SIGN    (-1)       // как у Dino: вверх по CH3 = поворот
+// фигуры: I O T S Z J L, базовая ориентация в матрице n x n (строки сверху вниз, бит 0 слева)
+static const uint8_t BLK_SHAPE[7][4] = {
+  { 0b0000, 0b1111, 0b0000, 0b0000 },   // I (n=4)
+  { 0b0110, 0b0110, 0b0000, 0b0000 },   // O (n=2 по виду, не вращается)
+  { 0b010,  0b111,  0b000,  0 },        // T (n=3), бит 0 = левая клетка: 010 = центр
+  { 0b110,  0b011,  0b000,  0 },        // S
+  { 0b011,  0b110,  0b000,  0 },        // Z
+  { 0b001,  0b111,  0b000,  0 },        // J
+  { 0b100,  0b111,  0b000,  0 }         // L
+};
+static const uint8_t BLK_N[7] = { 4, 4, 3, 3, 3, 3, 3 };
+enum BlkSt { BS_READY, BS_PLAY, BS_OVER };
+uint16_t bField[BLK_H];              // строка = 10 бит, бит 0 = левая колонка
+uint8_t  bSt = BS_READY;
+int8_t   bPiece = 0, bNext = 0, bRot = 0, bX = 3, bY = 0;
+uint8_t  bBag[7], bBagN = 0;
+uint16_t bLines = 0, bLevel = 0, bHi = 0;
+uint32_t bScore = 0;
+unsigned long bFallAt = 0, bMoveAt = 0, bFlashAt = 0;
+bool     bHeld = false, bRotPrev = false;
+int8_t   bHoldDir = 0;
+uint32_t bRnd = 777;
+uint8_t  bClearRows = 0;             // для мигания при очистке (не используется для логики)
+
+static uint32_t blkRand(uint32_t n) { bRnd = bRnd * 1664525UL + 1013904223UL; return (bRnd >> 8) % n; }
+
+// клетка (r, c) фигуры p в повороте rot: 1 = занята
+static bool blkCell(int p, int rot, int r, int c) {
+  int n = BLK_N[p];
+  if (r < 0 || c < 0 || r >= n || c >= n) return false;
+  int rr = r, cc = c;
+  if (p != 1) {                                 // O не вращается
+    switch (rot & 3) {
+      case 1: rr = n - 1 - c; cc = r; break;
+      case 2: rr = n - 1 - r; cc = n - 1 - c; break;
+      case 3: rr = c; cc = n - 1 - r; break;
+      default: break;
+    }
+  }
+  return ((BLK_SHAPE[p][rr] >> cc) & 1) != 0;
+}
+
+static bool blkFits(int p, int rot, int x, int y) {
+  int n = BLK_N[p];
+  for (int r = 0; r < n; r++)
+    for (int c = 0; c < n; c++) {
+      if (!blkCell(p, rot, r, c)) continue;
+      int X = x + c, Y = y + r;
+      if (X < 0 || X >= BLK_W || Y >= BLK_H) return false;
+      if (Y >= 0 && ((bField[Y] >> X) & 1)) return false;
+    }
+  return true;
+}
+
+static int8_t blkNextPiece() {
+  if (bBagN == 0) {                             // мешок из 7 фигур, перемешанный
+    for (int i = 0; i < 7; i++) bBag[i] = i;
+    for (int i = 6; i > 0; i--) { int j = blkRand(i + 1); uint8_t t = bBag[i]; bBag[i] = bBag[j]; bBag[j] = t; }
+    bBagN = 7;
+  }
+  return bBag[--bBagN];
+}
+
+static unsigned long blkFallMs() {
+  unsigned long ms = 600UL - (unsigned long)bLevel * 50UL;
+  return ms < 100UL ? 100UL : ms;
+}
+
+void blocksEnter() {
+  prefs.begin("game", true);
+  bHi = prefs.getUShort("bhi", 0);
+  prefs.end();
+  bSt = BS_READY;
+  bRnd ^= millis();
+}
+
+static void blkSpawn(unsigned long now) {
+  bPiece = bNext; bNext = blkNextPiece();
+  bRot = 0; bX = (BLK_W - BLK_N[(int)bPiece]) / 2; bY = (bPiece == 0) ? -1 : 0;
+  bFallAt = now + blkFallMs();
+  if (!blkFits(bPiece, bRot, bX, bY)) {
+    bSt = BS_OVER;
+    gameFlashUntil = now + 300;
+    uint32_t hs = bScore > 65535UL ? 65535UL : bScore;
+    if (hs > bHi) {
+      bHi = (uint16_t)hs;
+      prefs.begin("game", false);
+      prefs.putUShort("bhi", bHi);
+      prefs.end();
+    }
+    LOGF("Blocks: game over, score %lu", (unsigned long)bScore);
+  }
+}
+
+static void blkBegin(unsigned long now) {
+  for (int i = 0; i < BLK_H; i++) bField[i] = 0;
+  bScore = 0; bLines = 0; bLevel = 0; bBagN = 0; bHoldDir = 0; bRotPrev = true;
+  bNext = blkNextPiece();
+  bSt = BS_PLAY;
+  blkSpawn(now);
+}
+
+static void blkLock(unsigned long now) {
+  int n = BLK_N[(int)bPiece];
+  for (int r = 0; r < n; r++)
+    for (int c = 0; c < n; c++)
+      if (blkCell(bPiece, bRot, r, c)) {
+        int X = bX + c, Y = bY + r;
+        if (Y >= 0 && Y < BLK_H && X >= 0 && X < BLK_W) bField[Y] |= (uint16_t)(1u << X);
+      }
+  int cleared = 0;
+  for (int y = BLK_H - 1; y >= 0; ) {
+    if (bField[y] == 0x3FF) {
+      for (int k = y; k > 0; k--) bField[k] = bField[k - 1];
+      bField[0] = 0;
+      cleared++;
+    } else y--;
+  }
+  if (cleared) {
+    static const uint16_t pts[5] = { 0, 40, 100, 300, 1200 };
+    bScore += (uint32_t)pts[cleared] * (bLevel + 1);
+    bLines += cleared;
+    bLevel = bLines / 10;
+  }
+  blkSpawn(now);
+}
+
+void blocksStep(unsigned long now, int b) {
+  if (b < 0) { menuBack(); return; }                         // CH6 "-" = выход в любой момент
+  if (bSt != BS_PLAY) {
+    if (b > 0) blkBegin(now);
+    return;
+  }
+  // движение влево/вправо: сразу, потом автоповтор
+  int mv = valBase(BLK_MOVE_CH) * BLK_MOVE_SIGN;
+  int dir = (mv >= NAV_ON) ? 1 : (mv <= -NAV_ON) ? -1 : 0;
+  if (dir == 0) bHoldDir = 0;
+  else if (dir != bHoldDir) {
+    bHoldDir = dir; bMoveAt = now + 220UL;
+    if (blkFits(bPiece, bRot, bX + dir, bY)) bX += dir;
+  } else if ((long)(now - bMoveAt) >= 0) {
+    bMoveAt = now + 90UL;
+    if (blkFits(bPiece, bRot, bX + dir, bY)) bX += dir;
+  }
+  // поворот: вверх по CH3 (один раз на отклонение), вниз по CH3 = ускорение
+  int lev = valBase(MENU_NAV_CH) * BLK_ROT_SIGN;
+  bool up = lev >= NAV_ON, down = lev <= -NAV_ON;
+  if (up && !bRotPrev) {
+    int nr = (bRot + 1) & 3;
+    static const int8_t kick[3] = { 0, -1, 1 };
+    for (int k = 0; k < 3; k++) if (blkFits(bPiece, nr, bX + kick[k], bY)) { bRot = nr; bX += kick[k]; break; }
+  }
+  bRotPrev = up;
+  // падение
+  unsigned long fm = down ? 50UL : blkFallMs();
+  if ((long)(now - bFallAt) >= 0) {
+    bFallAt = now + fm;
+    if (blkFits(bPiece, bRot, bX, bY + 1)) bY++;
+    else blkLock(now);
+  } else if (down && (long)(bFallAt - now) > 50L) bFallAt = now + 50UL;
+}
+
+static void blkDrawCell(int c, int r) {
+  display.fillRect(BLK_X0 + c * BLK_CELL, r * BLK_CELL, BLK_CELL - 1, BLK_CELL - 1, SH110X_WHITE);
+}
+
+void drawBlocks() {
+  startScreen();
+  display.drawRect(BLK_X0 - 2, 0, BLK_W * BLK_CELL + 3, 64, SH110X_WHITE);   // рамка поля: 1 пиксель слева и справа
+  for (int r = 0; r < BLK_H; r++)
+    for (int c = 0; c < BLK_W; c++)
+      if ((bField[r] >> c) & 1) blkDrawCell(c, r);
+  if (bSt == BS_PLAY) {
+    int n = BLK_N[(int)bPiece];
+    for (int r = 0; r < n; r++)
+      for (int c = 0; c < n; c++)
+        if (blkCell(bPiece, bRot, r, c) && bY + r >= 0) blkDrawCell(bX + c, bY + r);
+  }
+  const int px = 52;
+  display.setCursor(px, 0);   display.print("SCORE");
+  display.setCursor(px, 9);   display.printf("%lu", (unsigned long)bScore);
+  display.setCursor(px, 19);  display.printf("LVL %u", (unsigned)bLevel);
+  display.setCursor(px, 28);  display.printf("LN %u", (unsigned)bLines);
+  display.setCursor(px, 38);  display.printf("HI %u", (unsigned)bHi);
+  if (bSt == BS_PLAY) {
+    display.setCursor(px, 48);  display.print("NEXT");
+    int n = BLK_N[(int)bNext];
+    for (int r = 0; r < n; r++)
+      for (int c = 0; c < n; c++)
+        if (blkCell(bNext, 0, r, c)) display.fillRect(px + 30 + c * 3, 46 + r * 3, 2, 2, SH110X_WHITE);
+  } else {
+    display.setCursor(px, 48);
+    display.print(bSt == BS_READY ? "BLOCKS" : "GAME OVER");
+    display.setCursor(px, 56);  display.printf("%d+go %d-exit", MENU_ENTER_CH + 1, MENU_ENTER_CH + 1);
+  }
+  oledCommit();
+}
+
 void hintLine(const char* what);
 void drawGh() {
   startScreen();
@@ -4907,6 +5267,7 @@ void drawMenu() {
   display.setCursor(0, 0);
   switch (menuScr) {
     case MS_MAIN:    display.print("MENU"); break;
+    case MS_GAMES:   display.print("GAMES"); break;
     case MS_TX:      display.print("TRANSMITTER"); break;
     case MS_CAL:     display.print("CALIBRATE"); break;
     case MS_CHLIST:  display.print("CHANNEL SETUP"); break;
@@ -4937,20 +5298,11 @@ void drawMenu() {
     case MS_NETPICK: display.print("SELECT NETWORK"); break;
     case MS_RX:      display.print("RECEIVER"); break;
     case MS_RXWIFIM: display.print("RECEIVER WI-FI"); break;
-    case MS_RXCH: {
-      static const char* tt[] = { "CURRENT LIMITS", "START DUTY", "MAX DUTY", "RAMPS", "CHANNELS ON/OFF" };
-      static const char* ti[] = { "CURRENT LIMITS", "START CURRENT", "MAX CURRENT", "RAMPS", "CHANNELS ON/OFF" };
-      if (rxTopic == RT_DUTY2)      display.print("START DUTY");
-      else if (rxTopic == RT_MAXD2) display.print("MAX DUTY");
-      else display.print((rxCurMode() ? ti : tt)[rxTopic < 5 ? rxTopic : 0]);
+    case MS_RXCH:
+      if (rxAll) display.printf("ALL CHANNELS %s", rxCurMode() ? "CURRENT" : "PWM");
+      else       display.printf("CHANNEL %d %s", rxCh + 1, rxCurMode() ? "CURRENT" : "PWM");
       break;
-    }
-    case MS_RXDIR: {
-      static const char* dt[] = { "LIMIT", "DUTY", "MAX DUTY", "RAMPS" };
-      static const char* di[] = { "LIMIT", "START I", "MAX I", "RAMPS" };
-      display.printf("CH%d %s", rxCh + 1, rxTopic == RT_DUTY2 ? "DUTY" : rxTopic == RT_MAXD2 ? "MAX DUTY" : (rxCurMode() ? di : dt)[rxTopic < 4 ? rxTopic : 0]);
-      break;
-    }
+    case MS_RXBULK:  display.print(bulk.kind == 2 ? "COPY TO ALL" : "WRITING TO RX"); break;
     case MS_RXGLOB:  display.print("RX GLOBAL"); break;
     default: break;
   }
@@ -5086,7 +5438,8 @@ void drawRxEdit() {
   const RxParamDef &d = RXP[rxParam];
   char t[28], v[14], w[14];
   startScreen();
-  if (d.scope == PS_SOL)       snprintf(t, sizeof(t), "CH%d %s %s", rxCh + 1, rxDir ? "RET" : "EXT", d.name);
+  if (rxEditAllF)              snprintf(t, sizeof(t), "ALL CH %s", d.name);
+  else if (d.scope == PS_SOL)  snprintf(t, sizeof(t), "CH%d %s %s", rxCh + 1, rxDir ? "RET" : "EXT", d.name);
   else if (d.scope == PS_CH)   snprintf(t, sizeof(t), "CH%d %s", rxCh + 1, d.name);
   else                         snprintf(t, sizeof(t), "%s", d.name);
   display.setCursor(0, 0);   display.print(t);
@@ -5099,6 +5452,7 @@ void drawRxEdit() {
   display.setCursor(0, 40);
   if (rxLeverParam(rxParam)) {
     if (!leverArmed) display.printf("Center lever CH%d!", TEST_LEVER_CH + 1);
+    else if (rxEditAllF) display.printf("Test CH%d %c %+d", rxCh + 1, rxDir ? 'R' : 'E', ctl[rxCh]);
     else             display.printf("Lever CH%d: %+d", TEST_LEVER_CH + 1, ctl[rxCh]);
   } else if (rxParam == RXP_PWR && rxCur > 14) {
     display.print("check local limits");
@@ -5108,6 +5462,22 @@ void drawRxEdit() {
     display.print("PWM=open, CURRENT=PI");
   }
   hintLine("%d:+/- %d:ok/cancel");
+  drawBattery();
+  oledCommit();
+}
+
+void hintLine(const char* what);
+void drawRxBulk() {
+  startScreen();
+  display.setCursor(0, 0);   display.print(bulk.kind == 2 ? "COPY TO ALL" : "WRITING TO RX");
+  int done = bulk.pos - hlQn - (hlCurOn ? 1 : 0);
+  if (done < 0) done = 0;
+  display.setCursor(0, 16);  display.printf("%d / %d", done, (int)bulk.n);
+  int w = bulk.n ? (done * 120) / bulk.n : 0;
+  display.drawRect(0, 30, 124, 10, SH110X_WHITE);
+  display.fillRect(2, 32, w, 6, SH110X_WHITE);
+  display.setCursor(0, 44);  display.print("Do not turn off");
+  hintLine("%d:- stop");
   drawBattery();
   oledCommit();
 }
@@ -5358,6 +5728,12 @@ void drawConfirm() {
       display.setCursor(0, 14);  display.print("All saved networks");
       display.setCursor(0, 24);  display.print("are erased.");
       break;
+    case CA_COPYALL:
+      display.setCursor(0, 0);   display.printf("COPY CH%d TO ALL?", rxCopySrc + 1);
+      display.setCursor(0, 14);  display.print("All settings of this");
+      display.setCursor(0, 24);  display.print("channel go to the");
+      display.setCursor(0, 34);  display.print("other 7. Enable kept.");
+      break;
     case CA_FR_RX:
       display.setCursor(0, 0);   display.print("RESET RECEIVER?");
       display.setCursor(0, 14);  display.print("Receiver settings");
@@ -5510,6 +5886,7 @@ void drawScreen() {
         case MS_BATEDIT: drawBatEdit(); break;
         case MS_TEST:    drawTest(); break;
         case MS_RXEDIT:  drawRxEdit(); break;
+        case MS_RXBULK:  drawRxBulk(); break;
         case MS_RXSTAT:  drawRxStat(); break;
         case MS_RXWIFI:  drawRxWifi(); break;
         case MS_DBGDESC: drawDbgDesc(); break;
@@ -5518,6 +5895,7 @@ void drawScreen() {
         case MS_CONFIRM: drawConfirm(); break;
         case MS_TEXTIN:  drawText(); break;
         case MS_GAME:    drawGame(); break;
+        case MS_BLOCKS:  drawBlocks(); break;
         case MS_BINDRUN: drawBindRun(); break;
         case MS_BINDID:  drawBindId(); break;
         case MS_TXPWR:   drawTxPwr(); break;
@@ -5572,6 +5950,7 @@ void stepLogic(unsigned long now) {
       if (menuScr == MS_BINDRUN) bindTick(now);
       if (menuScr == MS_RXWIFI) rxWifiTick(now);
       if (menuScr == MS_NETPICK) netPickTick(now);
+      rxBulkTick(now);
       navStep(now);
       break;
     case ST_CAL_C:   calCenterTick(now); break;
