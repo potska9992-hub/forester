@@ -134,7 +134,7 @@
 
 // ============ ВЕРСИЯ ПРОШИВКИ ============
 #define FW_VERSION      "1.3"
-#define PBAR_W          108             // ширина полосы загрузки (значок батареи справа)
+#define PBAR_W          124             // ширина полосы загрузки
 #define GH_REPO         "potska9992-hub/forester"   // репозиторий с готовыми прошивками
 #define GH_TAG          "pult-latest"               // релиз с последней прошивкой пульта
 #define NET_MAX         3           // сохранённых Wi-Fi сетей
@@ -1106,7 +1106,7 @@ void batTick(unsigned long now) {
   batInit = true;
 }
 
-void drawBattery() {
+void drawBatteryBig() {
   const int battW = 10, battH = 30, nubW = 4, nubH = 3;
   int battX = SCREEN_W - 12;
   int battY = SCREEN_H - battH - nubH - 10;
@@ -1132,6 +1132,27 @@ void drawBattery() {
   display.setCursor(battX + battW - w, battY + nubH + battH + 2);
   display.print(s);
 }
+
+// Маленький значок в правом верхнем углу (строка заголовка): меню, правка, Wi-Fi, калибровка.
+// Не занимает ширину под заголовком, поэтому весь экран ниже строки заголовка свободен (21 символ в строке).
+void drawBatteryMini() {
+  const int bx = SCREEN_W - 18, by = 0;                 // корпус 15x7, носик 2x3 справа
+  bool show = !(batLevel == 2 && ((millis() / 500) % 2 == 1));   // критический: значок мигает
+  if (!show) return;
+  display.drawRect(bx, by, 15, 7, SH110X_WHITE);
+  display.fillRect(bx + 15, by + 2, 2, 3, SH110X_WHITE);
+  if (batUsb) {                                         // от USB: молния вместо уровня
+    display.drawLine(bx + 8, by + 1, bx + 5, by + 3, SH110X_WHITE);
+    display.drawLine(bx + 5, by + 3, bx + 9, by + 3, SH110X_WHITE);
+    display.drawLine(bx + 9, by + 3, bx + 6, by + 5, SH110X_WHITE);
+  } else {
+    int fillW = (int)(11 * (vbatPct / 100.0f) + 0.5f);
+    if (fillW < 1 && vbatPct > 0) fillW = 1;
+    display.fillRect(bx + 2, by + 2, fillW, 3, SH110X_WHITE);
+  }
+}
+
+void drawBattery() { drawBatteryMini(); }
 
 // Нижняя строка: подсказка. Если батарея низкая, раз в секунду вместо подсказки
 // показывается предупреждение. Короткие сообщения (toast) имеют приоритет.
@@ -2301,7 +2322,7 @@ const char* const DESC_LOG[] = {
   "LOG", "Last lines of the", "serial log, newest", "at the bottom.", "Same text as on the", "USB serial monitor." };
 const char* const DESC_LIM[] = {
   "LIMITS / NOW / OVL", "One row per channel", "channel, then A", "side, then B side.", "Each side has 3", "numbers, in 0.1 A.", "",
-  "Lim = current limit", "Now = pulse current", "Ovl = last overload", "from the log", "-- = no data", "",
+  "Lim = current limit", "Now = pulse current", "Ovl = overload", "from the log", "-- = no data", "",
   "Example row:", "3 30 00 -- 30 31 52", "= CH3. A: lim 3.0,", "now 0, no overload.", "B: lim 3.0, now 3.1", "overload 5.2 A." };
 struct DescRef { const char* const* lines; int n; };
 const DescRef DESC[NUM_DP] = {
@@ -4517,7 +4538,7 @@ void drawRun1() {
   if (rxLinked() && !hlSyncBusy && !(simMode == SIM_RADIO && tel.kill)) drawTick(92, 42, 9); else drawCross(92, 42, 9);
 
   drawHintText("hold MENU = menu", 56);
-  drawBattery();
+  drawBatteryBig();
   oledCommit();
 }
 
@@ -4538,7 +4559,7 @@ void drawRun2() {
     printChan(r + 4);
   }
   drawHintText("hold MENU = menu", 56);
-  drawBattery();
+  drawBatteryBig();
   oledCommit();
 }
 
@@ -4568,7 +4589,7 @@ void drawRxChannels() {
     }
   }
   drawHintText("!Ovl L=Lim O=Open", 56);
-  drawBattery();
+  drawBatteryBig();
   oledCommit();
 }
 
@@ -4606,7 +4627,7 @@ void drawLinkScreen() {
   if (telValid) display.printf("ID %04X TX%d RX%d", (unsigned)(bindId & 0xFFFF), txPower, (int)rxQuery(0, 0, RXP_PWR));
   else          display.printf("TX%ddBm", txPower);
   drawHintText("MENU: next screen", 56);
-  drawBattery();
+  drawBatteryBig();
   oledCommit();
 }
 
@@ -4631,7 +4652,7 @@ void drawPowerScreen() {
   else if (!tel.kill)  display.print("Kill: no");
   else                 display.printf("Kill: %s", reasons[tel.reason & 3]);
   drawHintText("MENU: next screen", 56);
-  drawBattery();
+  drawBatteryBig();
   oledCommit();
 }
 
@@ -4648,7 +4669,7 @@ void drawLogScreen() {
     display.print(t);
   }
   drawHintText("MENU: next screen", 56);
-  drawBattery();
+  drawBatteryBig();
   oledCommit();
 }
 
@@ -5395,7 +5416,7 @@ void drawMenu() {
     case MS_EVLIST:  display.print("ALERT EVENTS"); break;
     case MS_EVEDIT:
       display.print(EV_NAME[evSel]);
-      if (evSel == EV_RXALARM || evSel == EV_NOLINK) display.print(" (fixed)");
+      if (evSel == EV_RXALARM || evSel == EV_NOLINK) display.print(" [ON]");
       break;
     case MS_PRESET:  display.printf("PRESET: %s", presetName()); break;
     case MS_SCREENS: display.print("SCREENS (*=start)"); break;
@@ -5413,7 +5434,7 @@ void drawMenu() {
     case MS_RX:      display.print("RECEIVER"); break;
     case MS_RXWIFIM: display.print("RECEIVER WI-FI"); break;
     case MS_RXCH:
-      if (rxAll) display.printf("ALL CHANNELS %s", rxCurMode() ? "CURRENT" : "PWM");
+      if (rxAll) display.printf("ALL CH %s", rxCurMode() ? "CURRENT" : "PWM");
       else       display.printf("CHANNEL %d %s", rxCh + 1, rxCurMode() ? "CURRENT" : "PWM");
       break;
     case MS_RXBULK:  display.print(bulk.kind == 2 ? "COPY TO ALL" : "WRITING TO RX"); break;
@@ -5429,7 +5450,7 @@ void drawMenu() {
     menuLabel(idx, lab, sizeof(lab));
     bool inactive = !rxLinked() && ((menuScr == MS_MAIN && idx == 1) || (menuScr == MS_POWER && idx == 1));   // без связи
     if (idx == sel) {
-      display.fillRect(0, y - 1, 112, 10, SH110X_WHITE);
+      display.fillRect(0, y - 1, SCREEN_W, 10, SH110X_WHITE);
       display.setTextColor(SH110X_BLACK);
     } else {
       display.setTextColor(SH110X_WHITE);
@@ -5778,7 +5799,7 @@ void drawText() {
   int from = txtLen > 20 ? txtLen - 20 : 0;
   snprintf(line, sizeof(line), "%s_", txtBuf + from);
   display.setCursor(0, 14);  display.print(line);
-  display.setCursor(104, 0); display.printf("%d", txtLen);
+  display.setCursor(90, 0); display.printf("%d", txtLen);
   // выбранный символ крупно, соседние мелко
   const int total = TXT_N + 2;
   for (int k = -2; k <= 2; k++) {
