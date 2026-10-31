@@ -210,7 +210,7 @@ enum MenuScr {
   MS_PIN, MS_FRTARGET, MS_CONFIRM,
   MS_RX, MS_RXCH, MS_RXDIR, MS_RXGLOB, MS_RXEDIT, MS_RXSTAT, MS_RXWIFI,
   MS_NETS, MS_NETPICK, MS_TEXTIN, MS_WIFI, MS_NETACT, MS_RXWIFIM, MS_GAME,
-  MS_GAMES, MS_BLOCKS, MS_RXBULK, MS_GCTRL, MS_GSUB
+  MS_GAMES, MS_BLOCKS, MS_RXBULK, MS_GCTRL, MS_GSUB, MS_GLEARN
 };
 enum ChItem { CI_TYPE, CI_REV, CI_EN, CI_EXPO, CI_MAX, CI_LED, CI_BACK };
 enum EvItem { EI_EN, EI_COLOR, EI_PAT, EI_INT, EI_WHERE, EI_SCR, EI_FIXED, EI_BACK };
@@ -926,11 +926,18 @@ char rxWifiSsid[16] = "";
 void wifiBegin();
 void wifiStop(const char* why);
 void rxWifiBegin(int mode);
-struct GameCtl { uint8_t ch; bool rev; };
 uint8_t gSub = 0;                                            // выбранная игра в меню: 0 Dino, 1 Blocks
-GameCtl gCtl[3] = { {2, false}, {1, false}, {2, false} };   // Dino прыжок, Blocks движение, Blocks поворот/падение (только для игр)
+// Привязка действия игры к рычагу: канал + сторона отклонения (запоминается отклонением рычага; только для игр)
+enum GameAct { GA_JUMP, GA_DUCK, GA_LEFT, GA_RIGHT, GA_ROT, GA_DROP, GA_N };
+struct GameBind { int8_t ch; int8_t dir; };
+GameBind gBind[GA_N];
+int gLearnAct = 0, gLearnPhase = 0; unsigned long gLearnT = 0;
+void gameBindDefaults(int from, int to);
+bool gameBindOn(int a);
 void gameCtlLoad();
 void gameCtlSave();
+void gameLearnStep(unsigned long now, int b);
+void drawGameLearn();
 void gameEnter();
 void blocksEnter();
 void blocksStep(unsigned long now, int b);
@@ -1933,7 +1940,7 @@ int menuCount() {
     case MS_MAIN:    return 4;
     case MS_GAMES:   return 3;
     case MS_GSUB:    return 3;
-    case MS_GCTRL:   return gSub == 0 ? 3 : 5;
+    case MS_GCTRL:   return gSub == 0 ? 4 : 6;
     case MS_TX:      return TX_COUNT;
     case MS_CAL:     return 4;
     case MS_CHLIST:  return NUM_CH + 1;
@@ -2419,16 +2426,14 @@ void menuLabel(int i, char* b, size_t n) {
     case MS_MAIN: snprintf(b, n, "%s", mainL[i]); break;
     case MS_GAMES: snprintf(b, n, "%s", i == 0 ? "Dino" : i == 1 ? "Blocks" : i == 2 ? "Controls" : "Back"); break;
     case MS_GSUB:  snprintf(b, n, "%s", i == 0 ? "Play" : i == 1 ? "Controls" : "Back"); break;
-    case MS_GCTRL:
-      if (i == (gSub == 0 ? 2 : 4)) { snprintf(b, n, "Back"); break; }
-      if (gSub == 0) { if (i == 0) snprintf(b, n, "Jump  CH%d", gCtl[0].ch + 1); else snprintf(b, n, "Reverse  %s", gCtl[0].rev ? "ON" : "off"); }
-      else switch (i) {
-        case 0: snprintf(b, n, "Move  CH%d", gCtl[1].ch + 1); break;
-        case 1: snprintf(b, n, "Move rev  %s", gCtl[1].rev ? "ON" : "off"); break;
-        case 2: snprintf(b, n, "Rotate  CH%d", gCtl[2].ch + 1); break;
-        default: snprintf(b, n, "Rotate rev  %s", gCtl[2].rev ? "ON" : "off"); break;
-      }
-      break;
+    case MS_GCTRL: {
+      static const char* an[GA_N] = { "Jump", "Duck", "Left", "Right", "Rotate", "Drop" };
+      int cnt = gSub == 0 ? 2 : 4;
+      if (i == cnt) { snprintf(b, n, "Reset default"); break; }
+      if (i == cnt + 1) { snprintf(b, n, "Back"); break; }
+      int act = (gSub == 0 ? 0 : 2) + i;
+      snprintf(b, n, "%s  CH%d %c", an[act], gBind[act].ch + 1, gBind[act].dir > 0 ? '+' : '-');
+      break; }
     case MS_RXWIFIM: { static const char* rwL[] = { "Phone: Update/Test", "GitHub update", "Back" }; snprintf(b, n, "%s", rwL[i < 3 ? i : 2]); break; }
     case MS_TX:
       switch (i) {
@@ -2859,12 +2864,12 @@ void menuSelect(int i) {
       else if (i == 1) gotoScr(MS_GCTRL, 0);
       else gotoScr(MS_GAMES, idxGames);
       break;
-    case MS_GCTRL:
-      if (i == (gSub == 0 ? 2 : 4)) { gotoScr(MS_GSUB, 1); break; }
-      { GameCtl& g = gCtl[gSub == 0 ? 0 : 1 + i / 2];
-        if (gSub == 0 ? (i == 1) : (i & 1)) g.rev = !g.rev; else g.ch = (g.ch + 1) & 7;
-        gameCtlSave(); }
-      break;
+    case MS_GCTRL: {
+      int cnt = gSub == 0 ? 2 : 4;
+      if (i == cnt)          { if (gSub == 0) gameBindDefaults(GA_JUMP, GA_DUCK); else gameBindDefaults(GA_LEFT, GA_DROP); gameCtlSave(); toast("Default"); }
+      else if (i == cnt + 1) gotoScr(MS_GSUB, 1);
+      else { gLearnAct = (gSub == 0 ? 0 : 2) + i; gLearnPhase = 0; gLearnT = millis(); gotoScr(MS_GLEARN, 0); }
+      break; }
     case MS_TX:
       idxTx = i;
       switch (i) {
@@ -3211,6 +3216,7 @@ void menuBack() {
     case MS_GAMES:    gotoScr(MS_MAIN, idxMain); break;
     case MS_GSUB:     gotoScr(MS_GAMES, idxGames); break;
     case MS_GCTRL:    gotoScr(MS_GSUB, 1); break;
+    case MS_GLEARN:   gotoScr(MS_GCTRL, 0); break;
   }
 }
 
@@ -3311,6 +3317,9 @@ void navStep(unsigned long now) {
       return;
     case MS_RXBULK:
       if (b < 0) bulkAbort();
+      return;
+    case MS_GLEARN:
+      gameLearnStep(now, b);
       return;
     case MS_BINDRUN:
       if (b < 0) menuBack();
@@ -4860,22 +4869,72 @@ uint16_t gScore = 0, gHi = 0;
 unsigned long gLast = 0, gT0 = 0;
 uint32_t gRnd = 12345;
 
+void gameBindDefaults(int from, int to) {
+  static const GameBind def[GA_N] = { {2, GAME_JUMP_SIGN}, {2, -GAME_JUMP_SIGN}, {1, -1}, {1, 1}, {2, -1}, {2, 1} };
+  for (int a = from; a <= to; a++) gBind[a] = def[a];
+}
 void gameCtlLoad() {
+  gameBindDefaults(0, GA_N - 1);
   prefs.begin("game", true);
-  for (int i = 0; i < 3; i++) {
-    char k[4] = { 'g', 'c', (char)('0' + i), 0 };
-    uint8_t v = prefs.getUChar(k, (uint8_t)(gCtl[i].ch | (gCtl[i].rev ? 8 : 0)));
-    gCtl[i].ch = v & 7; gCtl[i].rev = (v & 8) != 0;
+  for (int a = 0; a < GA_N; a++) {
+    char k[4] = { 'g', 'b', (char)('0' + a), 0 };
+    uint8_t v = prefs.getUChar(k, 0xFF);
+    if (v == 0xFF) continue;
+    int ch = v & 7;
+    if (ch == MENU_ENTER_CH) continue;
+    gBind[a].ch = ch; gBind[a].dir = (v & 8) ? -1 : 1;
   }
   prefs.end();
 }
 void gameCtlSave() {
   prefs.begin("game", false);
-  for (int i = 0; i < 3; i++) {
-    char k[4] = { 'g', 'c', (char)('0' + i), 0 };
-    prefs.putUChar(k, (uint8_t)(gCtl[i].ch | (gCtl[i].rev ? 8 : 0)));
+  for (int a = 0; a < GA_N; a++) {
+    char k[4] = { 'g', 'b', (char)('0' + a), 0 };
+    prefs.putUChar(k, (uint8_t)(gBind[a].ch | (gBind[a].dir < 0 ? 8 : 0)));
   }
   prefs.end();
+}
+// действие нажато: рычаг отклонён в запомненную сторону
+bool gameBindOn(int a) { return valBase(gBind[a].ch) * gBind[a].dir >= NAV_ON; }
+
+// назначение: сначала все рычаги (кроме CH6) в центр, потом отклонить нужный; 5 с без движения = отмена
+static int gameLevFound(int8_t* dir) {
+  for (int c = 0; c < NUM_CH; c++) {
+    if (c == MENU_ENTER_CH) continue;
+    int v = valBase(c);
+    if (v >= NAV_ON)  { *dir = 1;  return c; }
+    if (v <= -NAV_ON) { *dir = -1; return c; }
+  }
+  return -1;
+}
+void gameLearnStep(unsigned long now, int b) {
+  if (b < 0) { menuBack(); return; }
+  int8_t d = 0;
+  int c = gameLevFound(&d);
+  if (gLearnPhase == 0) {
+    if (c < 0) { gLearnPhase = 1; gLearnT = now; }
+    return;
+  }
+  if (c >= 0) {
+    gBind[gLearnAct].ch = c; gBind[gLearnAct].dir = d;
+    gameCtlSave();
+    toast("Saved");
+    gotoScr(MS_GCTRL, 0);
+    return;
+  }
+  if ((long)(now - gLearnT) >= 5000L) { toast("Cancelled"); gotoScr(MS_GCTRL, 0); }
+}
+void drawGameLearn() {
+  static const char* an[GA_N] = { "JUMP", "DUCK", "LEFT", "RIGHT", "ROTATE", "DROP" };
+  startScreen();
+  display.setCursor(0, 0);  display.printf("ASSIGN %s", an[gLearnAct]);
+  display.setCursor(0, 20); display.print(gLearnPhase == 0 ? "Release levers" : "Move a lever");
+  if (gLearnPhase == 1) {
+    display.setCursor(0, 32); display.print("in the direction");
+    display.setCursor(0, 41); display.printf("you want (%lus)", (unsigned long)((5000L - (long)(millis() - gLearnT) + 999) / 1000));
+  }
+  display.setCursor(0, 56); display.printf("CH%d- cancel", MENU_ENTER_CH + 1);
+  oledCommit();
 }
 bool gameOn() { return state == ST_MENU && (menuScr == MS_GAME || menuScr == MS_BLOCKS); }
 
@@ -4932,8 +4991,7 @@ void gameStep(unsigned long now, int b) {
   if (el > 100) el = 100;
   gLast = now;
   float dt = el / 1000.0f;
-  int lev = valBase(gCtl[0].ch) * GAME_JUMP_SIGN * (gCtl[0].rev ? -1 : 1);           // > 0 вверх
-  bool up = lev >= NAV_ON, down = lev <= -NAV_ON;
+  bool up = gameBindOn(GA_JUMP), down = gameBindOn(GA_DUCK);
   bool air = gH > 0.01f || gV > 0.01f;
   if (up && !air) { gV = GAME_JUMP_V; air = true; }
   gDuck = down && !air;
@@ -5044,9 +5102,6 @@ void drawGame() {
 #define BLK_H           16
 #define BLK_CELL        4
 #define BLK_X0          6
-#define BLK_MOVE_CH     1          // CH2: влево/вправо
-#define BLK_MOVE_SIGN   (1)        // поменять на -1, если направление наоборот
-#define BLK_ROT_SIGN    (-1)       // как у Dino: вверх по CH3 = поворот
 // фигуры: I O T S Z J L, базовая ориентация в матрице n x n (строки сверху вниз, бит 0 слева)
 static const uint8_t BLK_SHAPE[7][4] = {
   { 0b0000, 0b1111, 0b0000, 0b0000 },   // I (n=4)
@@ -5181,8 +5236,8 @@ void blocksStep(unsigned long now, int b) {
     return;
   }
   // движение влево/вправо: сразу, потом автоповтор
-  int mv = valBase(gCtl[1].ch) * BLK_MOVE_SIGN * (gCtl[1].rev ? -1 : 1);
-  int dir = (mv >= NAV_ON) ? 1 : (mv <= -NAV_ON) ? -1 : 0;
+  bool gl = gameBindOn(GA_LEFT), gr = gameBindOn(GA_RIGHT);
+  int dir = (gr && !gl) ? 1 : (gl && !gr) ? -1 : 0;
   if (dir == 0) bHoldDir = 0;
   else if (dir != bHoldDir) {
     bHoldDir = dir; bMoveAt = now + 220UL;
@@ -5192,8 +5247,7 @@ void blocksStep(unsigned long now, int b) {
     if (blkFits(bPiece, bRot, bX + dir, bY)) bX += dir;
   }
   // поворот: вверх по CH3 (один раз на отклонение), вниз по CH3 = ускорение
-  int lev = valBase(gCtl[2].ch) * BLK_ROT_SIGN * (gCtl[2].rev ? -1 : 1);
-  bool up = lev >= NAV_ON, down = lev <= -NAV_ON;
+  bool up = gameBindOn(GA_ROT), down = gameBindOn(GA_DROP);
   if (up && !bRotPrev) {
     int nr = (bRot + 1) & 3;
     static const int8_t kick[3] = { 0, -1, 1 };
@@ -5319,6 +5373,7 @@ void drawMenu() {
     case MS_GAMES:   display.print("GAMES"); break;
     case MS_GSUB:    display.print(gSub == 0 ? "DINO" : "BLOCKS"); break;
     case MS_GCTRL:   display.print(gSub == 0 ? "DINO CONTROLS" : "BLOCKS CONTROLS"); break;
+    case MS_GLEARN:  display.print("ASSIGN"); break;
     case MS_TX:      display.print("TRANSMITTER"); break;
     case MS_CAL:     display.print("CALIBRATE"); break;
     case MS_CHLIST:  display.print("CHANNEL SETUP"); break;
@@ -5938,6 +5993,7 @@ void drawScreen() {
         case MS_TEST:    drawTest(); break;
         case MS_RXEDIT:  drawRxEdit(); break;
         case MS_RXBULK:  drawRxBulk(); break;
+        case MS_GLEARN:  drawGameLearn(); break;
         case MS_RXSTAT:  drawRxStat(); break;
         case MS_RXWIFI:  drawRxWifi(); break;
         case MS_DBGDESC: drawDbgDesc(); break;
