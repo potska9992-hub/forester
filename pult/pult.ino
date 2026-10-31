@@ -210,7 +210,7 @@ enum MenuScr {
   MS_PIN, MS_FRTARGET, MS_CONFIRM,
   MS_RX, MS_RXCH, MS_RXDIR, MS_RXGLOB, MS_RXEDIT, MS_RXSTAT, MS_RXWIFI,
   MS_NETS, MS_NETPICK, MS_TEXTIN, MS_WIFI, MS_NETACT, MS_RXWIFIM, MS_GAME,
-  MS_GAMES, MS_BLOCKS, MS_RXBULK
+  MS_GAMES, MS_BLOCKS, MS_RXBULK, MS_GCTRL, MS_GSUB
 };
 enum ChItem { CI_TYPE, CI_REV, CI_EN, CI_EXPO, CI_MAX, CI_LED, CI_BACK };
 enum EvItem { EI_EN, EI_COLOR, EI_PAT, EI_INT, EI_WHERE, EI_SCR, EI_FIXED, EI_BACK };
@@ -926,6 +926,11 @@ char rxWifiSsid[16] = "";
 void wifiBegin();
 void wifiStop(const char* why);
 void rxWifiBegin(int mode);
+struct GameCtl { uint8_t ch; bool rev; };
+uint8_t gSub = 0;                                            // выбранная игра в меню: 0 Dino, 1 Blocks
+GameCtl gCtl[3] = { {2, false}, {1, false}, {2, false} };   // Dino прыжок, Blocks движение, Blocks поворот/падение (только для игр)
+void gameCtlLoad();
+void gameCtlSave();
 void gameEnter();
 void blocksEnter();
 void blocksStep(unsigned long now, int b);
@@ -1369,6 +1374,7 @@ int  hlErr = 0;
 uint8_t  hlSeq = 0, hlTag = 0, hlBindSeq = 0;
 unsigned long hlTxStart = 0, hlTxEnd = 0, hlNextTx = 0, hlLastReq = 0, hlLastRx = 0, hlWaitUntil = 0, hlLastNonZero = 0, hlRateAt = 0;
 unsigned long hlReqAt = 0, hlBootAt = 0;
+bool hlWasUp = false;                          // связь с приёмником была с момента включения: только после этого её потеря = авария NO LINK
 uint32_t hlRateCnt = 0;
 int  hlRtt = 0;
 uint8_t hlWait = 0;                    // 0 нет, 1 ждём телеметрию, 2 ждём подтверждение, 3 ждём BATCH
@@ -1926,6 +1932,8 @@ int menuCount() {
   switch (menuScr) {
     case MS_MAIN:    return 4;
     case MS_GAMES:   return 3;
+    case MS_GSUB:    return 3;
+    case MS_GCTRL:   return gSub == 0 ? 3 : 5;
     case MS_TX:      return TX_COUNT;
     case MS_CAL:     return 4;
     case MS_CHLIST:  return NUM_CH + 1;
@@ -2409,7 +2417,18 @@ void menuLabel(int i, char* b, size_t n) {
   static const char* dbgL[]  = { "Radio", "Telemetry", "Limits", "RAW ADC", "System", "Log", "Back" };
   switch (menuScr) {
     case MS_MAIN: snprintf(b, n, "%s", mainL[i]); break;
-    case MS_GAMES: snprintf(b, n, "%s", i == 0 ? "Dino" : i == 1 ? "Blocks" : "Back"); break;
+    case MS_GAMES: snprintf(b, n, "%s", i == 0 ? "Dino" : i == 1 ? "Blocks" : i == 2 ? "Controls" : "Back"); break;
+    case MS_GSUB:  snprintf(b, n, "%s", i == 0 ? "Play" : i == 1 ? "Controls" : "Back"); break;
+    case MS_GCTRL:
+      if (i == (gSub == 0 ? 2 : 4)) { snprintf(b, n, "Back"); break; }
+      if (gSub == 0) { if (i == 0) snprintf(b, n, "Jump  CH%d", gCtl[0].ch + 1); else snprintf(b, n, "Reverse  %s", gCtl[0].rev ? "ON" : "off"); }
+      else switch (i) {
+        case 0: snprintf(b, n, "Move  CH%d", gCtl[1].ch + 1); break;
+        case 1: snprintf(b, n, "Move rev  %s", gCtl[1].rev ? "ON" : "off"); break;
+        case 2: snprintf(b, n, "Rotate  CH%d", gCtl[2].ch + 1); break;
+        default: snprintf(b, n, "Rotate rev  %s", gCtl[2].rev ? "ON" : "off"); break;
+      }
+      break;
     case MS_RXWIFIM: { static const char* rwL[] = { "Phone: Update/Test", "GitHub update", "Back" }; snprintf(b, n, "%s", rwL[i < 3 ? i : 2]); break; }
     case MS_TX:
       switch (i) {
@@ -2832,9 +2851,19 @@ void menuSelect(int i) {
       break;
     case MS_GAMES:
       idxGames = i;
-      if (i == 0)      { gameEnter(); gotoScr(MS_GAME, 0); }
-      else if (i == 1) { blocksEnter(); gotoScr(MS_BLOCKS, 0); }
-      else             gotoScr(MS_MAIN, idxMain);
+      if (i < 2) { gSub = i; gotoScr(MS_GSUB, 0); }
+      else       gotoScr(MS_MAIN, idxMain);
+      break;
+    case MS_GSUB:
+      if (i == 0) { if (gSub == 0) { gameEnter(); gotoScr(MS_GAME, 0); } else { blocksEnter(); gotoScr(MS_BLOCKS, 0); } }
+      else if (i == 1) gotoScr(MS_GCTRL, 0);
+      else gotoScr(MS_GAMES, idxGames);
+      break;
+    case MS_GCTRL:
+      if (i == (gSub == 0 ? 2 : 4)) { gotoScr(MS_GSUB, 1); break; }
+      { GameCtl& g = gCtl[gSub == 0 ? 0 : 1 + i / 2];
+        if (gSub == 0 ? (i == 1) : (i & 1)) g.rev = !g.rev; else g.ch = (g.ch + 1) & 7;
+        gameCtlSave(); }
       break;
     case MS_TX:
       idxTx = i;
@@ -3177,9 +3206,11 @@ void menuBack() {
                       if (simMode == SIM_RADIO) hlCfgPut(HLO_CMD, HLC_WIFI_OFF, 0, 0, 0, false, 0, 0);
                       rxWifiSt = 0; gotoScr(MS_RXWIFIM, idxRxWifi); break;
     case MS_RXWIFIM:  gotoScr(MS_RX, idxRx); break;
-    case MS_GAME:     gotoScr(MS_GAMES, idxGames); break;
-    case MS_BLOCKS:   gotoScr(MS_GAMES, idxGames); break;
+    case MS_GAME:     gotoScr(MS_GSUB, 0); break;
+    case MS_BLOCKS:   gotoScr(MS_GSUB, 0); break;
     case MS_GAMES:    gotoScr(MS_MAIN, idxMain); break;
+    case MS_GSUB:     gotoScr(MS_GAMES, idxGames); break;
+    case MS_GCTRL:    gotoScr(MS_GSUB, 1); break;
   }
 }
 
@@ -4151,7 +4182,8 @@ uint8_t evChAct[NUM_EV];
 void collectEvents(unsigned long now) {
   for (int e = 0; e < NUM_EV; e++) { evAllAct[e] = false; evChAct[e] = 0; }
   evAllAct[EV_ESTOP]    = (state == ST_ESTOP);
-  evAllAct[EV_NOLINK]   = (simMode == SIM_LOST) || (simMode == SIM_RADIO && !hlUp && (now - hlBootAt) > 4000UL);
+  if (simMode == SIM_RADIO && hlUp) hlWasUp = true;
+  evAllAct[EV_NOLINK]   = (simMode == SIM_LOST) || (simMode == SIM_RADIO && hlWasUp && !hlUp && (now - hlBootAt) > 4000UL);
   evAllAct[EV_RESTORED] = (restoredAt != 0 && (now - restoredAt) < RESTORED_MS);
   evAllAct[EV_HEART]    = (simMode == SIM_LINK) || (simMode == SIM_RADIO && hlUp);
   evAllAct[EV_BATTTX]   = (batLevel >= 1);
@@ -4828,6 +4860,23 @@ uint16_t gScore = 0, gHi = 0;
 unsigned long gLast = 0, gT0 = 0;
 uint32_t gRnd = 12345;
 
+void gameCtlLoad() {
+  prefs.begin("game", true);
+  for (int i = 0; i < 3; i++) {
+    char k[4] = { 'g', 'c', (char)('0' + i), 0 };
+    uint8_t v = prefs.getUChar(k, (uint8_t)(gCtl[i].ch | (gCtl[i].rev ? 8 : 0)));
+    gCtl[i].ch = v & 7; gCtl[i].rev = (v & 8) != 0;
+  }
+  prefs.end();
+}
+void gameCtlSave() {
+  prefs.begin("game", false);
+  for (int i = 0; i < 3; i++) {
+    char k[4] = { 'g', 'c', (char)('0' + i), 0 };
+    prefs.putUChar(k, (uint8_t)(gCtl[i].ch | (gCtl[i].rev ? 8 : 0)));
+  }
+  prefs.end();
+}
 bool gameOn() { return state == ST_MENU && (menuScr == MS_GAME || menuScr == MS_BLOCKS); }
 
 static uint32_t gameRand(uint32_t n) { gRnd = gRnd * 1664525UL + 1013904223UL; return (gRnd >> 8) % n; }
@@ -4883,7 +4932,7 @@ void gameStep(unsigned long now, int b) {
   if (el > 100) el = 100;
   gLast = now;
   float dt = el / 1000.0f;
-  int lev = valBase(MENU_NAV_CH) * GAME_JUMP_SIGN;           // > 0 вверх
+  int lev = valBase(gCtl[0].ch) * GAME_JUMP_SIGN * (gCtl[0].rev ? -1 : 1);           // > 0 вверх
   bool up = lev >= NAV_ON, down = lev <= -NAV_ON;
   bool air = gH > 0.01f || gV > 0.01f;
   if (up && !air) { gV = GAME_JUMP_V; air = true; }
@@ -5132,7 +5181,7 @@ void blocksStep(unsigned long now, int b) {
     return;
   }
   // движение влево/вправо: сразу, потом автоповтор
-  int mv = valBase(BLK_MOVE_CH) * BLK_MOVE_SIGN;
+  int mv = valBase(gCtl[1].ch) * BLK_MOVE_SIGN * (gCtl[1].rev ? -1 : 1);
   int dir = (mv >= NAV_ON) ? 1 : (mv <= -NAV_ON) ? -1 : 0;
   if (dir == 0) bHoldDir = 0;
   else if (dir != bHoldDir) {
@@ -5143,7 +5192,7 @@ void blocksStep(unsigned long now, int b) {
     if (blkFits(bPiece, bRot, bX + dir, bY)) bX += dir;
   }
   // поворот: вверх по CH3 (один раз на отклонение), вниз по CH3 = ускорение
-  int lev = valBase(MENU_NAV_CH) * BLK_ROT_SIGN;
+  int lev = valBase(gCtl[2].ch) * BLK_ROT_SIGN * (gCtl[2].rev ? -1 : 1);
   bool up = lev >= NAV_ON, down = lev <= -NAV_ON;
   if (up && !bRotPrev) {
     int nr = (bRot + 1) & 3;
@@ -5268,6 +5317,8 @@ void drawMenu() {
   switch (menuScr) {
     case MS_MAIN:    display.print("MENU"); break;
     case MS_GAMES:   display.print("GAMES"); break;
+    case MS_GSUB:    display.print(gSub == 0 ? "DINO" : "BLOCKS"); break;
+    case MS_GCTRL:   display.print(gSub == 0 ? "DINO CONTROLS" : "BLOCKS CONTROLS"); break;
     case MS_TX:      display.print("TRANSMITTER"); break;
     case MS_CAL:     display.print("CALIBRATE"); break;
     case MS_CHLIST:  display.print("CHANNEL SETUP"); break;
@@ -6049,6 +6100,7 @@ void setup() {
   }
 
   loadConfig();
+  gameCtlLoad();
   netLoad();
   simInit();
   hlMirrorLoad();                              // копия настроек приёмника из памяти (до первой синхронизации только для просмотра)
