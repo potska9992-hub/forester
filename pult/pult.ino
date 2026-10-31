@@ -5579,9 +5579,9 @@ void drawTest() {
 
 // Живое значение с приёмника для проверяемого канала: реальный ШИМ и ток в импульсе из телеметрии (а не положение рычага)
 static void rxLiveLine() {
-  if (!rxLinked()) { display.print("Out: no data"); return; }
+  if (!rxLinked()) { display.print("Duty: no data"); return; }
   int p = tel.pwm[rxCh], c = tel.cur[rxCh];
-  display.printf("Out %+d%% %d.%dA", p, c / 10, c % 10);
+  display.printf("Duty %d%% I %d.%dA", abs(p), c / 10, c % 10);
 }
 
 void drawRxEdit() {
