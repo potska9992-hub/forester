@@ -46,8 +46,10 @@ jobs:
         id: cache
         uses: actions/cache/restore@v4
         with:
-          path: ~/.arduino15
-          key: arduino15-esp32-${{ env.CORE_VERSION }}
+          path: |
+            ~/.arduino15
+            ~/Arduino/libraries
+          key: arduino-${{ env.CORE_VERSION }}-${{ hashFiles(format('{0}/libs.txt', inputs.device)) }}
 
       - name: Install ESP32 core
         id: core
@@ -62,20 +64,29 @@ jobs:
           done
           exit 1
 
-      - name: Save ESP32 core cache
-        if: steps.core.outcome == 'success' && steps.cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.arduino15
-          key: arduino15-esp32-${{ env.CORE_VERSION }}
-
       - name: Install libraries
+        id: libs
         run: |
           while IFS= read -r lib; do
             [ -z "$lib" ] && continue
             case "$lib" in \#*) continue ;; esac
-            arduino-cli lib install --no-deps "$lib"
+            ok=0
+            for i in 1 2 3 4 5; do
+              if arduino-cli lib install --no-deps "$lib"; then ok=1; break; fi
+              echo "Library $lib: attempt $i failed, waiting 30 s"; sleep 30
+            done
+            [ "$ok" = 1 ] || exit 1
           done < "$DEV/libs.txt"
+
+      - name: Save core and libraries cache
+        if: steps.libs.outcome == 'success' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.arduino15
+            ~/Arduino/libraries
+          key: arduino-${{ env.CORE_VERSION }}-${{ hashFiles(format('{0}/libs.txt', inputs.device)) }}
+
 
       - name: Compile
         run: |
