@@ -42,10 +42,32 @@ jobs:
       - name: Setup arduino-cli
         uses: arduino/setup-arduino-cli@v2
 
+      - name: Restore ESP32 core cache
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.arduino15
+          key: arduino15-esp32-${{ env.CORE_VERSION }}
+
       - name: Install ESP32 core
+        id: core
         run: |
-          arduino-cli core update-index --additional-urls "$INDEX_URL"
-          arduino-cli core install "$CORE@$CORE_VERSION" --additional-urls "$INDEX_URL"
+          # the download servers sometimes answer 504; retry up to 8 times, packages already downloaded are kept
+          for i in 1 2 3 4 5 6 7 8; do
+            if arduino-cli core update-index --additional-urls "$INDEX_URL" && arduino-cli core install "$CORE@$CORE_VERSION" --additional-urls "$INDEX_URL"; then
+              exit 0
+            fi
+            echo "Attempt $i failed, waiting 60 s"
+            sleep 60
+          done
+          exit 1
+
+      - name: Save ESP32 core cache
+        if: steps.core.outcome == 'success' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.arduino15
+          key: arduino15-esp32-${{ env.CORE_VERSION }}
 
       - name: Install libraries
         run: |
