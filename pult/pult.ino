@@ -114,7 +114,7 @@
 #define GAME_FRAME_MS   50         // кадры игры Dino (20 к/с)
 #define LOG_PERIOD_MS   1000
 #define BOOT_MS         1500
-#define SPLASH_MS       3000       // заставка FORESTER перед Boot check: 2 с сборка из пикселей + 1 с готовая картинка
+#define SPLASH_MS       4000       // заставка FORESTER перед Boot check: 2 с сборка из пикселей + 2 с готовая картинка
 #define SPLASH_FLY_MS   800        // время полёта одного пикселя
 #define ALERT_MIN_MS    2000       // короткое событие на экране тревог держится не меньше
 #define ALERT_SLOT_MS   2000       // при нескольких событиях каждое показывается столько
@@ -5385,8 +5385,8 @@ void drawSplash(unsigned long el) {
   if (!splashReady) {
     startScreen();
     display.drawBitmap((SCREEN_W - LOGO_W) / 2, 10, LOGO_BMP, LOGO_W, LOGO_H, SH110X_WHITE);
-    display.setCursor((SCREEN_W - 6 * display.chars("FORESTRY EQUIPMENT")) / 2, 44);
-    display.print("FORESTRY EQUIPMENT");
+    display.setCursor((SCREEN_W - 6 * 18) / 2, 44);
+    display.printRaw("FORESTRY EQUIPMENT");            // заставка всегда на английском, в любом языке
     memcpy(splashTgt, display.getBuffer(), sizeof(splashTgt));
     splashReady = true;
   }
