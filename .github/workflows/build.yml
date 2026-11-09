@@ -42,12 +42,6 @@ jobs:
       - name: Setup arduino-cli
         uses: arduino/setup-arduino-cli@v2
 
-      - name: Cache ESP32 core
-        uses: actions/cache@v4
-        with:
-          path: ~/.arduino15
-          key: arduino15-esp32-${{ env.CORE_VERSION }}
-
       - name: Install ESP32 core
         run: |
           arduino-cli core update-index --additional-urls "$INDEX_URL"
