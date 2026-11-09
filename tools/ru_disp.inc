@@ -13,11 +13,13 @@ static const RuTr RU_TR[@NTAB@] = {
 struct RuIdx { uint16_t s, n; };
 static const RuIdx RU_IDX[128] = { @IDX@ };
 
-static inline bool ruIsLetter(char c) { c |= 0x20; return c >= 'a' && c <= 'z'; }
-static inline char ruLow(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; }
+// Вспомогательные функции собраны в структуру: в .ino свободная функция раньше типов сбила бы автогенерацию прототипов Arduino.
+struct RuUtil {
+  static inline bool isLetter(char c) { c |= 0x20; return c >= 'a' && c <= 'z'; }
+  static inline char low(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; }
 
 // copy a dictionary value: mode 0 as is, 1 all capitals, 2 first letter capital
-static char* ruPut(char* o, char* end, const char* s, uint8_t mode) {
+  static char* put(char* o, char* end, const char* s, uint8_t mode) {
   bool first = true;
   while (*s && o + 2 < end) {
     uint8_t c = (uint8_t)*s++;
@@ -39,7 +41,7 @@ static char* ruPut(char* o, char* end, const char* s, uint8_t mode) {
 }
 
 // English text -> Russian text (longest dictionary match at every word start)
-static size_t ruTranslate(const char* in, size_t n, char* out, size_t cap) {
+  static size_t translate(const char* in, size_t n, char* out, size_t cap) {
   size_t i = 0;
   char* o = out;
   char* end = out + cap - 1;
@@ -47,16 +49,16 @@ static size_t ruTranslate(const char* in, size_t n, char* out, size_t cap) {
     uint8_t ch = (uint8_t)in[i];
     int best = -1;
     size_t bestLen = 0;
-    if (ch < 128 && !(i > 0 && ruIsLetter(in[i - 1]))) {
-      const RuIdx& ix = RU_IDX[(uint8_t)ruLow((char)ch)];
+    if (ch < 128 && !(i > 0 && isLetter(in[i - 1]))) {
+      const RuIdx& ix = RU_IDX[(uint8_t)low((char)ch)];
       for (uint16_t k = 0; k < ix.n; k++) {
         const char* en = RU_TR[ix.s + k].en;
         size_t L = strlen(en);
         if (L <= bestLen || i + L > n) continue;
         size_t j = 0;
-        while (j < L && ruLow(in[i + j]) == en[j]) j++;
+        while (j < L && low(in[i + j]) == en[j]) j++;
         if (j < L) continue;
-        if (ruIsLetter(en[L - 1]) && i + L < n && ruIsLetter(in[i + L])) continue;   // only whole words
+        if (isLetter(en[L - 1]) && i + L < n && isLetter(in[i + L])) continue;   // only whole words
         best = ix.s + k; bestLen = L;
       }
     }
@@ -64,18 +66,19 @@ static size_t ruTranslate(const char* in, size_t n, char* out, size_t cap) {
     int up = 0, lo = 0; bool firstUp = false, got = false;
     for (size_t j = 0; j < bestLen; j++) {
       char c = in[i + j];
-      if (!ruIsLetter(c)) continue;
+      if (!isLetter(c)) continue;
       bool u = c >= 'A' && c <= 'Z';
       if (!got) { firstUp = u; got = true; }
       if (u) up++; else lo++;
     }
     uint8_t mode = (lo == 0 && up >= 2) ? 1 : (firstUp ? 2 : 0);
-    o = ruPut(o, end, RU_TR[best].ru, mode);
+    o = put(o, end, RU_TR[best].ru, mode);
     i += bestLen;
   }
   *o = 0;
   return (size_t)(o - out);
 }
+};
 
 class Disp : public Adafruit_SH1106G {
  public:
@@ -103,7 +106,7 @@ class Disp : public Adafruit_SH1106G {
   size_t write(const uint8_t* b, size_t n) override {
     if (lang == LANG_RU && !raw) {
       char t[160];
-      size_t m = ruTranslate((const char*)b, n, t, sizeof(t));
+      size_t m = RuUtil::translate((const char*)b, n, t, sizeof(t));
 #ifdef PULT_HARNESS
       Print::write((const uint8_t*)t, m);
 #else
@@ -117,7 +120,7 @@ class Disp : public Adafruit_SH1106G {
   int chars(const char* str) {
     char t[160];
     size_t n = strlen(str);
-    if (lang == LANG_RU && !raw) { n = ruTranslate(str, n, t, sizeof(t)); str = t; }
+    if (lang == LANG_RU && !raw) { n = RuUtil::translate(str, n, t, sizeof(t)); str = t; }
     int c = 0;
     for (size_t i = 0; i < n; i++) if (((uint8_t)str[i] & 0xC0) != 0x80) c++;
     return c;
