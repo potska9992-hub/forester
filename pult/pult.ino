@@ -114,7 +114,8 @@
 #define GAME_FRAME_MS   50         // кадры игры Dino (20 к/с)
 #define LOG_PERIOD_MS   1000
 #define BOOT_MS         1500
-#define SPLASH_MS       2000       // заставка FORESTER перед Boot check
+#define SPLASH_MS       3000       // заставка FORESTER перед Boot check: 2 с сборка из пикселей + 1 с готовая картинка
+#define SPLASH_FLY_MS   800        // время полёта одного пикселя
 #define ALERT_MIN_MS    2000       // короткое событие на экране тревог держится не меньше
 #define ALERT_SLOT_MS   2000       // при нескольких событиях каждое показывается столько
 #define WIFI_PASS       "88888888"      // пароль точки доступа (фиксированный)
@@ -5365,11 +5366,46 @@ static const uint8_t LOGO_BMP[] PROGMEM = {
   0x00, 0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xE0, 0x00,
 };
 
-void drawSplash() {
+// Заставка: готовая картинка рисуется один раз и запоминается, затем каждый её пиксель летит из своего
+// случайного места на своё место (с замедлением в конце). Пиксели стартуют не одновременно: логотип
+// в первую секунду, надпись чуть позже. К 2 с всё на месте, дальше картинка держится до SPLASH_MS.
+static uint8_t splashTgt[SCREEN_W * SCREEN_H / 8];
+static bool splashReady = false;
+
+static uint32_t splashHash(uint32_t x) {
+  x = x * 2654435761u + 0x9E3779B9u;
+  x ^= x >> 15; x *= 2246822519u; x ^= x >> 13; x *= 3266489917u; x ^= x >> 16;
+  return x;
+}
+
+void drawSplash(unsigned long el) {
+  if (!splashReady) {
+    startScreen();
+    display.drawBitmap((SCREEN_W - LOGO_W) / 2, 10, LOGO_BMP, LOGO_W, LOGO_H, SH110X_WHITE);
+    display.setCursor((SCREEN_W - 6 * display.chars("FORESTRY EQUIPMENT")) / 2, 44);
+    display.print("FORESTRY EQUIPMENT");
+    memcpy(splashTgt, display.getBuffer(), sizeof(splashTgt));
+    splashReady = true;
+  }
   startScreen();
-  display.drawBitmap((SCREEN_W - LOGO_W) / 2, 10, LOGO_BMP, LOGO_W, LOGO_H, SH110X_WHITE);
-  display.setCursor((SCREEN_W - 6 * display.chars("FORESTRY EQUIPMENT")) / 2, 44);
-  display.print("FORESTRY EQUIPMENT");
+  uint32_t n = 0;
+  for (int pg = 0; pg < SCREEN_H / 8; pg++) {
+    for (int x = 0; x < SCREEN_W; x++) {
+      uint8_t b = splashTgt[pg * SCREEN_W + x];
+      if (!b) continue;
+      for (int k = 0; k < 8; k++) {
+        if (!(b & (1 << k))) continue;
+        int y = pg * 8 + k;
+        uint32_t h = splashHash(n++);
+        uint32_t delay = y >= 44 ? 500 + (h & 1023) * 600 / 1024 : (h & 1023) * 1000 / 1024;
+        int sx = (int)((h >> 10) % SCREEN_W), sy = (int)((h >> 18) % SCREEN_H);
+        long p = el > delay ? (long)(el - delay) * 256 / SPLASH_FLY_MS : 0;   // 0..256
+        if (p > 256) p = 256;
+        long e = 256 - ((256 - p) * (256 - p)) / 256;                          // замедление к концу полёта
+        display.drawPixel(sx + (int)((x - sx) * e / 256), sy + (int)((y - sy) * e / 256), SH110X_WHITE);
+      }
+    }
+  }
   oledCommit();
 }
 
@@ -6906,7 +6942,7 @@ void drawCal() {
 
 void drawScreen() {
   switch (state) {
-    case ST_BOOT:    if ((millis() - bootStart) < SPLASH_MS) drawSplash(); else drawBoot(); break;
+    case ST_BOOT:    if ((millis() - bootStart) < SPLASH_MS) drawSplash(millis() - bootStart); else drawBoot(); break;
     case ST_SAFE:    if (safeScreenNeeded()) drawSafe(); else drawRun1(); break;   // экран Safe Start только при ошибке канала
     case ST_RUN:
       if (alShown >= 0) { drawAlert(); break; }
@@ -7125,6 +7161,13 @@ void loop() {
   if (state == ST_BOOT && (now - bootStart) >= (bootOk ? SPLASH_MS : (SPLASH_MS + BOOT_MS * 2))) {   // экран Boot check только при ошибке
     if (estop.state) goEstop();
     else goSafe();
+  }
+
+  if (state == ST_BOOT && okOled && (now - bootStart) < SPLASH_MS) {   // заставка: весь ресурс на отрисовку, кадры подряд
+    updateLeds();
+    oledStep();
+    if (!oledBusy()) drawScreen();
+    return;
   }
 
   handleMenuButton();
