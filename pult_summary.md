@@ -1,7 +1,7 @@
-# pult firmware 1.3
+# pult firmware 1.4
 
-- File: `pult.ino.bin`, 1184208 bytes
-- Sketch uses 1184067 bytes (35%) of program storage space. Maximum is 3342336 bytes.
-- Global variables use 59372 bytes (18%) of dynamic memory, leaving 268308 bytes for local variables. Maximum is 327680 bytes.
+- File: `pult.ino.bin`, 1210336 bytes
+- Sketch uses 1210191 bytes (36%) of program storage space. Maximum is 3342336 bytes.
+- Global variables use 60404 bytes (18%) of dynamic memory, leaving 267276 bytes for local variables. Maximum is 327680 bytes.
 - Core esp32 3.3.11, board esp32:esp32:heltec_wireless_stick_lite_V3
-- Commit 798bc60
+- Commit 85d1e1e
