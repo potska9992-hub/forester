@@ -244,4 +244,6 @@ D.update({
 "alert at or below": "Сигнал если ниже", "drop": "вниз", "menu/": "MENU/",
 "password": "пароль",
 "err": "ОШ", "no data": "нет данных", "update": "обновл.",
+"radio power": "мощность радио", "pulse": "пульс", "a pulse": "A имп.", "b pulse": "B имп.",
+"  pass:": "  пр:", "factory reset": "заводской сброс", "charge low": "заряд низкий", "charge crit.": "заряд крит.",
 })

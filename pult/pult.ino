@@ -251,7 +251,8 @@ static const uint8_t RU_GLYPH[64][8] = {   // 32 capitals, 32 lowercase; 5 colum
   {0x00,0x00,0x0F,0x11,0x0F,0x09,0x11,0x00},  // я
 };
 struct RuTr { const char* en; const char* ru; };
-static const RuTr RU_TR[630] = {
+static const RuTr RU_TR[636] = {
+  {"  pass:", "  пр:"},
   {"!ovl l=lim o=open", "!П Л=лим О=обр"},
   {"(empty)", "(пусто)"},
   {"(no events)", "(событий нет)"},
@@ -272,6 +273,7 @@ static const RuTr RU_TR[630] = {
   {"= ch3. a: lim 3.0,", "= К3. A: лим 3.0,"},
   {"= exit", "= вых"},
   {"=exit", "=вых"},
+  {"a pulse", "A имп."},
   {"aborted", "прервано"},
   {"about", "около"},
   {"adc counts, was", "отсчеты АЦП, было"},
@@ -305,6 +307,7 @@ static const RuTr RU_TR[630] = {
   {"assign", "НАЗНАЧ."},
   {"at the bottom.", "внизу."},
   {"aug", "авг"},
+  {"b pulse", "B имп."},
   {"b: lim 3.0, now 3.1", "B: лим 3.0, тек 3.1"},
   {"back", "назад"},
   {"back to default id.", "вернется ID по умолч."},
@@ -357,6 +360,8 @@ static const RuTr RU_TR[630] = {
   {"channels", "каналы"},
   {"channels on/off", "каналы вкл/выкл"},
   {"char", "символ"},
+  {"charge crit.", "заряд крит."},
+  {"charge low", "заряд низкий"},
   {"charge soon", "скоро зарядить"},
   {"check coil wiring", "Проверь проводку"},
   {"check local limits", "учтите нормы"},
@@ -451,7 +456,7 @@ static const RuTr RU_TR[630] = {
   {"expo", "ЭКСПО"},
   {"ext", "ВЫД"},
   {"extend", "выдвинуть"},
-  {"factory reset", "сброс"},
+  {"factory reset", "заводской сброс"},
   {"fail", "СБОЙ"},
   {"fakes success", "имитирует успех"},
   {"fast", "быстро"},
@@ -667,7 +672,7 @@ static const RuTr RU_TR[630] = {
   {"presets", "режимы"},
   {"press", "нажми"},
   {"protocol mismatch", "протокол не подошел"},
-  {"pulse", "имп."},
+  {"pulse", "пульс"},
   {"pult", "пульт"},
   {"pult and receiver.", "пульта и приемника."},
   {"pult battery", "Батарея пульта"},
@@ -684,6 +689,7 @@ static const RuTr RU_TR[630] = {
   {"radio", "радио"},
   {"radio 1/6", "РАДИО 1/6"},
   {"radio err", "ОШИБКА РАДИО"},
+  {"radio power", "мощность радио"},
   {"radio:", "радио:"},
   {"ramp dn", "торможение"},
   {"ramp up", "разгон"},
@@ -884,7 +890,7 @@ static const RuTr RU_TR[630] = {
   {"you want", "которую нужно"}
 };
 struct RuIdx { uint16_t s, n; };
-static const RuIdx RU_IDX[128] = { {0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,1},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{1,5},{0,0},{0,0},{0,0},{0,0},{6,4},{0,0},{0,0},{10,2},{12,1},{13,1},{0,0},{0,0},{0,0},{14,2},{0,0},{16,1},{0,0},{0,0},{0,0},{0,0},{17,3},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{20,33},{53,28},{81,56},{137,35},{172,27},{199,25},{224,9},{233,10},{243,20},{263,6},{269,5},{274,37},{311,25},{336,39},{375,21},{396,31},{427,1},{428,72},{500,59},{559,33},{592,9},{601,6},{607,20},{627,1},{628,2},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0} };
+static const RuIdx RU_IDX[128] = { {0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,1},{1,1},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{2,5},{0,0},{0,0},{0,0},{0,0},{7,4},{0,0},{0,0},{11,2},{13,1},{14,1},{0,0},{0,0},{0,0},{15,2},{0,0},{17,1},{0,0},{0,0},{0,0},{0,0},{18,3},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{21,34},{55,29},{84,58},{142,35},{177,27},{204,25},{229,9},{238,10},{248,20},{268,6},{274,5},{279,37},{316,25},{341,39},{380,21},{401,31},{432,1},{433,73},{506,59},{565,33},{598,9},{607,6},{613,20},{633,1},{634,2},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0} };
 
 // Вспомогательные функции собраны в структуру: в .ino свободная функция раньше типов сбила бы автогенерацию прототипов Arduino.
 struct RuUtil {
@@ -1911,6 +1917,19 @@ int pctFromV(float v) {
   return 100;
 }
 
+// Сообщение на 3 с при переходе на уровень хуже (пороги настраиваются, поэтому показываем текущий процент)
+void batLevelToast() {
+  char t[20];
+  snprintf(t, sizeof(t), batLevel >= 2 ? "Charge crit. %d%%" : "Charge low %d%%", vbatPct);
+  toast(t);
+  toastUntil = millis() + 3000;
+}
+
+// Низкий уровень (не критический): заливка значка мигает медленно, рамка остаётся на месте
+static bool batFillOn() {
+  return !(batLevel == 1 && !batUsb && (millis() % 1600) >= 1000);
+}
+
 void batTick(unsigned long now) {
   bool live = (state == ST_MENU && (menuScr == MS_BAT || menuScr == MS_BATEDIT));
   unsigned long period = live ? BAT_LIVE_MS : BAT_FAST_MS;
@@ -1947,7 +1966,11 @@ void batTick(unsigned long now) {
         if (up > batLevel) cand = up;
         else if (down < batLevel) cand = down;
         if (cand != batLevel) {
-          if (++batCnt >= 3) { batLevel = cand; batCnt = 0; }   // 3 замера подряд
+          if (++batCnt >= 3) {                                   // 3 замера подряд
+            int old = batLevel;
+            batLevel = cand; batCnt = 0;
+            if (cand > old) batLevelToast();                     // перешли на уровень хуже: сообщение на 3 с
+          }
         } else {
           batCnt = 0;
         }
@@ -1969,7 +1992,7 @@ void drawBatteryBig() {
     display.drawRect(battX, battY + nubH, battW, battH, SH110X_WHITE);
     int innerH = battH - 4;
     int fillH = (int)(innerH * (vbatPct / 100.0f));
-    if (batUsb) fillH = 0;
+    if (batUsb || !batFillOn()) fillH = 0;
     display.fillRect(battX + 2, battY + nubH + battH - 2 - fillH, battW - 4, fillH, SH110X_WHITE);
   }
 
@@ -1998,8 +2021,8 @@ void drawBatteryMini() {
     display.drawLine(bx + 5, by + 3, bx + 9, by + 3, SH110X_WHITE);
     display.drawLine(bx + 9, by + 3, bx + 6, by + 5, SH110X_WHITE);
   } else {
-    int fillW = (int)(11 * (vbatPct / 100.0f) + 0.5f);
-    if (fillW < 1 && vbatPct > 0) fillW = 1;
+    int fillW = batFillOn() ? (int)(11 * (vbatPct / 100.0f) + 0.5f) : 0;
+    if (fillW < 1 && vbatPct > 0 && batFillOn()) fillW = 1;
     display.fillRect(bx + 2, by + 2, fillW, 3, SH110X_WHITE);
   }
 }
@@ -3349,7 +3372,7 @@ void menuLabel(int i, char* b, size_t n) {
         case TX_BAT:   snprintf(b, n, "Battery"); break;
         case TX_LED:   snprintf(b, n, "LED & Alerts"); break;
         case TX_SCR:   snprintf(b, n, "Screens"); break;
-        case TX_PWR:   snprintf(b, n, "Power"); break;
+        case TX_PWR:   snprintf(b, n, "Radio power"); break;
         case TX_BIND:  snprintf(b, n, "Bind"); break;
         case TX_TRT:   snprintf(b, n, "Telem rate %d/s", telemRate); break;
         case TX_LOG:   snprintf(b, n, "Event Log"); break;
