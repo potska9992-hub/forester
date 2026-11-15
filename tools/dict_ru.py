@@ -249,6 +249,6 @@ D.update({
 })
 D.update({
 "adc clock": "такт АЦП", "adc errors": "ошибки АЦП", "adc!": "АЦП!", "adc": "АЦП", "samples/s": "замеров/с",
-"samples/s: ...": "замеров/с: ...", "mhz": "МГц", "adcok": "АЦПок",
+"samples/s: ...": "замеров/с: ...", "mhz": "МГц", "adcok": "АЦПок", "adc err": "ОШ АЦП",
 })
 

@@ -251,7 +251,7 @@ static const uint8_t RU_GLYPH[64][8] = {   // 32 capitals, 32 lowercase; 5 colum
   {0x00,0x00,0x0F,0x11,0x0F,0x09,0x11,0x00},  // я
 };
 struct RuTr { const char* en; const char* ru; };
-static const RuTr RU_TR[644] = {
+static const RuTr RU_TR[645] = {
   {"  pass:", "  пр:"},
   {"!ovl l=lim o=open", "!П Л=лим О=обр"},
   {"(empty)", "(пусто)"},
@@ -279,6 +279,7 @@ static const RuTr RU_TR[644] = {
   {"adc", "АЦП"},
   {"adc clock", "такт АЦП"},
   {"adc counts, was", "отсчеты АЦП, было"},
+  {"adc err", "ОШ АЦП"},
   {"adc errors", "ошибки АЦП"},
   {"adc!", "АЦП!"},
   {"adcok", "АЦПок"},
@@ -898,7 +899,7 @@ static const RuTr RU_TR[644] = {
   {"you want", "которую нужно"}
 };
 struct RuIdx { uint16_t s, n; };
-static const RuIdx RU_IDX[128] = { {0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,1},{1,1},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{2,5},{0,0},{0,0},{0,0},{0,0},{7,4},{0,0},{0,0},{11,2},{13,1},{14,1},{0,0},{0,0},{0,0},{15,2},{0,0},{17,1},{0,0},{0,0},{0,0},{0,0},{18,3},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{21,39},{60,29},{89,58},{147,35},{182,27},{209,25},{234,9},{243,10},{253,20},{273,6},{279,5},{284,37},{321,26},{347,39},{386,21},{407,31},{438,1},{439,73},{512,61},{573,33},{606,9},{615,6},{621,20},{641,1},{642,2},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0} };
+static const RuIdx RU_IDX[128] = { {0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,1},{1,1},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{2,5},{0,0},{0,0},{0,0},{0,0},{7,4},{0,0},{0,0},{11,2},{13,1},{14,1},{0,0},{0,0},{0,0},{15,2},{0,0},{17,1},{0,0},{0,0},{0,0},{0,0},{18,3},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{21,40},{61,29},{90,58},{148,35},{183,27},{210,25},{235,9},{244,10},{254,20},{274,6},{280,5},{285,37},{322,26},{348,39},{387,21},{408,31},{439,1},{440,73},{513,61},{574,33},{607,9},{616,6},{622,20},{642,1},{643,2},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0} };
 
 // Вспомогательные функции собраны в структуру: в .ino свободная функция раньше типов сбила бы автогенерацию прототипов Arduino.
 struct RuUtil {
@@ -2200,7 +2201,8 @@ uint16_t simPeak[NUM_CH];
 uint32_t rfTx = 0, rfRx = 0, rfLost = 0;
 int   rfRssi = -63, rfSnr10 = 95, rfRate = 26;
 unsigned long rfAgeMs = 0;
-uint32_t adcSps = 0;               // замеров АЦП в секунду (живое чтение с приёмника на экране такта)
+uint32_t adcSps = 0;
+uint16_t adcErrPct = 0;            // процент ошибок АЦП (живое чтение с приёмника, пока уровень 10 % и выше)               // замеров АЦП в секунду (живое чтение с приёмника на экране такта)
 bool adcPerm = false;              // ошибки АЦП 10 % и выше держатся дольше 30 с: пометка на главном экране
 
 void simTelemetry(unsigned long now) {
@@ -2472,6 +2474,7 @@ void hlCfgDone(const HlCfg &c, uint8_t status, uint16_t applied) {
   }
   if (c.op == HLO_GET) {                                   // живые параметры только для чтения
     if (status == 0 && c.param == RXL_ADCSPS) adcSps = applied;
+    if (status == 0 && c.param == RXL_ADCERR) adcErrPct = applied;
     return;
   }
   if (c.op == HLO_SET) {
@@ -2781,9 +2784,10 @@ void hlStep(unsigned long now) {
 // Фронты событий: связь, телеметрия, батарея -> журнал
 #define ADC_LONG_MS     30000UL     // 10 % и выше столько подряд: проблема постоянная
 #define ADC_REPEAT_MS   60000UL     // повтор сообщения при постоянной проблеме
-void adcToast(int thr) {
+void adcToast(int thr, bool exact = false) {
   char t[20];
-  snprintf(t, sizeof(t), "ADC errors >%d%%", thr);
+  if (exact) snprintf(t, sizeof(t), "ADC errors %d%%", thr);
+  else       snprintf(t, sizeof(t), "ADC errors >%d%%", thr);
   toast(t);
   toastUntil = millis() + 3000;
 }
@@ -2847,16 +2851,17 @@ void eventsTick(unsigned long now) {
     else if (!adcPerm && (now - adcHighSince) >= ADC_LONG_MS) {
       adcPerm = true;
       adcNextRepeat = now + ADC_REPEAT_MS;
-      logEvent(LT_ADCLONG, 0, 0, 100);
-      adcToast(10);
+      logEvent(LT_ADCLONG, 0, 0, (uint16_t)((adcErrPct ? adcErrPct : 10) * 10));
+      adcToast(adcErrPct ? adcErrPct : 10, true);
     } else if (adcPerm && (long)(now - adcNextRepeat) >= 0) {
       adcNextRepeat = now + ADC_REPEAT_MS;
-      adcToast(10);
+      adcToast(adcErrPct ? adcErrPct : 10, true);
     }
   } else {
     adcHighSince = 0;
     if (adcPerm) {
       adcPerm = false;
+      adcErrPct = 0;
       if (telValid) logEvent(LT_ADCOK, 0, 0, 0);
     }
   }
@@ -3823,8 +3828,12 @@ void rxBulkTick(unsigned long now) {
 
 // экран такта АЦП: раза два в секунду спрашиваем у приёмника число замеров в секунду
 void adcPollTick(unsigned long now) {
-  static unsigned long nextAt = 0;
-  if (menuScr != MS_RXEDIT || rxParam != RXP_ADCCLK) return;
+  static unsigned long nextAt = 0, nextErrAt = 0;
+  if (adcPerm && simMode == SIM_RADIO && (long)(now - nextErrAt) >= 0 && hlQn == 0 && !hlCurOn) {   // пока проблема постоянная: процент раз в 5 с
+    nextErrAt = now + 5000;
+    hlCfgPut(HLO_GET, RXL_ADCERR, 0, 0, 0xFFFF, false, 0, 0);
+  }
+  if (state != ST_MENU || menuScr != MS_RXEDIT || rxParam != RXP_ADCCLK) return;
   if (simMode != SIM_RADIO) {                            // имитация: по измеренным на стенде значениям (37 тыс./с на 1 МГц, около +33 на каждый кГц)
     adcSps = 37000UL + (uint32_t)(rxCur - 1000) * 33UL;
     return;
@@ -5560,7 +5569,8 @@ void drawRun1() {
     else if (!hlUp)          display.print("NO SIGNAL");
     else if (hlSyncBusy)     display.printf("SYNC %d%%", hlSyncPct());
     else if (tel.kill)       display.print("STOPPED");
-    else                     display.print(adcPerm ? "READY ADC!" : "READY");
+    else                     if (adcPerm) display.printf("ADC ERR %d%%", (int)(adcErrPct ? adcErrPct : 10));
+    else         display.print("READY");
   }
   else if (simMode == SIM_LINK) display.print("SIM: READY");
   else                          display.print("NO SIGNAL");
@@ -7102,6 +7112,7 @@ void stepLogic(unsigned long now) {
     goSafe();
   }
   prevLinked = lk;
+  adcPollTick(now);
   switch (state) {
     case ST_SAFE: {
       bool ok = !hlSyncBusy;                                   // пока идёт синхронизация с приёмником, управление не передаётся
@@ -7131,7 +7142,6 @@ void stepLogic(unsigned long now) {
       if (menuScr == MS_RXWIFI) rxWifiTick(now);
       if (menuScr == MS_NETPICK) netPickTick(now);
       rxBulkTick(now);
-      adcPollTick(now);
       navStep(now);
       break;
     case ST_CAL_C:   calCenterTick(now); break;
