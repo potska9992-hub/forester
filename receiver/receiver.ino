@@ -10,8 +10,8 @@
 //  (проверка обратной связи), рычаги побывали в нуле. Любая авария: PCA9685 в ноль, OE выключен, EN снят, реле разомкнуто.
 //  Сбой реле (залипло / не замкнулось) и потеря PCA9685 защёлкиваются до перезагрузки приёмника.
 //
-//  ТОК: пока ADS1115 (стенд): пик за скользящее окно 40 мс, обрыв и режим CURRENT выключены (быстрого АЦП нет).
-//  С MCP3208 слой измерения заменяется (функция currentBackend), обрыв и CURRENT включаются сами.
+//  ТОК: MCP3208 (SPI, отдельная шина, CLK 5, CS 4, DIN 47, DOUT 48): пик за скользящее окно 40 мс, обнаружение обрыва и режим CURRENT включены.
+//  Такт SPI задаётся в меню пульта (Receiver -> Global -> ADC CLOCK, 1.00-2.00 МГц), контроль ошибок АЦП идёт постоянно (тройное чтение).
 //  Калибровка IS лежит в NVS "calib" (пишет вкладка Test этой прошивки или hwtest), формат прежний.
 //
 //  Wi-Fi: по команде пульта (Receiver -> Wi-Fi): Phone (точка RX-xxxx, страница Update/Test) или GitHub (обновление).
@@ -22,6 +22,7 @@
 //
 //  Журнал версий:
 //  1.0 - первая рабочая версия: радио, протокол, ШИМ и защиты, реле и сбои, мигалка, Wi-Fi Update/Test, GitHub
+//      (сборка заменена: ток измеряет MCP3208 вместо ADS1115, параметр такта АЦП, контроль ошибок АЦП в телеметрии)
 // ============================================================
 #include <Arduino.h>
 #include <Wire.h>
@@ -37,6 +38,8 @@
 #include <math.h>
 #include <stdarg.h>
 #include "driver/gpio.h"
+#include "soc/gpio_reg.h"
+#include "soc/soc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
@@ -55,8 +58,10 @@ static const char FW_TAG[] __attribute__((used)) = "FWTAG:" PROJECT_NAME ":" FW_
 // ---- Пины (remote_config.md §47) ----
 #define PIN_BUS0_SDA  2      // Wire : PCA9685
 #define PIN_BUS0_SCL  3
-#define PIN_BUS1_SDA  4      // Wire1: две ADS1115
-#define PIN_BUS1_SCL  5
+#define PIN_MCP_CS    4      // MCP3208 (отдельная шина SPI, не радиошина)
+#define PIN_MCP_CLK   5
+#define PIN_MCP_DIN   47     // вход микросхемы (MOSI)
+#define PIN_MCP_DOUT  48     // выход микросхемы (MISO)
 #define PIN_VBUS      6      // напряжение бортсети (делитель 100к/10к)
 #define PIN_VFB       7      // напряжение после реле
 #define PIN_RED       15     // мигалка красный (HIGH = включено)
@@ -77,10 +82,7 @@ static const char FW_TAG[] __attribute__((used)) = "FWTAG:" PROJECT_NAME ":" FW_
 #define PIN_DIO1      14
 
 #define I2C_HZ        100000
-#define I2C1_HZ       400000
 #define PCA_ADDR      0x40
-#define ADS_ADDR0     0x48
-#define ADS_ADDR1     0x49
 
 #define K_BUS_DEF     11.09f
 #define K_FB_DEF      10.96f
@@ -108,7 +110,8 @@ enum { WE_NONET = 1, WE_PASS, WE_GHDOWN, WE_NOREL, WE_DLFAIL, WE_SUM, WE_WRONG, 
 
 // ---- Параметры (порядок и пределы те же, что в пульте) ----
 enum { PS_SOL, PS_CH, PS_GLOB };
-enum { RXP_LIMIT, RXP_DUTY, RXP_MAXD, RXP_RAMPUP, RXP_RAMPDN, RXP_CHEN, RXP_OVLDLY, RXP_LINKTMO, RXP_PWMFREQ, RXP_DITHAMP, RXP_DITHFRQ, RXP_PWR, RXP_MODE, RXP_STARTI, RXP_MAXI, NUM_RXP };
+enum { RXP_LIMIT, RXP_DUTY, RXP_MAXD, RXP_RAMPUP, RXP_RAMPDN, RXP_CHEN, RXP_OVLDLY, RXP_LINKTMO, RXP_PWMFREQ, RXP_DITHAMP, RXP_DITHFRQ, RXP_PWR, RXP_MODE, RXP_STARTI, RXP_MAXI, RXP_ADCCLK, NUM_RXP };
+enum { RXL_ADCSPS = 16, RXL_ADCERR = 17 };       // живые параметры только для чтения (запрос GET): замеров АЦП в секунду / 10, процент ошибок АЦП
 struct RxParamDef { uint8_t scope; int16_t mn, mx, def; };
 static const RxParamDef RXP[NUM_RXP] = {
   { PS_SOL,     5,  100,  20 },   // LIMIT, 0.1 А
@@ -125,7 +128,8 @@ static const RxParamDef RXP[NUM_RXP] = {
   { PS_GLOB,    2,   22,  10 },   // RX POWER, дБм
   { PS_GLOB,    0,    1,   0 },   // CONTROL: 0 PWM, 1 CURRENT
   { PS_SOL,     0,  100,   5 },   // START I, 0.1 А
-  { PS_SOL,     5,  100,  15 }    // MAX I, 0.1 А
+  { PS_SOL,     5,  100,  15 },   // MAX I, 0.1 А
+  { PS_GLOB, 1000, 2000, 1000 }   // ADC CLOCK: такт SPI МЦП3208, кГц
 };
 
 #define NMOD          8
@@ -133,8 +137,12 @@ static const RxParamDef RXP[NUM_RXP] = {
 #define NET_MAX       3
 
 // ---- Измерение тока ----
-#define ADS_LSB       0.000125f
-#define ADS_CONV_US   1400
+#define MCP_VREF      3.3f          // VDD = VREF = LDO 3.3 В
+#define MCP_REF_HZ    1000000UL     // эталонный такт (предел по даташиту на 3.3 В)
+#define MCP_CHECK_EVERY 100         // каждое сотое чтение - тройная проверка
+#define MCP_TOL       4             // допуск проверки, отсчётов
+#define MCP_BIN_MS    250           // окно подсчёта ошибок: 8 ячеек по 250 мс = 2 с
+#define MCP_MIN_CHK   20            // меньше проверок в окне - уровень не пересматривается
 #define IDLE_SCAN_MS  25
 #define BK_MS         5
 #define BK_N          8             // окно 8 x 5 мс = 40 мс
@@ -145,16 +153,8 @@ static const RxParamDef RXP[NUM_RXP] = {
 #define R_COIL_NOM    5.6f          // номинальное сопротивление катушки, Ом (для начального приближения режима CURRENT)
 
 struct Bk { uint32_t ep; float mx; float sum; uint16_t n; };
+struct AdcMon { uint16_t c[8], e[8]; uint8_t i; int64_t at; };   // подсчёт ошибок АЦП: 8 ячеек по 250 мс
 static Bk bk[NMOD][BK_N];
-struct SamplerState {
-  int8_t   cur[2]     = { -1, -1 };
-  int64_t  startUs[2] = { 0, 0 };
-  uint8_t  rr[2]      = { 0, 0 };
-  int64_t  idleAt[2]  = { 0, 0 };
-  uint32_t cnt[2]     = { 0, 0 };
-  uint32_t errRun[2]  = { 0, 0 };
-  int64_t  secAt = 0, pubAt = 0;
-};
 
 // ---- Журнал (для вкладки Test) ----
 #define LOG_SZ        4096
@@ -307,15 +307,16 @@ static bool estopRaw = false, estopBtn = false;   // аварийная кноп
 static unsigned long estopRawAt = 0;
 
 // ---- ток ----
-static bool     adsPresent[2] = { false, false };
-static SemaphoreHandle_t i2c1Mux = nullptr;
+static bool     mcpPresent = false;
 static volatile uint8_t  wantMask = 0;
 static volatile float    pubPeakV[NMOD], pubMeanV[NMOD];
 static volatile uint16_t pubN[NMOD];
 static volatile float    lastV[NMOD];
 static volatile bool     lastHave[NMOD];
-static volatile uint16_t pubSps[2];
-static volatile uint32_t adsErr[2];
+static volatile uint16_t adcSps10 = 0;       // замеров АЦП в секунду / 10
+static volatile uint8_t  adcErrPct = 0;      // процент ошибок АЦП за последние ~2 с
+static volatile uint8_t  adcLvl = 0;         // уровень: 0 норма, 1 от 2 %, 2 от 5 %, 3 от 10 %
+static volatile uint32_t adcChkTotal = 0, adcErrTotal = 0;
 static float iK[NMOD], iZ[NMOD];
 static bool  iCal[NMOD];
 static float iLim = I_LIM_DEF;               // предел вкладки Test (в рабочем режиме лимиты берутся из параметров LIMIT)
@@ -500,30 +501,8 @@ static void relayTick(unsigned long now, bool want) {
 }
 
 // ============================================================
-// Сэмплер тока: ADS1115 в отдельной задаче (слой измерения; с MCP3208 заменяется)
+// Сэмплер тока: MCP3208 в отдельной задаче (ядро 0, приоритет 1: радио и Wi-Fi её вытесняют, loop на ядре 1 не страдает)
 // ============================================================
-static bool i1Lock() { return i2c1Mux && xSemaphoreTake(i2c1Mux, portMAX_DELAY) == pdTRUE; }
-static void i1Unlock() { if (i2c1Mux) xSemaphoreGive(i2c1Mux); }
-
-static bool adsStart(uint8_t addr, uint8_t ch) {
-  uint16_t cfg = 0x8000 | ((uint16_t)(4 + ch) << 12) | 0x0200 | 0x0100 | 0x00E0 | 0x0003;
-  Wire1.beginTransmission(addr);
-  Wire1.write(0x01);
-  Wire1.write((uint8_t)(cfg >> 8));
-  Wire1.write((uint8_t)(cfg & 0xFF));
-  return Wire1.endTransmission(true) == 0;
-}
-
-static bool adsRead(uint8_t addr, int16_t& out) {
-  Wire1.beginTransmission(addr);
-  Wire1.write(0x00);
-  if (Wire1.endTransmission(false) != 0) return false;
-  if (Wire1.requestFrom((int)addr, 2) != 2) return false;
-  uint8_t hi = Wire1.read(), lo = Wire1.read();
-  out = (int16_t)((hi << 8) | lo);
-  return true;
-}
-
 static void bkAdd(uint8_t m, float v, uint32_t tms) {
   uint32_t ep = tms / BK_MS;
   Bk& b = bk[m][ep % BK_N];
@@ -544,59 +523,111 @@ static void bkPublish(uint32_t tms) {
   }
 }
 
-static void samplerStep(SamplerState& S) {
-  int64_t now = esp_timer_get_time();
-  bool busyWait = false;
-  for (uint8_t d = 0; d < 2; d++) {
-    if (!adsPresent[d]) { S.cur[d] = -1; continue; }
-    uint8_t addr = d ? ADS_ADDR1 : ADS_ADDR0;
-    if (S.cur[d] >= 0) {
-      if ((now - S.startUs[d]) < ADS_CONV_US) { busyWait = true; continue; }
-      int16_t raw = 0;
-      bool ok = false;
-      if (i1Lock()) { ok = adsRead(addr, raw); i1Unlock(); }
-      uint8_t m = d * 4 + S.cur[d];
-      S.cur[d] = -1;
-      if (ok) {
-        float v = raw * ADS_LSB;
-        if (v < 0) v = 0;
-        lastV[m] = v; lastHave[m] = true;
-        bkAdd(m, v, (uint32_t)(esp_timer_get_time() / 1000));
-        S.cnt[d]++; S.errRun[d] = 0;
-      } else { adsErr[d]++; if (++S.errRun[d] > 20) S.errRun[d] = 20; }
-      now = esp_timer_get_time();
-    }
-    uint8_t want = (wantMask >> (d * 4)) & 0x0F;
-    int8_t next = -1;
-    if (want) {
-      for (uint8_t k = 1; k <= 4; k++) { uint8_t c = (S.rr[d] + k) & 3; if (want & (1u << c)) { next = c; break; } }
-    } else if (now >= S.idleAt[d]) {
-      next = (S.rr[d] + 1) & 3;
-      S.idleAt[d] = now + (int64_t)IDLE_SCAN_MS * 1000;
-    }
-    if (next >= 0) {
-      bool ok = false;
-      if (i1Lock()) { ok = adsStart(addr, next); i1Unlock(); }
-      if (ok) { S.cur[d] = next; S.rr[d] = next; S.startUs[d] = esp_timer_get_time(); busyWait = true; }
-      else { adsErr[d]++; }
-    }
-  }
-  now = esp_timer_get_time();
-  if (now - S.pubAt >= 5000) { S.pubAt = now; bkPublish((uint32_t)(now / 1000)); }
-  if (now - S.secAt >= 1000000) { S.secAt = now; pubSps[0] = (uint16_t)S.cnt[0]; pubSps[1] = (uint16_t)S.cnt[1]; S.cnt[0] = S.cnt[1] = 0; }
-  if (busyWait) {
-    int64_t left = ADS_CONV_US;
-    for (uint8_t d = 0; d < 2; d++) if (S.cur[d] >= 0) { int64_t l = ADS_CONV_US - (esp_timer_get_time() - S.startUs[d]); if (l < left) left = l; }
-    if (left > 1100) vTaskDelay(1);
-  } else {
-    vTaskDelay(1);
-  }
+static SPIClass mcpSpi(HSPI);
+static inline void mcpCsLow()  { REG_WRITE(GPIO_OUT_W1TC_REG, 1UL << PIN_MCP_CS); }
+static inline void mcpCsHigh() { REG_WRITE(GPIO_OUT_W1TS_REG, 1UL << PIN_MCP_CS); }
+
+// одно чтение канала 0..7 (транзакция SPI уже открыта): 24 такта, результат 12 бит; rxb1 - второй байт ответа (для проверки нулевого бита)
+static inline uint16_t mcpReadRaw(uint8_t ch, uint8_t* rxb1) {
+  uint8_t tx[3] = { (uint8_t)(0x06 | (ch >> 2)), (uint8_t)((ch & 3) << 6), 0 };
+  uint8_t rx[3];
+  mcpCsLow();
+  mcpSpi.transferBytes(tx, rx, 3);
+  mcpCsHigh();
+  if (rxb1) *rxb1 = rx[1];
+  return ((uint16_t)(rx[1] & 0x0F) << 8) | rx[2];
+}
+static inline uint16_t mcpRead(uint8_t ch) { return mcpReadRaw(ch, nullptr); }
+
+static void mcpInit() {
+  pinMode(PIN_MCP_CS, OUTPUT);
+  digitalWrite(PIN_MCP_CS, HIGH);
+  mcpSpi.begin(PIN_MCP_CLK, PIN_MCP_DOUT, PIN_MCP_DIN, -1);
+  gpio_set_pull_mode((gpio_num_t)PIN_MCP_DOUT, GPIO_PULLUP_ONLY);       // нет микросхемы: линия тянется вверх, нулевой бит ответа будет 1
+  mcpSpi.beginTransaction(SPISettings(MCP_REF_HZ, MSBFIRST, SPI_MODE0));
+  int ok = 0;
+  for (int i = 0; i < 4; i++) { uint8_t b1 = 0xFF; mcpReadRaw((uint8_t)i, &b1); if (!(b1 & 0x10)) ok++; }
+  mcpSpi.endTransaction();
+  mcpPresent = (ok == 4);
+}
+
+// тройная проверка: эталон на 1 МГц, чтение на выбранном такте, снова эталон. Эталоны разошлись больше допуска - сигнал менялся, проверку отбрасываем
+static void mcpCheck(uint8_t ch, uint32_t selHz, AdcMon& M) {
+  bool sw = (selHz != MCP_REF_HZ);
+  if (sw) { mcpSpi.endTransaction(); mcpSpi.beginTransaction(SPISettings(MCP_REF_HZ, MSBFIRST, SPI_MODE0)); }
+  int a = mcpRead(ch);
+  if (sw) { mcpSpi.endTransaction(); mcpSpi.beginTransaction(SPISettings(selHz, MSBFIRST, SPI_MODE0)); }
+  int b = mcpRead(ch);
+  if (sw) { mcpSpi.endTransaction(); mcpSpi.beginTransaction(SPISettings(MCP_REF_HZ, MSBFIRST, SPI_MODE0)); }
+  int c = mcpRead(ch);
+  if (sw) { mcpSpi.endTransaction(); mcpSpi.beginTransaction(SPISettings(selHz, MSBFIRST, SPI_MODE0)); }
+  if (abs(a - c) > MCP_TOL) return;
+  M.c[M.i]++; adcChkTotal++;
+  if (abs(b - (a + c) / 2) > MCP_TOL) { M.e[M.i]++; adcErrTotal++; }
+}
+
+// раз в ячейку: пересчёт процента и уровня (подъём сразу, спад с гистерезисом 70 % порога)
+static void mcpEval(AdcMon& M) {
+  static const float thr[4] = { 0.0f, 2.0f, 5.0f, 10.0f };
+  uint32_t chk = 0, err = 0;
+  for (int k = 0; k < 8; k++) { chk += M.c[k]; err += M.e[k]; }
+  if (chk < MCP_MIN_CHK) return;
+  float pct = 100.0f * err / chk;
+  adcErrPct = (uint8_t)constrain((int)lroundf(pct), 0, 100);
+  uint8_t cur = adcLvl, up = 0;
+  for (uint8_t L = 1; L < 4; L++) if (pct >= thr[L]) up = L;
+  if (up > cur) cur = up;
+  else while (cur > 0 && pct < 0.7f * thr[cur]) cur--;
+  if (cur != adcLvl) { adcLvl = cur; plog("ADC errors level %u (%.1f pct of checks, clock %u kHz)", (unsigned)cur, pct, (unsigned)ramP[RXP_ADCCLK][0][0]); }
 }
 
 static void samplerTask(void*) {
-  static SamplerState S;
-  S.secAt = esp_timer_get_time();
-  for (;;) samplerStep(S);
+  AdcMon M;
+  memset(&M, 0, sizeof(M));
+  int64_t secAt = esp_timer_get_time(), pubAt = secAt, idleAt = 0, burstAt = 0;
+  M.at = secAt;
+  uint32_t cnt = 0, sinceChk = 0, lastHz = 0;
+  uint8_t rr = 0, idleCh = 0;
+  for (;;) {
+    if (!mcpPresent) { vTaskDelay(pdMS_TO_TICKS(200)); continue; }
+    uint32_t selHz = (uint32_t)ramP[RXP_ADCCLK][0][0] * 1000UL;
+    if (selHz != lastHz) { lastHz = selHz; burstAt = 0; }
+    mcpSpi.beginTransaction(SPISettings(selHz, MSBFIRST, SPI_MODE0));
+    int64_t t0 = esp_timer_get_time();
+    for (;;) {
+      int64_t now = esp_timer_get_time();
+      if (now - t0 >= 20000) break;
+      uint8_t want = wantMask;
+      if (want) {
+        uint8_t m = rr;
+        for (uint8_t k = 1; k <= 8; k++) { uint8_t c = (rr + k) & 7; if (want & (1u << c)) { m = c; break; } }
+        rr = m;
+        float v = mcpRead(m) * (MCP_VREF / 4095.0f);
+        lastV[m] = v; lastHave[m] = true;
+        bkAdd(m, v, (uint32_t)(now / 1000));
+        cnt++;
+        if (++sinceChk >= MCP_CHECK_EVERY) { sinceChk = 0; mcpCheck(m, selHz, M); }
+      } else if (now >= idleAt) {
+        idleAt = now + (int64_t)IDLE_SCAN_MS * 1000;
+        idleCh = (idleCh + 1) & 7;
+        float v = mcpRead(idleCh) * (MCP_VREF / 4095.0f);
+        lastV[idleCh] = v; lastHave[idleCh] = true;
+        mcpCheck(idleCh, selHz, M);
+      } else if (now >= burstAt) {                                  // нет нагрузки: замер скорости серией чтений
+        burstAt = now + 1000000;
+        const int N = 600;
+        int64_t b0 = esp_timer_get_time();
+        for (int i = 0; i < N; i++) mcpRead(0);
+        int64_t dt = esp_timer_get_time() - b0;
+        if (dt > 0) adcSps10 = (uint16_t)((int64_t)N * 100000 / dt);
+      } else break;
+      if (now - pubAt >= 5000) { pubAt = now; bkPublish((uint32_t)(now / 1000)); }
+      if (now - secAt >= 1000000) { if (want) adcSps10 = (uint16_t)(cnt / 10); cnt = 0; secAt = now; }
+      if (now - M.at >= (int64_t)MCP_BIN_MS * 1000) { M.at = now; mcpEval(M); M.i = (M.i + 1) & 7; M.c[M.i] = 0; M.e[M.i] = 0; }
+    }
+    mcpSpi.endTransaction();
+    vTaskDelay(1);
+  }
 }
 
 static float voltToAmp(uint8_t m, float v) { float a = (v - iZ[m]) * iK[m]; return a < 0 ? 0 : a; }
@@ -607,9 +638,8 @@ static uint8_t modActive() {
   return mask;
 }
 
-// слой измерения: быстрый АЦП (MCP3208) пока не установлен. Когда появится, функция возвращает true:
-// включается обнаружение обрыва (на ADS1115 оно недостоверно: импульс 2-15 % короче замера). Режим CURRENT от этого не зависит
-static bool currentBackendFast() { return false; }
+// слой измерения: быстрый АЦП MCP3208 найден - включается обнаружение обрыва (на медленном АЦП оно недостоверно: импульс 2-15 % короче замера). Режим CURRENT от этого не зависит
+static bool currentBackendFast() { return mcpPresent; }
 
 static void keyName(char* k, const char* base, uint8_t m) { snprintf(k, 8, "%s%u", base, (unsigned)m); }
 
@@ -685,7 +715,7 @@ static void currentEval(unsigned long now) {
     uint8_t mask = zeroMask; zeroMask = 0;
     for (uint8_t m = 0; m < NMOD; m++) {
       if (!(mask & (1u << m))) continue;
-      if (pubN[m] < 3) { plog("M%u: no samples (ADS1115 missing?), zero not saved", m + 1); continue; }
+      if (pubN[m] < 3) { plog("M%u: no samples (MCP3208 missing?), zero not saved", m + 1); continue; }
       float v = pubMeanV[m];
       if (v < 0.0f || v > 0.3f) { plog("M%u: zero %.3f V is outside 0..0.3 V (input floating, IS wire not connected, or current flows). Not saved", m + 1, v); continue; }
       iZ[m] = v;
@@ -1044,7 +1074,7 @@ static void sendTelem() {
   b[6] = missedCnt; missedCnt = 0;
   for (int i = 0; i < NUM_CH; i++) { b[7 + i] = t.cur[i]; b[15 + i] = (uint8_t)t.pwm[i]; }
   b[23] = t.mLim; b[24] = t.mOvl; b[25] = t.mOpen; b[26] = t.side;
-  b[27] = (uint8_t)((t.kill ? 1 : 0) | ((t.reason & 3) << 1));
+  b[27] = (uint8_t)((t.kill ? 1 : 0) | ((t.reason & 3) << 1) | ((adcLvl & 3) << 3));   // биты 3-4: уровень ошибок АЦП
   b[28] = t.vrx;
   b[29] = (uint8_t)lastRssi;
   b[30] = bootCount;
@@ -1155,6 +1185,7 @@ static void handleCfg(const uint8_t* p, size_t len, unsigned long now) {
   uint16_t val = (uint16_t)(p[8] | (p[9] << 8));
   bool save = (p[0] & 1) != 0;
   if ((op == HLO_CMD || op == HLO_NET) && haveCmdAck && tag == lastCmdTag) { qPush(lastCmdAck, 12); return; }   // повтор уже выполненной команды
+  if (op == HLO_GET && (prm == RXL_ADCSPS || prm == RXL_ADCERR)) { sendAck(tag, 0, prm, ch, d, prm == RXL_ADCSPS ? adcSps10 : adcErrPct, false); return; }
   if (op == HLO_SET || op == HLO_GET) {
     if (prm >= NUM_RXP || ch >= NUM_CH || d > 1) { sendAck(tag, 1, prm, ch, d, val, false); return; }
     int c = ch, dd = d;
@@ -1359,7 +1390,7 @@ static void clearOvlCh(uint16_t chmask) { for (uint8_t ch = 0; ch < 16; ch++) if
 
 static void printHelp() {
   plog("Commands (Test tab):");
-  plog(" s | scan | adc | i      status, I2C scan, ADS inputs, currents");
+  plog(" s | scan | adc | i      status, I2C scan, MCP3208 inputs, currents");
   plog(" r 1|0   oe 1|0   en 1|0   relay, PCA OE, drivers EN");
   plog(" red/green/buz 1|0, blink 0..3");
   plog(" pwm 5 40 | pwm all 40   channel duty %%; sweep 5|all|off; freq 200");
@@ -1372,23 +1403,19 @@ static void printStatus() {
   plog("STATUS receiver %s, uptime %lu s, boots %u", FW_VERSION, millis() / 1000UL, (unsigned)bootCount);
   plog("Bus %.2f V (k %.3f), after relay %.2f V (k %.3f)", vBus, kBus, vFb, kFb);
   plog("Relay state %d, OE %s, EN %s, RX E-STOP %s, fault %u", (int)relayState, oeOn ? "ON" : "off", enOn ? "ON" : "off", estopBtn ? "ACTIVE" : "released", (unsigned)faultCode);
-  plog("PCA9685 %s, PWM %.0f Hz; ADS1115 0x48 %s, 0x49 %s", pcaOk ? "found" : "NOT FOUND", pwmFreq, adsPresent[0] ? "found" : "NOT FOUND", adsPresent[1] ? "found" : "NOT FOUND");
-  plog("Current: ADS samples/s %u + %u, I2C errors %lu + %lu, calibrated %u of 8", (unsigned)pubSps[0], (unsigned)pubSps[1], (unsigned long)adsErr[0], (unsigned long)adsErr[1], (unsigned)__builtin_popcount(calMaskBits()));
+  plog("PCA9685 %s, PWM %.0f Hz; MCP3208 %s", pcaOk ? "found" : "NOT FOUND", pwmFreq, mcpPresent ? "found" : "NOT FOUND");
+  plog("Current: MCP3208 clock %u kHz, samples/s %u, ADC checks %lu errors %lu (%u pct, level %u), calibrated %u of 8", (unsigned)ramP[RXP_ADCCLK][0][0], (unsigned)adcSps10 * 10u, (unsigned long)adcChkTotal, (unsigned long)adcErrTotal, (unsigned)adcErrPct, (unsigned)adcLvl, (unsigned)__builtin_popcount(calMaskBits()));
   plog("Radio: %s", hlInit ? "OK" : "FAILED");
 }
 
 static bool probe(TwoWire& w, uint8_t a) {
-  bool one = (&w == &Wire1) && i2c1Mux;
-  if (one) xSemaphoreTake(i2c1Mux, portMAX_DELAY);
   w.beginTransmission(a);
-  bool ok = (w.endTransmission(true) == 0);
-  if (one) xSemaphoreGive(i2c1Mux);
-  return ok;
+  return (w.endTransmission(true) == 0);
 }
 
 static void scanBuses() {
-  for (int b = 0; b < 2; b++) {
-    TwoWire& w = b ? Wire1 : Wire;
+  for (int b = 0; b < 1; b++) {
+    TwoWire& w = Wire;
     char buf[160];
     int n = snprintf(buf, sizeof(buf), "BUS%d:", b);
     int found = 0;
@@ -1401,7 +1428,7 @@ static void scanBuses() {
 }
 
 static void printCur() {
-  plog("Current per module (peak over 40 ms), samples/s: 0x48 %u, 0x49 %u", (unsigned)pubSps[0], (unsigned)pubSps[1]);
+  plog("Current per module (peak over 40 ms), MCP3208 samples/s: %u", (unsigned)adcSps10 * 10u);
   for (uint8_t m = 0; m < NMOD; m++) {
     char pk[24];
     if (iPeakA[m] >= 0) snprintf(pk, sizeof(pk), "%.2f A", iPeakA[m]); else snprintf(pk, sizeof(pk), "--");
@@ -1445,17 +1472,14 @@ static void execCmd(char* line) {
   else if (!strcmp(c, "s") || !strcmp(c, "status")) printStatus();
   else if (!strcmp(c, "scan")) scanBuses();
   else if (!strcmp(c, "adc")) {
-    for (int d = 0; d < 2; d++) {
-      char buf[120];
-      int k = snprintf(buf, sizeof(buf), "ADS 0x%02X (V):", d ? ADS_ADDR1 : ADS_ADDR0);
-      if (!adsPresent[d]) { plog("%s not found", buf); continue; }
-      for (int ch = 0; ch < 4; ch++) {
-        int m = d * 4 + ch;
-        if (lastHave[m]) k += snprintf(buf + k, sizeof(buf) - k, "  A%d=%.3f", ch, lastV[m]);
-        else k += snprintf(buf + k, sizeof(buf) - k, "  A%d=--", ch);
-      }
-      plog("%s", buf);
+    if (!mcpPresent) { plog("MCP3208 not found"); return; }
+    char buf[160];
+    int k = snprintf(buf, sizeof(buf), "MCP3208 (V):");
+    for (int ch = 0; ch < 8; ch++) {
+      if (lastHave[ch]) k += snprintf(buf + k, sizeof(buf) - k, " CH%d=%.3f", ch, lastV[ch]);
+      else k += snprintf(buf + k, sizeof(buf) - k, " CH%d=--", ch);
     }
+    plog("%s", buf);
   }
   else if (!strcmp(c, "i") || !strcmp(c, "ishow")) printCur();
   else if (!strcmp(c, "izero")) {
@@ -1463,7 +1487,7 @@ static void execCmd(char* line) {
     if (!parseMod(a1, mask)) { plog("Usage: izero <1..8|all>  (no load, PWM 0)"); return; }
     if (zeroMask) { plog("Zero measurement is already running"); return; }
     if (mask & modActive()) { plog("REFUSED: PWM of the module is not 0. Send 'pwm all 0' and remove the load first"); return; }
-    if (!adsPresent[0] && !adsPresent[1]) { plog("ADS1115 not found"); return; }
+    if (!mcpPresent) { plog("MCP3208 not found"); return; }
     zeroMask = mask; zeroDoneAt = millis() + ZERO_MS;
     plog("Measuring zero offset (no load!) for %s, wait 1.2 s...", a1);
   }
@@ -1697,10 +1721,10 @@ progress{width:100%;height:18px}
  <small>Procedure: pick the module, press 1 with the solenoids and load disconnected. Then connect the electronic load in CC mode to the module output, press PWM 100%, enter the current shown by the load, press 2. Values are saved in flash and used by the working firmware. Peak = highest reading in the last 40 ms. Valid only when the PWM pulse is long enough (about 20% at 100 Hz).</small>
 </div>
 
-<div class="card"><h2>ADS1115 inputs (volts, latest sample)</h2>
- <table><tr><th></th><th>A0</th><th>A1</th><th>A2</th><th>A3</th></tr>
- <tr><th>0x48</th><td id="a0">-</td><td id="a1">-</td><td id="a2">-</td><td id="a3">-</td></tr>
- <tr><th>0x49</th><td id="a4">-</td><td id="a5">-</td><td id="a6">-</td><td id="a7">-</td></tr></table>
+<div class="card"><h2>MCP3208 inputs (volts, latest sample)</h2>
+ <table><tr><th></th><th>+0</th><th>+1</th><th>+2</th><th>+3</th></tr>
+ <tr><th>CH0-3</th><td id="a0">-</td><td id="a1">-</td><td id="a2">-</td><td id="a3">-</td></tr>
+ <tr><th>CH4-7</th><td id="a4">-</td><td id="a5">-</td><td id="a6">-</td><td id="a7">-</td></tr></table>
  <small id="devs"></small>
 </div>
 
@@ -1763,9 +1787,9 @@ function render(d){S=d;fails=0;
   $('ca'+m).textContent=d.ia[m]===null?'--':d.ia[m].toFixed(2);
   $('ck'+m).textContent=d.ik[m].toFixed(3)+(cal?'':'*');
   $('cs'+m).textContent=st;$('cs'+m).style.cssText=cl}
- $('ci').textContent='ADS samples/s: '+d.sps[0]+' + '+d.sps[1]+', I2C errors '+d.er[0]+' + '+d.er[1]+', limit '+d.lim.toFixed(2)+' A. * = default k, not calibrated.';
+ $('ci').textContent='MCP3208 samples/s: '+d.sps[0]+', ADC checks '+d.er[0]+', errors '+d.er[1]+', limit '+d.lim.toFixed(2)+' A. * = default k, not calibrated.';
  if(document.activeElement!==$('cl2'))$('cl2').value=d.lim.toFixed(1);
- $('devs').textContent='PCA9685 '+(d.pca?'found':'NOT FOUND')+', ADS 0x48 '+(d.ap[0]?'found':'NOT FOUND')+', ADS 0x49 '+(d.ap[1]?'found':'NOT FOUND');
+ $('devs').textContent='PCA9685 '+(d.pca?'found':'NOT FOUND')+', MCP3208 '+(d.ap[0]?'found':'NOT FOUND');
  $('osc').textContent=d.os.toFixed(3);
  if(document.activeElement!==$('fq'))$('fq').value=d.fq}
 function tick(){if(busy)return;busy=true;
@@ -1860,8 +1884,8 @@ static void hState() {
     "\"rd\":%d,\"gn\":%d,\"bz\":%d,\"bl\":%d,\"fq\":%.0f,\"os\":%.3f,\"sw\":%u,\"pca\":%d,\"ap\":[%d,%d],\"rm\":\"%s\","
     "\"lim\":%.2f,\"ov\":%u,\"ic\":%u,\"zm\":%u,\"sps\":[%u,%u],\"er\":[%lu,%lu],\"fw\":\"%s\",\"pw\":[",
     millis() / 1000UL, testOK ? 1 : 0, (unsigned)faultCode, vBus, vFb, kBus, kFb, (relayState == RS_ON || relayState == RS_CLOSING) ? 1 : 0, oeOn, enOn, es,
-    outR, outG, outB, blinkMode, pwmFreq, oscHz / 1e6f, (unsigned)sweepMask, pcaOk, adsPresent[0], adsPresent[1], relayMsg,
-    iLim, (unsigned)tOvlMask, (unsigned)calMaskBits(), (unsigned)zeroMask, (unsigned)pubSps[0], (unsigned)pubSps[1], (unsigned long)adsErr[0], (unsigned long)adsErr[1], FW_VERSION);
+    outR, outG, outB, blinkMode, pwmFreq, oscHz / 1e6f, (unsigned)sweepMask, pcaOk, mcpPresent, 0, relayMsg,
+    iLim, (unsigned)tOvlMask, (unsigned)calMaskBits(), (unsigned)zeroMask, (unsigned)adcSps10 * 10u, 0u, (unsigned long)adcChkTotal, (unsigned long)adcErrTotal, FW_VERSION);
   for (int i = 0; i < 16 && n < cap - 20; i++) n += snprintf(b + n, cap - n, "%s%.1f", i ? "," : "", pwmDuty[i]);
   n += snprintf(b + n, cap - n, "],");
   jf(b, n, cap, "ia", iPeakA, NMOD, "%.2f", true);
@@ -2332,22 +2356,17 @@ void setup() {
   runReset();
 
   Wire.begin(PIN_BUS0_SDA, PIN_BUS0_SCL, I2C_HZ);
-  Wire1.begin(PIN_BUS1_SDA, PIN_BUS1_SCL, I2C1_HZ);
   Wire.setTimeOut(50);
-  Wire1.setTimeOut(10);
-  i2c1Mux = xSemaphoreCreateMutex();
 
   pwmFreq = (float)ramP[RXP_PWMFREQ][0][0];
   lastRunFreq = pwmFreq;
   pcaInit();
-  adsPresent[0] = probe(Wire1, ADS_ADDR0);
-  adsPresent[1] = probe(Wire1, ADS_ADDR1);
+  mcpInit();
   plog("RECEIVER %s, boots %u", FW_VERSION, (unsigned)bootCount);
   plog("%s", FW_TAG);
-  plog("PCA9685 %s; ADS1115 0x%02X %s, 0x%02X %s; current sensors calibrated: %u of 8%s", pcaOk ? "found" : "NOT FOUND", ADS_ADDR0, adsPresent[0] ? "found" : "NOT FOUND",
-       ADS_ADDR1, adsPresent[1] ? "found" : "NOT FOUND", (unsigned)__builtin_popcount(calMaskBits()), anyUncal() ? " (NOT CALIBRATED: default coefficient is used)" : "");
+  plog("PCA9685 %s; MCP3208 %s, clock %u kHz; current sensors calibrated: %u of 8%s", pcaOk ? "found" : "NOT FOUND", mcpPresent ? "found" : "NOT FOUND", (unsigned)ramP[RXP_ADCCLK][0][0], (unsigned)__builtin_popcount(calMaskBits()), anyUncal() ? " (NOT CALIBRATED: default coefficient is used)" : "");
   if (!pcaOk) setFault(3, "PCA9685 not found at start");
-  xTaskCreatePinnedToCore(samplerTask, "ads", 6144, nullptr, 2, nullptr, 1);
+  xTaskCreatePinnedToCore(samplerTask, "adc", 6144, nullptr, 1, nullptr, 0);
 
   estopRaw = (digitalRead(PIN_ESTOP) == HIGH);
   estopBtn = estopRaw;

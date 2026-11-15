@@ -2473,7 +2473,7 @@ void hlCfgDone(const HlCfg &c, uint8_t status, uint16_t applied) {
     return;
   }
   if (c.op == HLO_GET) {                                   // живые параметры только для чтения
-    if (status == 0 && c.param == RXL_ADCSPS) adcSps = applied;
+    if (status == 0 && c.param == RXL_ADCSPS) adcSps = (uint32_t)applied * 10UL;   // приёмник передаёт замеров/с, делённые на 10
     if (status == 0 && c.param == RXL_ADCERR) adcErrPct = applied;
     return;
   }
