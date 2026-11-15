@@ -1,4 +1,4 @@
-Build: 2026-11-15T18:22:24Z  commit b0d8427
+Build: 2026-11-15T18:36:48Z  commit cd60f59
 FQBN: esp32:esp32:heltec_wireless_stick_lite_V3
 ID          Installed Latest Name
 esp32:esp32 3.3.11    3.3.12 esp32
@@ -12,5 +12,5 @@ Adafruit SH110X                   2.1.15    -            user     -
 RadioLib                          7.1.2     8.0.0        user     Universal wireless communication library
 
 -----
-Sketch uses 1211755 bytes (36%) of program storage space. Maximum is 3342336 bytes.
+Sketch uses 1211775 bytes (36%) of program storage space. Maximum is 3342336 bytes.
 Global variables use 60588 bytes (18%) of dynamic memory, leaving 267092 bytes for local variables. Maximum is 327680 bytes.
