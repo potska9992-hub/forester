@@ -251,7 +251,7 @@ static const uint8_t RU_GLYPH[64][8] = {   // 32 capitals, 32 lowercase; 5 colum
   {0x00,0x00,0x0F,0x11,0x0F,0x09,0x11,0x00},  // я
 };
 struct RuTr { const char* en; const char* ru; };
-static const RuTr RU_TR[636] = {
+static const RuTr RU_TR[644] = {
   {"  pass:", "  пр:"},
   {"!ovl l=lim o=open", "!П Л=лим О=обр"},
   {"(empty)", "(пусто)"},
@@ -276,7 +276,12 @@ static const RuTr RU_TR[636] = {
   {"a pulse", "A имп."},
   {"aborted", "прервано"},
   {"about", "около"},
+  {"adc", "АЦП"},
+  {"adc clock", "такт АЦП"},
   {"adc counts, was", "отсчеты АЦП, было"},
+  {"adc errors", "ошибки АЦП"},
+  {"adc!", "АЦП!"},
+  {"adcok", "АЦПок"},
   {"add network", "добавить сеть"},
   {"add: wi-fi networks", "Добавь в Wi-Fi/Сети"},
   {"ads fail: check i2c", "ADS: проверь I2C"},
@@ -582,6 +587,7 @@ static const RuTr RU_TR[636] = {
   {"menu or 6 = exit", "MENU или 6 = выход"},
   {"menu/", "MENU/"},
   {"menu: next screen", "MENU: след. экран"},
+  {"mhz", "МГц"},
   {"min", "мин"},
   {"min 8 characters", "мин. 8 символов"},
   {"minus = side b.", "Минус = сторона B."},
@@ -763,6 +769,8 @@ static const RuTr RU_TR[636] = {
   {"safe start", "БЕЗОП. СТАРТ"},
   {"same", "ТА ЖЕ"},
   {"same text as on the", "Тот же текст, что"},
+  {"samples/s", "замеров/с"},
+  {"samples/s: ...", "замеров/с: ..."},
   {"saved", "сохранено"},
   {"saved and connected", "сохр. и подключено"},
   {"saved networks", "сохр. сетей"},
@@ -890,7 +898,7 @@ static const RuTr RU_TR[636] = {
   {"you want", "которую нужно"}
 };
 struct RuIdx { uint16_t s, n; };
-static const RuIdx RU_IDX[128] = { {0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,1},{1,1},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{2,5},{0,0},{0,0},{0,0},{0,0},{7,4},{0,0},{0,0},{11,2},{13,1},{14,1},{0,0},{0,0},{0,0},{15,2},{0,0},{17,1},{0,0},{0,0},{0,0},{0,0},{18,3},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{21,34},{55,29},{84,58},{142,35},{177,27},{204,25},{229,9},{238,10},{248,20},{268,6},{274,5},{279,37},{316,25},{341,39},{380,21},{401,31},{432,1},{433,73},{506,59},{565,33},{598,9},{607,6},{613,20},{633,1},{634,2},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0} };
+static const RuIdx RU_IDX[128] = { {0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,1},{1,1},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{2,5},{0,0},{0,0},{0,0},{0,0},{7,4},{0,0},{0,0},{11,2},{13,1},{14,1},{0,0},{0,0},{0,0},{15,2},{0,0},{17,1},{0,0},{0,0},{0,0},{0,0},{18,3},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{21,39},{60,29},{89,58},{147,35},{182,27},{209,25},{234,9},{243,10},{253,20},{273,6},{279,5},{284,37},{321,26},{347,39},{386,21},{407,31},{438,1},{439,73},{512,61},{573,33},{606,9},{615,6},{621,20},{641,1},{642,2},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0} };
 
 // Вспомогательные функции собраны в структуру: в .ino свободная функция раньше типов сбила бы автогенерацию прототипов Arduino.
 struct RuUtil {
@@ -1089,13 +1097,15 @@ enum ScrId { SC_MAIN, SC_TX, SC_RX, SC_LINK, SC_POWER, SC_LOG };
 enum DbgPage { DP_RADIO, DP_TELEM, DP_LIM, DP_RAW, DP_SYS, DP_LOG };
 enum ConfAct { CA_CLEARLOG, CA_FORGET, CA_FR_TX, CA_FR_RX, CA_NETDEL, CA_NETALL, CA_COPYALL };
 // LT_SHORT больше не создаётся (решение 28.10.2026), номер оставлен, чтобы не сломать старые записи журнала в NVS
-enum LogType { LT_ESTOP, LT_RXALARM, LT_NOLINK, LT_LINKOK, LT_RXFAULT, LT_LIMIT, LT_BATTTX, LT_OVL, LT_SHORT, LT_OPEN, LT_BATTRX, LT_COUNT };
+enum LogType { LT_ESTOP, LT_RXALARM, LT_NOLINK, LT_LINKOK, LT_RXFAULT, LT_LIMIT, LT_BATTTX, LT_OVL, LT_SHORT, LT_OPEN, LT_BATTRX, LT_ADC, LT_ADCLONG, LT_ADCOK, LT_COUNT };
 // параметры приёмника (SetConfig): SOL = на соленоид (канал x сторона A/B), CH = на канал, GLOB = общие
 enum RxParam { RXP_LIMIT, RXP_DUTY, RXP_MAXD, RXP_RAMPUP, RXP_RAMPDN, RXP_CHEN,
                RXP_OVLDLY, RXP_LINKTMO, RXP_PWMFREQ, RXP_DITHAMP, RXP_DITHFRQ, RXP_PWR,
-               RXP_MODE, RXP_STARTI, RXP_MAXI, NUM_RXP };
+               RXP_MODE, RXP_STARTI, RXP_MAXI, RXP_ADCCLK, NUM_RXP };
+// живые параметры только для чтения (не хранятся, в CRC и синхронизацию не входят): читаются запросом HLO_GET (значение 0xFFFF)
+enum { RXL_ADCSPS = 16, RXL_ADCERR = 17 };
 enum RxScope { PS_SOL, PS_CH, PS_GLOB };
-enum RxFmt { F_AMP, F_PCT, F_MS, F_HZ, F_ONOFF, F_DBM, F_MODE, F_PCT10 };
+enum RxFmt { F_AMP, F_PCT, F_MS, F_HZ, F_ONOFF, F_DBM, F_MODE, F_PCT10, F_MHZ };
 struct RxParamDef { const char* name; uint8_t scope; int16_t mn, mx, step, def; uint8_t fmt; };
 struct LogEv { uint8_t type, ch, side, cnt; uint16_t dA; uint32_t t; bool old; };
 struct Telem {
@@ -1110,6 +1120,7 @@ struct Telem {
   uint8_t boots;            // счётчик перезагрузок приёмника
   uint8_t cfgCrc;           // CRC8 сохранённой конфигурации приёмника
   uint8_t wifi, wifiArg;    // состояние Wi-Fi приёмника и параметр (процент / код ошибки)
+  uint8_t adc;              // уровень ошибок АЦП тока: 0 норма, 1 от 2 %, 2 от 5 %, 3 от 10 % (биты 3-4 байта Status)
 };
 // ---- радио HydroLink: константы (описание протокола ниже, в блоке РАДИО) ----
 #define HL_PROTO        1
@@ -1160,7 +1171,8 @@ const RxParamDef RXP[NUM_RXP] = {
   { "RX POWER",  PS_GLOB,   2,   22,  1,  10, F_DBM   },
   { "CONTROL",   PS_GLOB,   0,    1,  1,   0, F_MODE  },   // 0 = PWM (без обратной связи), 1 = CURRENT (по току)
   { "START I",   PS_SOL,    0,  100,  1,   5, F_AMP   },   // стартовый ток, режим CURRENT (0.1 А)
-  { "MAX I",     PS_SOL,    5,  100,  1,  15, F_AMP   }    // максимальный рабочий ток, режим CURRENT
+  { "MAX I",     PS_SOL,    5,  100,  1,  15, F_AMP   },   // максимальный рабочий ток, режим CURRENT
+  { "ADC CLOCK", PS_GLOB, 1000, 2000, 250, 1000, F_MHZ }    // такт SPI АЦП тока в кГц: 1.00..2.00 МГц шагом 0.25, по умолчанию 1.00
 };
 
 // цвета: 0 красный, 1 зелёный, 2 янтарный (оба)
@@ -1328,7 +1340,7 @@ int     logN = 0;
 uint8_t plog[LOG_MAX][5];       // сохранённые: type, ch, side, dA lo, dA hi; [0] = новое
 int     plogN = 0;
 uint32_t lastPersist[LT_COUNT][NUM_CH];
-const char* LT_NAME[LT_COUNT] = { "ESTP", "RXAL", "NOLK", "LINK", "RXFT", "LIM", "BATT", "OVL", "SHRT", "OPEN", "RXBT" };
+const char* LT_NAME[LT_COUNT] = { "ESTP", "RXAL", "NOLK", "LINK", "RXFT", "LIM", "BATT", "OVL", "SHRT", "OPEN", "RXBT", "ADC", "ADC!", "ADCok" };
 
 bool logPersistent(uint8_t t) { return t == LT_OVL || t == LT_SHORT || t == LT_OPEN || t == LT_BATTRX; }
 bool logHasChannel(uint8_t t) { return t == LT_LIMIT || t == LT_OVL || t == LT_SHORT || t == LT_OPEN; }
@@ -2188,6 +2200,8 @@ uint16_t simPeak[NUM_CH];
 uint32_t rfTx = 0, rfRx = 0, rfLost = 0;
 int   rfRssi = -63, rfSnr10 = 95, rfRate = 26;
 unsigned long rfAgeMs = 0;
+uint32_t adcSps = 0;               // замеров АЦП в секунду (живое чтение с приёмника на экране такта)
+bool adcPerm = false;              // ошибки АЦП 10 % и выше держатся дольше 30 с: пометка на главном экране
 
 void simTelemetry(unsigned long now) {
   if (simMode == SIM_RADIO) {                            // телеметрия приходит по радио (hlStep), здесь только сброс при потере связи
@@ -2456,6 +2470,10 @@ void hlCfgDone(const HlCfg &c, uint8_t status, uint16_t applied) {
     }
     return;
   }
+  if (c.op == HLO_GET) {                                   // живые параметры только для чтения
+    if (status == 0 && c.param == RXL_ADCSPS) adcSps = applied;
+    return;
+  }
   if (c.op == HLO_SET) {
     if (status == 0) {
       simRam[c.param][c.ch][c.dir] = applied;
@@ -2592,6 +2610,7 @@ static void hlOnTelem(const uint8_t* p, size_t len, unsigned long now) {
   t.kill = p[27] & 1; t.reason = (p[27] >> 1) & 3;
   t.vrx = p[28]; t.rssi = (int8_t)p[29];
   t.boots = p[30]; t.cfgCrc = p[31]; t.wifi = p[32]; t.wifiArg = p[33];
+  t.adc = (p[27] >> 3) & 3;
   bool first = !hlUp;
   hlBootsNow = t.boots;
   tel = t;
@@ -2708,7 +2727,8 @@ void hlStep(unsigned long now) {
       if (hlCur.tries >= HL_CFG_TRIES) {
         hlCurOn = false;
         LOGF("Cfg: no answer (op %d p %d)", hlCur.op, hlCur.param);
-        if (hlCur.kind == 1) { hlSyncBusy = false; hlSynced = false; hlSyncRetryAt = now + 2000UL; }
+        if (hlCur.kind == 1 && hlCur.op == HLO_BATCH && hlCur.param == RXP_ADCCLK) { /* старый приёмник не знает такт АЦП: синхронизация идёт дальше */ }
+        else if (hlCur.kind == 1) { hlSyncBusy = false; hlSynced = false; hlSyncRetryAt = now + 2000UL; }
         else {
           if (hlCur.op == HLO_SET) { simRam[hlCur.param][hlCur.ch][hlCur.dir] = hlCur.old; if (hlCur.param == RXP_MODE) rxModeCache = hlCur.old; }
           if (hlCur.op == HLO_CMD || hlCur.op == HLO_NET) { hlWifiAck = true; hlWifiAckSt = 255; }
@@ -2759,6 +2779,15 @@ void hlStep(unsigned long now) {
 }
 
 // Фронты событий: связь, телеметрия, батарея -> журнал
+#define ADC_LONG_MS     30000UL     // 10 % и выше столько подряд: проблема постоянная
+#define ADC_REPEAT_MS   60000UL     // повтор сообщения при постоянной проблеме
+void adcToast(int thr) {
+  char t[20];
+  snprintf(t, sizeof(t), "ADC errors >%d%%", thr);
+  toast(t);
+  toastUntil = millis() + 3000;
+}
+
 void eventsTick(unsigned long now) {
   static bool pLinked = false;
   static uint8_t pOvl = 0, pOpen = 0, pLim = 0;
@@ -2803,6 +2832,35 @@ void eventsTick(unsigned long now) {
 
   if (batLevel >= 1 && pBat == 0) logEvent(LT_BATTTX, 0, 0, (uint16_t)(vbat * 10.0f));
   pBat = batLevel;
+
+  // ошибки АЦП тока (уровень приёмника 0..3 = норма, от 2 %, от 5 %, от 10 %): сообщение 3 с при ухудшении, запись в журнал; отключить нельзя
+  static uint8_t pAdc = 0;
+  static unsigned long adcHighSince = 0, adcNextRepeat = 0;
+  static const uint8_t ADC_THR[4] = { 0, 2, 5, 10 };
+  uint8_t lvl = telValid ? tel.adc : 0;
+  if (lvl > pAdc) {
+    logEvent(LT_ADC, 0, 0, (uint16_t)(ADC_THR[lvl] * 10));
+    adcToast(ADC_THR[lvl]);
+  }
+  if (lvl >= 3) {
+    if (adcHighSince == 0) adcHighSince = now ? now : 1;
+    else if (!adcPerm && (now - adcHighSince) >= ADC_LONG_MS) {
+      adcPerm = true;
+      adcNextRepeat = now + ADC_REPEAT_MS;
+      logEvent(LT_ADCLONG, 0, 0, 100);
+      adcToast(10);
+    } else if (adcPerm && (long)(now - adcNextRepeat) >= 0) {
+      adcNextRepeat = now + ADC_REPEAT_MS;
+      adcToast(10);
+    }
+  } else {
+    adcHighSince = 0;
+    if (adcPerm) {
+      adcPerm = false;
+      if (telValid) logEvent(LT_ADCOK, 0, 0, 0);
+    }
+  }
+  pAdc = lvl;
 }
 
 // ============ МЕНЮ ============
@@ -2866,7 +2924,7 @@ int menuCount() {
     case MS_RXWIFIM: return RW_COUNT;
     case MS_RXCH:    { RxItem it[16]; return rxItems(it); }
     case MS_RXDIR:   return 3;
-    case MS_RXGLOB:  return 7;
+    case MS_RXGLOB:  return 8;
     default:         return 0;
   }
 }
@@ -2948,6 +3006,7 @@ void fmtParam(int p, int v, char* b, size_t n) {
     case F_HZ:    snprintf(b, n, "%dHz", v); break;
     case F_ONOFF: snprintf(b, n, "%s", v ? "ON" : "OFF"); break;
     case F_MODE:  snprintf(b, n, "%s", v ? "CURRENT" : "PWM"); break;
+    case F_MHZ:   snprintf(b, n, "%d.%02dMHz", v / 1000, (v % 1000) / 10); break;
     default:      snprintf(b, n, "%ddBm", v); break;
   }
 }
@@ -3493,9 +3552,9 @@ void menuLabel(int i, char* b, size_t n) {
       snprintf(b, n, "Back");
       break;
     case MS_RXGLOB:
-      if (i < 6) {
+      if (i < 7) {
         char v[12];
-        int p = (i == 0) ? RXP_MODE : RXP_OVLDLY + i - 1;
+        int p = (i == 0) ? RXP_MODE : (i == 6) ? RXP_ADCCLK : RXP_OVLDLY + i - 1;
         fmtParam(p, rxQuery(0, 0, p), v, sizeof(v));
         snprintf(b, n, "%-9s %s", RXP[p].name, v);
       } else snprintf(b, n, "Back");
@@ -3665,6 +3724,7 @@ void startRxEdit(int param, int ch, int dir, MenuScr ret) {
   rxRetScr = ret;
   rxEditAllF = false;
   rxOrig = rxQuery(ch, dir, param);           // на радио: SetConfig(0xFFFF) -> Ack
+  adcSps = 0;
   rxCur = rxOrig;
   leverArmed = false;                         // джойстик заработает, когда будет в центре
   gotoScr(MS_RXEDIT, 0);
@@ -3759,6 +3819,19 @@ void rxBulkTick(unsigned long now) {
     toast("Done");
     gotoRxRet();
   }
+}
+
+// экран такта АЦП: раза два в секунду спрашиваем у приёмника число замеров в секунду
+void adcPollTick(unsigned long now) {
+  static unsigned long nextAt = 0;
+  if (menuScr != MS_RXEDIT || rxParam != RXP_ADCCLK) return;
+  if (simMode != SIM_RADIO) {                            // имитация: по измеренным на стенде значениям (37 тыс./с на 1 МГц, около +33 на каждый кГц)
+    adcSps = 37000UL + (uint32_t)(rxCur - 1000) * 33UL;
+    return;
+  }
+  if ((long)(now - nextAt) < 0) return;
+  nextAt = now + 500;
+  if (hlQn == 0 && !hlCurOn) hlCfgPut(HLO_GET, RXL_ADCSPS, 0, 0, 0xFFFF, false, 0, 0);
 }
 
 void rxEditSave() {
@@ -4007,7 +4080,7 @@ void menuSelect(int i) {
       break;
     case MS_RXGLOB:
       idxRxGlob = i;
-      if (i < 6) startRxEdit((i == 0) ? RXP_MODE : RXP_OVLDLY + i - 1, 0, 0, MS_RXGLOB);
+      if (i < 7) startRxEdit((i == 0) ? RXP_MODE : (i == 6) ? RXP_ADCCLK : RXP_OVLDLY + i - 1, 0, 0, MS_RXGLOB);
       else       gotoScr(MS_RX, idxRx);
       break;
     case MS_SCREENS:
@@ -5487,7 +5560,7 @@ void drawRun1() {
     else if (!hlUp)          display.print("NO SIGNAL");
     else if (hlSyncBusy)     display.printf("SYNC %d%%", hlSyncPct());
     else if (tel.kill)       display.print("STOPPED");
-    else                     display.print("READY");
+    else                     display.print(adcPerm ? "READY ADC!" : "READY");
   }
   else if (simMode == SIM_LINK) display.print("SIM: READY");
   else                          display.print("NO SIGNAL");
@@ -6563,6 +6636,9 @@ void drawRxEdit() {
     display.print("all channels");
   } else if (rxParam == RXP_MODE) {
     display.print("PWM=open CUR=PI");
+  } else if (rxParam == RXP_ADCCLK) {
+    if (adcSps) display.printf("%lu samples/s", (unsigned long)adcSps);
+    else        display.print("samples/s: ...");
   }
   hintLine("%d:+/- %d:ok/cancel");
   drawBattery();
@@ -7055,6 +7131,7 @@ void stepLogic(unsigned long now) {
       if (menuScr == MS_RXWIFI) rxWifiTick(now);
       if (menuScr == MS_NETPICK) netPickTick(now);
       rxBulkTick(now);
+      adcPollTick(now);
       navStep(now);
       break;
     case ST_CAL_C:   calCenterTick(now); break;

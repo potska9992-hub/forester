@@ -247,3 +247,8 @@ D.update({
 "radio power": "мощность радио", "pulse": "пульс", "a pulse": "A имп.", "b pulse": "B имп.",
 "  pass:": "  пр:", "factory reset": "заводской сброс", "charge low": "заряд низкий", "charge crit.": "заряд крит.",
 })
+D.update({
+"adc clock": "такт АЦП", "adc errors": "ошибки АЦП", "adc!": "АЦП!", "adc": "АЦП", "samples/s": "замеров/с",
+"samples/s: ...": "замеров/с: ...", "mhz": "МГц", "adcok": "АЦПок",
+})
+
