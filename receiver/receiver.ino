@@ -611,8 +611,7 @@ static void samplerTask(void*) {
         idleAt = now + (int64_t)IDLE_SCAN_MS * 1000;
         idleCh = (idleCh + 1) & 7;
         float v = mcpRead(idleCh) * (MCP_VREF / 4095.0f);
-        lastV[idleCh] = v; lastHave[idleCh] = true;
-        mcpCheck(idleCh, selHz, M);
+        lastV[idleCh] = v; lastHave[idleCh] = true;        // проверка ошибок только на активных каналах: неподключённые входы плавают и дают ложные ошибки
       } else if (now >= burstAt) {                                  // нет нагрузки: замер скорости серией чтений
         burstAt = now + 1000000;
         const int N = 600;
@@ -1787,7 +1786,7 @@ function render(d){S=d;fails=0;
   $('ca'+m).textContent=d.ia[m]===null?'--':d.ia[m].toFixed(2);
   $('ck'+m).textContent=d.ik[m].toFixed(3)+(cal?'':'*');
   $('cs'+m).textContent=st;$('cs'+m).style.cssText=cl}
- $('ci').textContent='MCP3208 samples/s: '+d.sps[0]+', ADC checks '+d.er[0]+', errors '+d.er[1]+', limit '+d.lim.toFixed(2)+' A. * = default k, not calibrated.';
+ $('ci').textContent='MCP3208 samples/s: '+d.sps[0]+', ADC errors '+d.er[0]+'% (level '+d.er[1]+', last 2 s, active modules only), limit '+d.lim.toFixed(2)+' A. * = default k, not calibrated.';
  if(document.activeElement!==$('cl2'))$('cl2').value=d.lim.toFixed(1);
  $('devs').textContent='PCA9685 '+(d.pca?'found':'NOT FOUND')+', MCP3208 '+(d.ap[0]?'found':'NOT FOUND');
  $('osc').textContent=d.os.toFixed(3);
@@ -1885,7 +1884,7 @@ static void hState() {
     "\"lim\":%.2f,\"ov\":%u,\"ic\":%u,\"zm\":%u,\"sps\":[%u,%u],\"er\":[%lu,%lu],\"fw\":\"%s\",\"pw\":[",
     millis() / 1000UL, testOK ? 1 : 0, (unsigned)faultCode, vBus, vFb, kBus, kFb, (relayState == RS_ON || relayState == RS_CLOSING) ? 1 : 0, oeOn, enOn, es,
     outR, outG, outB, blinkMode, pwmFreq, oscHz / 1e6f, (unsigned)sweepMask, pcaOk, mcpPresent, 0, relayMsg,
-    iLim, (unsigned)tOvlMask, (unsigned)calMaskBits(), (unsigned)zeroMask, (unsigned)adcSps10 * 10u, 0u, (unsigned long)adcChkTotal, (unsigned long)adcErrTotal, FW_VERSION);
+    iLim, (unsigned)tOvlMask, (unsigned)calMaskBits(), (unsigned)zeroMask, (unsigned)adcSps10 * 10u, 0u, (unsigned long)adcErrPct, (unsigned long)adcLvl, FW_VERSION);
   for (int i = 0; i < 16 && n < cap - 20; i++) n += snprintf(b + n, cap - n, "%s%.1f", i ? "," : "", pwmDuty[i]);
   n += snprintf(b + n, cap - n, "],");
   jf(b, n, cap, "ia", iPeakA, NMOD, "%.2f", true);
