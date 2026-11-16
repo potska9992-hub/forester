@@ -44,6 +44,7 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "esp_timer.h"
+#include "esp_system.h"
 
 #define PROJECT_NAME  "receiver"
 #define FW_VERSION    "1.0"
@@ -195,6 +196,20 @@ static uint16_t ramP[NUM_RXP][NUM_CH][2];
 static uint16_t nvsP[NUM_RXP][NUM_CH][2];
 static volatile bool cfgSavePending = false;
 static uint8_t  bootCount = 0;
+static const char* rstReasonText() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:   return "power-on";
+    case ESP_RST_EXT:       return "external reset pin";
+    case ESP_RST_SW:        return "software restart";
+    case ESP_RST_PANIC:     return "PANIC (crash)";
+    case ESP_RST_INT_WDT:   return "interrupt watchdog";
+    case ESP_RST_TASK_WDT:  return "task watchdog";
+    case ESP_RST_WDT:       return "other watchdog";
+    case ESP_RST_DEEPSLEEP: return "deep sleep wake";
+    case ESP_RST_BROWNOUT:  return "BROWNOUT (supply voltage dip)";
+    default:                return "unknown";
+  }
+}
 static uint16_t chMaskPult = 0xFF, chTypesPult = 0, pultTxPwr = 0;
 static uint32_t bindId = DEF_BIND_ID;
 
@@ -409,15 +424,16 @@ static void setEn(bool on) { enOn = on; digitalWrite(PIN_EN, on ? HIGH : LOW); }
 // EN драйверов включается вместе с реле и остаётся включённым после его размыкания (конденсаторы разряжаются через драйверы).
 // Выключается только при аварии (setFault): реле залипло (1) или не замкнулось / обрыв за реле (2), а также потеря PCA (3). Выходы PCA9685 (OE) при остановке выключаются как раньше.
 static bool enHold = false;
+static bool enForceOff = false;            // только вкладка Test: команда 'en 0' держит EN выключенным даже при замкнутом реле (для экспериментов)
 static void relayPin(bool on) {
-  if (on && !faultCode) { enHold = true; setEn(true); }
+  if (on && !faultCode) { enHold = true; if (!enForceOff) setEn(true); }
   digitalWrite(PIN_RELAY, on ? LOW : HIGH);
 }
 
 // все выходы в безопасное состояние: сначала аппаратно (OE, EN), потом PCA, потом реле
 static void hardOff() {
   setOe(false);
-  setEn(enHold && !faultCode);
+  setEn(enHold && !faultCode && !enForceOff);
   pcaSetAll(0);
   sweepMask = 0;
 }
@@ -899,7 +915,7 @@ static void controlTick(unsigned long now) {
     bool allow = !faultCode && !btnLatched;
     if (!allow) { testRelay = false; testOe = false; testEn = false; hardOff(); }
     setOe(allow && testOe);
-    setEn(allow && (testEn || enHold));
+    setEn(allow && !enForceOff && (testEn || enHold));
     outAct = false;
     runReset();
     testCurrentTick(now);
@@ -1332,6 +1348,7 @@ static void testOff(const char* why) {
   bool was = testOK;
   testOK = false;
   testRelay = testOe = testEn = false;
+  enForceOff = false;
   manRed = manGreen = manBuz = false; blinkMode = 0;
   sweepMask = 0;
   tOvlMask = 0;
@@ -1399,7 +1416,7 @@ static void printHelp() {
 }
 
 static void printStatus() {
-  plog("STATUS receiver %s, uptime %lu s, boots %u", FW_VERSION, millis() / 1000UL, (unsigned)bootCount);
+  plog("STATUS receiver %s, uptime %lu s, boots %u, last reset: %s", FW_VERSION, millis() / 1000UL, (unsigned)bootCount, rstReasonText());
   plog("Bus %.2f V (k %.3f), after relay %.2f V (k %.3f)", vBus, kBus, vFb, kFb);
   plog("Relay state %d, OE %s, EN %s, RX E-STOP %s, fault %u", (int)relayState, oeOn ? "ON" : "off", enOn ? "ON" : "off", estopBtn ? "ACTIVE" : "released", (unsigned)faultCode);
   plog("PCA9685 %s, PWM %.0f Hz; MCP3208 %s", pcaOk ? "found" : "NOT FOUND", pwmFreq, mcpPresent ? "found" : "NOT FOUND");
@@ -1524,7 +1541,7 @@ static void execCmd(char* line) {
     if (v < 0.3f || v > 6.0f) { plog("Usage: ilim 2.0  (Test tab current limit, A, 0.3..6; now %.2f)", iLim); return; }
     iLim = v; prefs.putFloat("ilim", v); plog("Test current limit %.2f A (saved)", v);
   }
-  else if (!strcmp(c, "stop")) { testRelay = testOe = testEn = false; manRed = manGreen = manBuz = false; blinkMode = 0; hardOff(); relayOpen(millis()); plog("ALL OFF"); }
+  else if (!strcmp(c, "stop")) { testRelay = testOe = testEn = false; enForceOff = false; manRed = manGreen = manBuz = false; blinkMode = 0; hardOff(); relayOpen(millis()); plog("ALL OFF"); }
   else if (!strcmp(c, "r") || !strcmp(c, "relay")) {
     if (!arg01) { plog("Usage: r 1 or r 0"); return; }
     if (on && bad) { plog("REFUSED: alarm or fault is active"); return; }
@@ -1539,7 +1556,9 @@ static void execCmd(char* line) {
   else if (!strcmp(c, "en")) {
     if (!arg01) { plog("Usage: en 1 or en 0"); return; }
     if (on && bad) { plog("REFUSED: alarm or fault is active"); return; }
-    testEn = on; plog("EN line %s", on ? "HIGH (drivers enabled)" : "LOW (drivers disabled)");
+    testEn = on;
+    enForceOff = !on;                       // en 0 выключает EN полностью, даже если реле замкнуто (конденсаторы драйверов в этом случае не разряжаются)
+    plog("EN line %s", on ? "HIGH (drivers enabled)" : "LOW, held off even with the relay closed (until en 1, stop or leaving Test)");
   }
   else if (!strcmp(c, "red") || !strcmp(c, "green") || !strcmp(c, "buz")) {
     if (!arg01) { plog("Usage: %s 1 or %s 0", c, c); return; }
@@ -1921,8 +1940,10 @@ static void hTestOk() {
     testOK = true; lastPoll = now;
     wifiSt = HLW_PH_TEST;
     testRelay = testOe = testEn = false;
+    enForceOff = false;
     hardOff();
     plog("Test mode ON (confirmed on the page)");
+    plog("Last reset: %s (boots %u)", rstReasonText(), (unsigned)bootCount);
   }
   server.send(200, "text/plain", "ok");
 }
@@ -2362,6 +2383,7 @@ void setup() {
   pcaInit();
   mcpInit();
   plog("RECEIVER %s, boots %u", FW_VERSION, (unsigned)bootCount);
+  plog("Reset reason: %s", rstReasonText());
   plog("%s", FW_TAG);
   plog("PCA9685 %s; MCP3208 %s, clock %u kHz; current sensors calibrated: %u of 8%s", pcaOk ? "found" : "NOT FOUND", mcpPresent ? "found" : "NOT FOUND", (unsigned)ramP[RXP_ADCCLK][0][0], (unsigned)__builtin_popcount(calMaskBits()), anyUncal() ? " (NOT CALIBRATED: default coefficient is used)" : "");
   if (!pcaOk) setFault(3, "PCA9685 not found at start");
