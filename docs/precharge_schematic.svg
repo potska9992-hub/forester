@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-110 0 1040 640" width="1560" height="960" font-family="DejaVu Sans, Arial, sans-serif" font-size="13">
+<rect x="-110" y="0" width="1040" height="640" fill="#fff"/>
+<g stroke="#111" stroke-width="2" fill="none">
+<!-- bus+ -->
+<line x1="-20" y1="120" x2="400" y2="120"/>
+<!-- relay -->
+<line x1="400" y1="120" x2="468" y2="98"/>
+<line x1="480" y1="120" x2="780" y2="120"/>
+<!-- A down -->
+<line x1="200" y1="120" x2="200" y2="170"/>
+<line x1="200" y1="170" x2="330" y2="170"/>
+<line x1="330" y1="170" x2="330" y2="200"/>
+<!-- R1 -->
+<line x1="200" y1="170" x2="200" y2="205"/><rect x="193" y="205" width="14" height="30"/><line x1="200" y1="235" x2="200" y2="270"/>
+<!-- gate -->
+<line x1="200" y1="270" x2="280" y2="270"/>
+<!-- zener -->
+<line x1="245" y1="170" x2="245" y2="208" stroke-dasharray="5 3"/>
+<line x1="235" y1="208" x2="255" y2="208"/>
+<polygon points="245,210 235,232 255,232" stroke-dasharray="5 3"/>
+<line x1="245" y1="232" x2="245" y2="270" stroke-dasharray="5 3"/>
+<!-- R2 -->
+<line x1="200" y1="270" x2="200" y2="300"/><rect x="193" y="300" width="14" height="30"/><line x1="200" y1="330" x2="200" y2="370"/>
+<!-- Q1 -->
+<rect x="280" y="200" width="100" height="120"/>
+<line x1="330" y1="320" x2="330" y2="360"/><line x1="330" y1="360" x2="420" y2="360"/>
+<rect x="420" y="350" width="90" height="20"/>
+<line x1="510" y1="360" x2="620" y2="360"/><line x1="620" y1="360" x2="620" y2="120"/>
+<!-- Q2 -->
+<rect x="140" y="370" width="120" height="70"/>
+<line x1="50" y1="405" x2="140" y2="405"/>
+<line x1="200" y1="440" x2="200" y2="500"/>
+<!-- R3 pulldown -->
+<line x1="100" y1="405" x2="100" y2="430"/><rect x="93" y="430" width="14" height="30"/><line x1="100" y1="460" x2="100" y2="500"/>
+<!-- GND -->
+<line x1="50" y1="500" x2="780" y2="500"/>
+<!-- load cap -->
+<line x1="700" y1="120" x2="700" y2="300"/><line x1="685" y1="300" x2="715" y2="300"/><line x1="685" y1="312" x2="715" y2="312"/><line x1="700" y1="312" x2="700" y2="500"/>
+<!-- taps -->
+<line x1="120" y1="120" x2="120" y2="72"/><line x1="560" y1="120" x2="560" y2="72"/>
+</g>
+<g fill="#111">
+<circle cx="-20" cy="120" r="4"/><circle cx="400" cy="120" r="4"/><circle cx="480" cy="120" r="4"/>
+<circle cx="200" cy="120" r="4"/><circle cx="200" cy="170" r="4"/><circle cx="245" cy="170" r="4"/>
+<circle cx="200" cy="270" r="4"/><circle cx="245" cy="270" r="4"/><circle cx="100" cy="405" r="4"/>
+<circle cx="620" cy="120" r="4"/><circle cx="700" cy="120" r="4"/><circle cx="560" cy="120" r="4"/><circle cx="120" cy="120" r="4"/>
+<circle cx="200" cy="500" r="4"/><circle cx="100" cy="500" r="4"/><circle cx="700" cy="500" r="4"/>
+</g>
+<g fill="#111">
+<text x="-110" y="34" font-size="20" font-weight="bold">Предзаряд: IRF4905 + AO3400 (параллельно контактам реле)</text>
+<text x="-105" y="112">+ шина (VBUS)</text>
+<text x="-105" y="140" fill="#555">12 / 24 В</text>
+<text x="105" y="62">в GPIO6 (VBUS), делитель 100к/10к</text>
+<text x="565" y="62">в GPIO7 (VFB), делитель 100к/10к</text>
+<text x="402" y="82">Реле (основное)</text>
+<text x="402" y="150" fill="#555">GPIO21</text>
+<text x="620" y="108" fill="#555"></text>
+<text x="710" y="108">к драйверам</text>
+<text x="722" y="310">C драйверов</text>
+<text x="722" y="326" fill="#555">~8 мФ</text>
+<text x="330" y="226" text-anchor="middle" font-size="11">S</text>
+<text x="288" y="274" font-size="11">G</text>
+<text x="330" y="312" text-anchor="middle" font-size="11">D</text>
+<text x="330" y="262" text-anchor="middle" font-weight="bold">Q1 IRF4905</text>
+<text x="330" y="280" text-anchor="middle" font-size="11" fill="#555">P-канал</text>
+<text x="465" y="390" text-anchor="middle">Rпред 10 Ом 5 Вт</text>
+<text x="186" y="225" text-anchor="end">R1 220к</text>
+<text x="186" y="320" text-anchor="end">R2 100к</text>
+<text x="200" y="403" text-anchor="middle" font-weight="bold">Q2 AO3400</text>
+<text x="200" y="420" text-anchor="middle" font-size="11" fill="#555">N-канал</text>
+<text x="212" y="386" font-size="11">D</text><text x="212" y="436" font-size="11">S</text><text x="122" y="398" font-size="11">G</text>
+<text x="46" y="400" text-anchor="end">GPIO18 (ESP)</text>
+<text x="46" y="418" text-anchor="end" font-size="11" fill="#555">HIGH = предзаряд</text>
+<text x="86" y="450" text-anchor="end">R3 100к</text>
+<text x="255" y="160" font-size="11" fill="#555">Dz 15 В — только для 24 В</text>
+<text x="-105" y="520" fill="#555">минус шины = GND ESP</text>
+</g>
+<g fill="#111" font-size="14">
+<text x="-105" y="568" font-weight="bold">Порядок перед включением реле:</text>
+<text x="-105" y="590">1) VFB &lt; 80 % от VBUS → GPIO18 = HIGH (предзаряд через Rпред).</text>
+<text x="-105" y="610">2) Ждём VFB ≥ 80 % от VBUS → включаем реле → GPIO18 = LOW.   Если VFB ≥ 80 % сразу — предзаряд пропускаем.</text>
+</g>
+</svg>
