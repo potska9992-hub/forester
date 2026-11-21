@@ -1654,16 +1654,17 @@ bool isMoved(int i) {
   return adsOk[CH[i].ads] && abs(raw[i] - cenV[i]) > deadzone;
 }
 
-// -100..+100 по калибровке, симметрично относительно центра
+// -100..+100 по калибровке; отсчёт от края мёртвой зоны: на краю зоны 0, на крайнем положении 100 (без скачка при выходе из зоны)
 int normalizeBase(int i) {
   int c = cenV[i];
   long v = 0;
+  int dz = deadzone;
   if (raw[i] >= c) {
-    int span = mxV[i] - c;
-    if (span > 0) v = (long)(raw[i] - c) * 100 / span;
+    int span = mxV[i] - c - dz;
+    if (span > 0) v = (long)(raw[i] - c - dz) * 100 / span;
   } else {
-    int span = c - mnV[i];
-    if (span > 0) v = (long)(raw[i] - c) * 100 / span;
+    int span = c - mnV[i] - dz;
+    if (span > 0) v = (long)(raw[i] - c + dz) * 100 / span;
   }
   return (int)constrain(v, -100L, 100L);
 }
