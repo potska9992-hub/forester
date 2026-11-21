@@ -150,7 +150,7 @@ D = {
 "delete network?": "УДАЛИТЬ СЕТЬ?", "name and password": "имя и пароль", "are erased.": "будут удалены.",
 "forget all wi-fi?": "ЗАБЫТЬ ВСЕ СЕТИ?", "all saved networks": "все сохр. сети", "settings of this": "настройки этого",
 "channel go to all": "канала идут во все", "others. enable kept": "остальные. Вкл не меняется",
-"reset receiver?": "СБРОС ПРИЕМНИКА?", "restart rx": "перезапуск RX", "restart receiver?": "ПЕРЕЗАПУСК ПРИЕМНИКА?", "outputs stop,": "выходы стоп,", "link returns in": "связь вернется", "a few seconds.": "через пару секунд.", "rx restart sent": "перезапуск RX послан", "rx restart": "перезапуск RX", "rx restarting": "RX перезапускается", "receiver settings": "настройки приемника", "to defaults.": "на заводские.",
+"reset receiver?": "СБРОС ПРИЕМНИКА?", "restart rx": "перезапуск RX", "sleep": "сон", "auto sleep": "автосон", "slp timer": "таймер сна", "rx sleep": "сон RX", "sleep rx": "сон RX", "wake rx": "будить RX", "keep holding": "держи кнопку", "rx sleeping": "RX засыпает", "rx waking": "RX просыпается", "rx wake sent": "RX разбужен", "rx sleep sent": "сон RX послан", "sleep is off": "сон выключен", "restart receiver?": "ПЕРЕЗАПУСК RX?", "outputs stop,": "выходы стоп,", "link returns in": "связь вернется", "a few seconds.": "через пару секунд.", "rx restart sent": "перезапуск RX послан", "rx restart": "перезапуск RX", "rx restarting": "RX перезапускается", "receiver settings": "настройки приемника", "to defaults.": "на заводские.",
 "enter code:": "Введите код:", "restore": "вернуть",
 # ---- calibration ----
 "calibrate center": "КАЛИБРОВКА ЦЕНТРА", "set all controls": "поставьте все", "to center": "в ЦЕНТР",

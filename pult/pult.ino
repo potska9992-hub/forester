@@ -251,7 +251,7 @@ static const uint8_t RU_GLYPH[64][8] = {   // 32 capitals, 32 lowercase; 5 colum
   {0x00,0x00,0x0F,0x11,0x0F,0x09,0x11,0x00},  // я
 };
 struct RuTr { const char* en; const char* ru; };
-static const RuTr RU_TR[658] = {
+static const RuTr RU_TR[670] = {
   {"  pass:", "  пр:"},
   {"!ovl l=lim o=open", "!П Л=лим О=обр"},
   {"(empty)", "(пусто)"},
@@ -314,6 +314,7 @@ static const RuTr RU_TR[658] = {
   {"assign", "НАЗНАЧ."},
   {"at the bottom.", "внизу."},
   {"aug", "авг"},
+  {"auto sleep", "автосон"},
   {"average", "СРЕДНИЙ"},
   {"average=lamp test", "СРЕДН = для лампы"},
   {"b pulse", "B имп."},
@@ -540,6 +541,7 @@ static const RuTr RU_TR[658] = {
   {"k = killswitch:", "K = аварийный стоп:"},
   {"k free", "к своб."},
   {"kb", "КБ"},
+  {"keep holding", "держи кнопку"},
   {"keep pult close", "пульт рядом"},
   {"kill", "стоп"},
   {"l = limit reached", "L = достигнут лимит"},
@@ -737,7 +739,7 @@ static const RuTr RU_TR[658] = {
   {"reset pult?", "СБРОС ПУЛЬТА?"},
   {"reset receiver?", "СБРОС ПРИЕМНИКА?"},
   {"resetting", "сброс"},
-  {"restart receiver?", "ПЕРЕЗАПУСК ПРИЕМНИКА?"},
+  {"restart receiver?", "ПЕРЕЗАПУСК RX?"},
   {"restart rx", "перезапуск RX"},
   {"restarting...", "перезапуск..."},
   {"restore", "вернуть"},
@@ -773,7 +775,12 @@ static const RuTr RU_TR[658] = {
   {"rx restart sent", "перезапуск RX послан"},
   {"rx restarting", "RX перезапускается"},
   {"rx sends on request", "RX шлет по запросу"},
+  {"rx sleep", "сон RX"},
+  {"rx sleep sent", "сон RX послан"},
+  {"rx sleeping", "RX засыпает"},
   {"rx status", "статус RX"},
+  {"rx wake sent", "RX разбужен"},
+  {"rx waking", "RX просыпается"},
   {"rx wi-fi error", "ошибка Wi-Fi RX"},
   {"rxal", "RXТ"},
   {"rxbt", "RXБ"},
@@ -818,7 +825,11 @@ static const RuTr RU_TR[658] = {
   {"sim: no radio", "сим: нет радио"},
   {"sim: ready", "СИМ: ГОТОВ"},
   {"size mismatch", "размер не совпал"},
+  {"sleep", "сон"},
+  {"sleep is off", "сон выключен"},
+  {"sleep rx", "сон RX"},
   {"slow", "медл."},
+  {"slp timer", "таймер сна"},
   {"snr", "SNR"},
   {"snr = signal/noise.", "SNR = сигнал/шум."},
   {"standard", "стандарт"},
@@ -889,6 +900,7 @@ static const RuTr RU_TR[658] = {
   {"vrx = receiver", "Vrx = батарея"},
   {"waiting", "ждем"},
   {"waiting for phone", "ждем телефон"},
+  {"wake rx", "будить RX"},
   {"warn %", "предупр. %"},
   {"warn level", "УРОВЕНЬ ПРЕДУПР."},
   {"was", "было"},
@@ -912,7 +924,7 @@ static const RuTr RU_TR[658] = {
   {"you want", "которую нужно"}
 };
 struct RuIdx { uint16_t s, n; };
-static const RuIdx RU_IDX[128] = { {0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,1},{1,1},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{2,5},{0,0},{0,0},{0,0},{0,0},{7,4},{0,0},{0,0},{11,2},{13,1},{14,1},{0,0},{0,0},{0,0},{15,2},{0,0},{17,1},{0,0},{0,0},{0,0},{0,0},{18,3},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{21,43},{64,29},{93,59},{152,35},{187,27},{214,25},{239,9},{248,10},{258,21},{279,6},{285,5},{290,38},{328,26},{354,39},{393,22},{415,32},{447,1},{448,78},{526,61},{587,33},{620,9},{629,6},{635,20},{655,1},{656,2},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0} };
+static const RuIdx RU_IDX[128] = { {0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,1},{1,1},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{2,5},{0,0},{0,0},{0,0},{0,0},{7,4},{0,0},{0,0},{11,2},{13,1},{14,1},{0,0},{0,0},{0,0},{15,2},{0,0},{17,1},{0,0},{0,0},{0,0},{0,0},{18,3},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{21,44},{65,29},{94,59},{153,35},{188,27},{215,25},{240,9},{249,10},{259,21},{280,6},{286,6},{292,38},{330,26},{356,39},{395,22},{417,32},{449,1},{450,83},{533,65},{598,33},{631,9},{640,6},{646,21},{667,1},{668,2},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0} };
 
 // Вспомогательные функции собраны в структуру: в .ino свободная функция раньше типов сбила бы автогенерацию прототипов Arduino.
 struct RuUtil {
@@ -1086,7 +1098,7 @@ enum MenuScr {
   MS_BIND, MS_BINDRUN, MS_BINDID, MS_EVLOG,
   MS_DBGLIST, MS_DBGDESC, MS_DBGPAGE,
   MS_PIN, MS_FRTARGET, MS_CONFIRM,
-  MS_RX, MS_RXPICK, MS_RXCH, MS_RXDIR, MS_RXGLOB, MS_RXEDIT, MS_RXSTAT, MS_RXWIFI,
+  MS_RX, MS_RXPICK, MS_RXCH, MS_RXDIR, MS_RXGLOB, MS_RXSLEEP, MS_RXEDIT, MS_RXSTAT, MS_RXWIFI,
   MS_NETS, MS_NETPICK, MS_TEXTIN, MS_WIFI, MS_NETACT, MS_RXWIFIM, MS_GAME,
   MS_GAMES, MS_BLOCKS, MS_RXBULK, MS_GCTRL, MS_GSUB, MS_GLEARN, MS_LANG
 };
@@ -1115,11 +1127,11 @@ enum LogType { LT_ESTOP, LT_RXALARM, LT_NOLINK, LT_LINKOK, LT_RXFAULT, LT_LIMIT,
 // параметры приёмника (SetConfig): SOL = на соленоид (канал x сторона A/B), CH = на канал, GLOB = общие
 enum RxParam { RXP_LIMIT, RXP_DUTY, RXP_MAXD, RXP_RAMPUP, RXP_RAMPDN, RXP_CHEN,
                RXP_OVLDLY, RXP_LINKTMO, RXP_PWMFREQ, RXP_DITHAMP, RXP_DITHFRQ, RXP_PWR,
-               RXP_MODE, RXP_STARTI, RXP_MAXI, RXP_ADCCLK, RXP_IPROT, NUM_RXP };
+               RXP_MODE, RXP_STARTI, RXP_MAXI, RXP_ADCCLK, RXP_IPROT, RXP_SLPEN, RXP_SLPAUTO, RXP_SLPMIN, NUM_RXP };
 // живые параметры только для чтения (не хранятся, в CRC и синхронизацию не входят): читаются запросом HLO_GET (значение 0xFFFF)
-enum { RXL_ADCSPS = 17, RXL_ADCERR = 18 };
+enum { RXL_ADCSPS = 20, RXL_ADCERR = 21 };
 enum RxScope { PS_SOL, PS_CH, PS_GLOB };
-enum RxFmt { F_AMP, F_PCT, F_MS, F_HZ, F_ONOFF, F_DBM, F_MODE, F_PCT10, F_MHZ, F_IPROT };
+enum RxFmt { F_AMP, F_PCT, F_MS, F_HZ, F_ONOFF, F_DBM, F_MODE, F_PCT10, F_MHZ, F_IPROT, F_MIN };
 struct RxParamDef { const char* name; uint8_t scope; int16_t mn, mx, step, def; uint8_t fmt; };
 struct LogEv { uint8_t type, ch, side, cnt; uint16_t dA; uint32_t t; bool old; };
 struct Telem {
@@ -1136,6 +1148,7 @@ struct Telem {
   uint8_t wifi, wifiArg;    // состояние Wi-Fi приёмника и параметр (процент / код ошибки)
   uint8_t adc;              // уровень ошибок АЦП тока: 0 норма, 1 от 2 %, 2 от 5 %, 3 от 10 % (биты 3-4 байта Status)
   uint8_t pre;              // 1 = идёт предзаряд конденсаторов, реле ещё не включено (бит 5 байта Status)
+  uint8_t slp;              // 1 = приёмник спит (бит 6 байта Status)
 };
 // ---- радио HydroLink: константы (описание протокола ниже, в блоке РАДИО) ----
 #define HL_PROTO        1
@@ -1164,7 +1177,7 @@ struct Telem {
 enum { HLT_CONTROL = 1, HLT_TELEM, HLT_CFG, HLT_ACK, HLT_BATCH, HLT_NET, HLT_INFO, HLT_BIND, HLT_BINDOK };
 enum { HLF_ESTOP = 1, HLF_REQT = 2, HLF_LEVER = 4, HLF_BOOT = 8 };
 enum { HLO_SET, HLO_GET, HLO_BATCH, HLO_CMD, HLO_NET };
-enum { HLC_PROTO = 1, HLC_CHMASK, HLC_CHTYPES, HLC_TXPWR, HLC_FACTORY = 0x10, HLC_REBOOT, HLC_WIFI_PHONE = 0x20, HLC_WIFI_GH, HLC_WIFI_OFF, HLC_WIFI_YES };
+enum { HLC_PROTO = 1, HLC_CHMASK, HLC_CHTYPES, HLC_TXPWR, HLC_FACTORY = 0x10, HLC_REBOOT, HLC_SLEEP, HLC_WAKE, HLC_WIFI_PHONE = 0x20, HLC_WIFI_GH, HLC_WIFI_OFF, HLC_WIFI_YES };
 enum { HLW_OFF = 0, HLW_PH_WAIT = 2, HLW_PH_CONN, HLW_PH_TEST, HLW_PH_UP, HLW_PH_DONE,
        HLW_GH_CONN = 10, HLW_GH_CHECK, HLW_GH_ASK, HLW_GH_DL, HLW_GH_VERIFY, HLW_GH_DONE, HLW_ERR = 20 };
 #define HL_FACTORY_KEY  0xA55A
@@ -1188,12 +1201,17 @@ const RxParamDef RXP[NUM_RXP] = {
   { "START I",   PS_SOL,    0,  100,  1,   5, F_AMP   },   // стартовый ток, режим CURRENT (0.1 А)
   { "MAX I",     PS_SOL,    5,  100,  1,  15, F_AMP   },   // максимальный рабочий ток, режим CURRENT
   { "ADC CLOCK", PS_GLOB, 1000, 2000, 250, 1000, F_MHZ },   // такт SPI АЦП тока в кГц: 1.00..2.00 МГц шагом 0.25, по умолчанию 1.00
-  { "CURR PROT", PS_GLOB,    0,    1,  1,    0, F_IPROT }    // защита по току: 0 = по току в импульсе (по умолчанию), 1 = по среднему току за период (для проверок с лампой)
+  { "CURR PROT", PS_GLOB,    0,    1,  1,    0, F_IPROT },   // защита по току: 0 = по току в импульсе (по умолчанию), 1 = по среднему току за период (для проверок с лампой)
+  { "SLEEP",     PS_GLOB,    0,    1,  1,    1, F_ONOFF },   // функция сна (жест MENU, пробуждение)
+  { "AUTO SLEEP",PS_GLOB,    0,    1,  1,    0, F_ONOFF },   // автосон по времени без связи
+  { "SLP TIMER", PS_GLOB,    2,   15,  1,   10, F_MIN   }    // минут без связи до автосна: 2, 5, 10, 15
 };
 
 // порядок пунктов меню RX Global (параметры приёмника, PS_GLOB)
 const uint8_t RXG_PARAM[] = { RXP_MODE, RXP_IPROT, RXP_OVLDLY, RXP_LINKTMO, RXP_PWMFREQ, RXP_DITHAMP, RXP_DITHFRQ, RXP_ADCCLK };
 #define RXG_N  ((int)(sizeof(RXG_PARAM) / sizeof(RXG_PARAM[0])))
+const uint8_t RXS_PARAM[] = { RXP_SLPEN, RXP_SLPAUTO, RXP_SLPMIN };     // меню Receiver -> Sleep
+#define RXS_N  3
 
 // цвета: 0 красный, 1 зелёный, 2 янтарный (оба)
 #define COL_RED    0
@@ -1755,7 +1773,7 @@ unsigned long safeSince = 0;
 
 // ---- состояния меню ----
 int  idxGames = 0;
-int  idxScr = 0, idxPower = 0, idxBind = 0, idxEvLog = 0, idxDbg = 0, idxFr = 0, idxRxGlob = 0;
+int  idxScr = 0, idxPower = 0, idxBind = 0, idxEvLog = 0, idxDbg = 0, idxFr = 0, idxRxGlob = 0, idxRxSleep = 0;
 int  scrSel = 0;                 // позиция выбранного экрана в scrOrder
 int  dbgPage = 0, dbgTop = 0;    // страница Debug и первая видимая строка описания
 int  pinDigit[4] = { 0, 0, 0, 0 };
@@ -1767,6 +1785,11 @@ MenuScr confBack = MS_TX;        // куда вернуться
 int  confIdx = 0;
 unsigned long bindStart = 0, bindDoneAt = 0;
 int  bindPhase = 0;              // 0 ждём, 1 успех, 2 тайм-аут
+#define SLEEP_SHOW_MS 1800UL         // с этого момента удержания MENU показывается отсчёт сна
+#define SLEEP_HOLD_MS 4000UL         // удержание MENU до команды сна / пробуждения приёмника
+bool sleepArm = false;               // меню открыто долгим нажатием, кнопка ещё держится
+bool sleepFired = false;             // команда уже отправлена в это нажатие
+int  sleepHoldPct = -1;              // прогресс отсчёта 0..100, -1 = не показывать
 unsigned long restartAt = 0;     // не 0 = перезагрузка в этот момент (после Factory Reset)
 
 const char* stateName() {
@@ -2198,7 +2221,7 @@ MenuScr rxRetScr = MS_RXDIR;       // куда вернуться после п�
 bool leverArmed = false;           // тестовый джойстик разрешён, когда побывал в центре
 
 bool isRxScreen() {
-  return menuScr == MS_RX || menuScr == MS_RXPICK || menuScr == MS_RXCH || menuScr == MS_RXDIR || menuScr == MS_RXGLOB ||
+  return menuScr == MS_RX || menuScr == MS_RXPICK || menuScr == MS_RXCH || menuScr == MS_RXDIR || menuScr == MS_RXGLOB || menuScr == MS_RXSLEEP ||
          menuScr == MS_RXEDIT || menuScr == MS_RXSTAT || menuScr == MS_RXWIFI || menuScr == MS_RXWIFIM || menuScr == MS_RXBULK;
 }
 
@@ -2512,6 +2535,8 @@ void hlCfgDone(const HlCfg &c, uint8_t status, uint16_t applied) {
     if (c.param == HLC_FACTORY) {
       if (status == 0) { hlMirrorForget(); toast("RX reset"); }
       else toast("RX refused");
+    } else if (c.param == HLC_SLEEP || c.param == HLC_WAKE) {
+      toast(status == 0 ? (c.param == HLC_SLEEP ? "RX sleeping" : "RX waking") : "RX refused");
     } else if (c.param == HLC_REBOOT) {
       toast(status == 0 ? "RX restarting" : "RX refused");
     } else if (c.param == HLC_WIFI_PHONE || c.param == HLC_WIFI_GH) {
@@ -2637,6 +2662,7 @@ static void hlOnTelem(const uint8_t* p, size_t len, unsigned long now) {
   t.boots = p[30]; t.cfgCrc = p[31]; t.wifi = p[32]; t.wifiArg = p[33];
   t.adc = (p[27] >> 3) & 3;
   t.pre = (p[27] >> 5) & 1;
+  t.slp = (p[27] >> 6) & 1;
   bool first = !hlUp;
   hlBootsNow = t.boots;
   tel = t;
@@ -2753,7 +2779,7 @@ void hlStep(unsigned long now) {
       if (hlCur.tries >= HL_CFG_TRIES) {
         hlCurOn = false;
         LOGF("Cfg: no answer (op %d p %d)", hlCur.op, hlCur.param);
-        if (hlCur.kind == 1 && hlCur.op == HLO_BATCH && (hlCur.param == RXP_ADCCLK || hlCur.param == RXP_IPROT)) { /* старый приёмник не знает такт АЦП и защиту по току: синхронизация идёт дальше */ }
+        if (hlCur.kind == 1 && hlCur.op == HLO_BATCH && (hlCur.param >= RXP_ADCCLK)) { /* старый приёмник не знает такт АЦП, защиту по току и сон: синхронизация идёт дальше */ }
         else if (hlCur.kind == 1) { hlSyncBusy = false; hlSynced = false; hlSyncRetryAt = now + 2000UL; }
         else {
           if (hlCur.op == HLO_SET) { simRam[hlCur.param][hlCur.ch][hlCur.dir] = hlCur.old; if (hlCur.param == RXP_MODE) rxModeCache = hlCur.old; }
@@ -2860,12 +2886,12 @@ void eventsTick(unsigned long now) {
   if (batLevel >= 1 && pBat == 0) logEvent(LT_BATTTX, 0, 0, (uint16_t)(vbat * 10.0f));
   pBat = batLevel;
 
-  // ошибки АЦП тока (уровень приёмника 0..3 = норма, от 2 %, от 5 %, от 10 %): сообщение 3 с при ухудшении, запись в журнал; отключить нельзя
+  // ошибки АЦП тока (уровень приёмника 0..3 = норма, от 2 %, от 5 %, от 10 %): сообщение 3 с и запись в журнал только при уровне 3 (от 10 %); отключить нельзя
   static uint8_t pAdc = 0;
   static unsigned long adcHighSince = 0, adcNextRepeat = 0;
   static const uint8_t ADC_THR[4] = { 0, 2, 5, 10 };
   uint8_t lvl = telValid ? tel.adc : 0;
-  if (lvl > pAdc) {
+  if (lvl >= 3 && pAdc < 3) {                              // уведомление только от 10 % (уровни 2 % и 5 % не показываются)
     logEvent(LT_ADC, 0, 0, (uint16_t)(ADC_THR[lvl] * 10));
     adcToast(ADC_THR[lvl]);
   }
@@ -2947,7 +2973,8 @@ int menuCount() {
     case MS_WIFI:    return WF_COUNT;
     case MS_NETACT:  return 3;
     case MS_NETPICK: return pickScanning ? 1 : pickN + 2;
-    case MS_RX:      return 7;                     // All Channels, Channels, Global, RX Status, Wi-Fi, Restart RX, Back
+    case MS_RX:      return 8;                     // All Channels, Channels, Global, RX Status, Wi-Fi, Sleep, Restart RX, Back
+    case MS_RXSLEEP: return RXS_N + 1;
     case MS_RXPICK:  return NUM_CH + 1;            // Channel 1..8, Back
     case MS_RXWIFIM: return RW_COUNT;
     case MS_RXCH:    { RxItem it[16]; return rxItems(it); }
@@ -3036,6 +3063,7 @@ void fmtParam(int p, int v, char* b, size_t n) {
     case F_MODE:  snprintf(b, n, "%s", v ? "CURRENT" : "PWM"); break;
     case F_MHZ:   snprintf(b, n, "%d.%02dMHz", v / 1000, (v % 1000) / 10); break;
     case F_IPROT: snprintf(b, n, "%s", v ? "AVERAGE" : "IMPULSE"); break;
+    case F_MIN:   snprintf(b, n, "%dmin", v); break;
     default:      snprintf(b, n, "%ddBm", v); break;
   }
 }
@@ -3552,8 +3580,8 @@ void menuLabel(int i, char* b, size_t n) {
       break;
     }
     case MS_RX: {
-      static const char* rl[] = { "All Channels", "Channels", "Global", "RX Status", "Wi-Fi", "Restart RX", "Back" };
-      snprintf(b, n, "%s", rl[i < 7 ? i : 6]);
+      static const char* rl[] = { "All Channels", "Channels", "Global", "RX Status", "Wi-Fi", "Sleep", "Restart RX", "Back" };
+      snprintf(b, n, "%s", rl[i < 8 ? i : 7]);
       break;
     }
     case MS_RXPICK:
@@ -3593,6 +3621,14 @@ void menuLabel(int i, char* b, size_t n) {
       if (i < RXG_N) {
         char v[12];
         int p = RXG_PARAM[i];
+        fmtParam(p, rxQuery(0, 0, p), v, sizeof(v));
+        snprintf(b, n, "%-9s %s", RXP[p].name, v);
+      } else snprintf(b, n, "Back");
+      break;
+    case MS_RXSLEEP:
+      if (i < RXS_N) {
+        char v[12];
+        int p = RXS_PARAM[i];
         fmtParam(p, rxQuery(0, 0, p), v, sizeof(v));
         snprintf(b, n, "%-9s %s", RXP[p].name, v);
       } else snprintf(b, n, "Back");
@@ -3779,6 +3815,7 @@ void gotoRxRet() {
     case MS_RXCH:   gotoScr(MS_RXCH, idxRxCh); break;
     case MS_RXDIR:  gotoScr(MS_RXDIR, idxRxDir); break;
     case MS_RXGLOB: gotoScr(MS_RXGLOB, idxRxGlob); break;
+    case MS_RXSLEEP: gotoScr(MS_RXSLEEP, idxRxSleep); break;
     case MS_POWER:  gotoScr(MS_POWER, idxPower); break;
     default:        gotoScr(MS_RX, idxRx); break;
   }
@@ -3791,6 +3828,14 @@ void rxEditStep(int a, int m) {
     for (int i = 0; i < 8; i++) if (TXP_LIST[i] <= rxCur) idx = i;
     idx = constrain(idx + a, 0, 7);
     rxCur = rxSet(rxCh, rxDir, rxParam, TXP_LIST[idx], false);
+    return;
+  }
+  if (rxParam == RXP_SLPMIN) {                  // таймер автосна: 2, 5, 10, 15 минут
+    static const int L[4] = { 2, 5, 10, 15 };
+    int idx = 0;
+    for (int i = 0; i < 4; i++) if (L[i] <= rxCur) idx = i;
+    idx = constrain(idx + a, 0, 3);
+    rxCur = rxSet(rxCh, rxDir, rxParam, L[idx], false);
     return;
   }
   if (d.fmt == F_ONOFF || d.fmt == F_MODE || d.fmt == F_IPROT) {
@@ -4079,7 +4124,8 @@ void menuSelect(int i) {
       else if (i == 2)            gotoScr(MS_RXGLOB, idxRxGlob);
       else if (i == 3)            gotoScr(MS_RXSTAT, 0);
       else if (i == 4)            gotoScr(MS_RXWIFIM, idxRxWifi);
-      else if (i == 5)            startConfirm(CA_RX_RESTART, MS_RX, idxRx);
+      else if (i == 5)            gotoScr(MS_RXSLEEP, idxRxSleep);
+      else if (i == 6)            startConfirm(CA_RX_RESTART, MS_RX, idxRx);
       else                        gotoScr(MS_MAIN, idxMain);
       break;
     case MS_RXPICK:
@@ -4120,6 +4166,11 @@ void menuSelect(int i) {
     }
     case MS_RXDIR:
       gotoScr(MS_RXCH, idxRxCh);
+      break;
+    case MS_RXSLEEP:
+      idxRxSleep = i;
+      if (i < RXS_N) startRxEdit(RXS_PARAM[i], 0, 0, MS_RXSLEEP);
+      else           gotoScr(MS_RX, idxRx);
       break;
     case MS_RXGLOB:
       idxRxGlob = i;
@@ -4264,6 +4315,7 @@ void menuBack() {
     case MS_RXBULK:   bulkAbort(); break;
     case MS_RXDIR:    gotoScr(MS_RXCH, idxRxCh); break;
     case MS_RXGLOB:   gotoScr(MS_RX, idxRx); break;
+    case MS_RXSLEEP:  gotoScr(MS_RX, idxRx); break;
     case MS_RXEDIT:   rxEditCancel(); break;
     case MS_RXSTAT:   gotoScr(MS_RX, idxRx); break;
     case MS_RXWIFI:   if (rxWifiSt == 5 || (simMode == SIM_RADIO && (rxWifiSt == HLW_PH_UP || rxWifiSt == HLW_GH_DL || rxWifiSt == HLW_GH_VERIFY))) break;   // во время загрузки прошивки выход заблокирован
@@ -5602,6 +5654,7 @@ void drawRun1() {
     if (!hlInit)             display.print("RADIO ERR");
     else if (!hlUp)          display.print("NO SIGNAL");
     else if (hlSyncBusy)     display.printf("SYNC %d%%", hlSyncPct());
+    else if (tel.slp)        display.print("RX SLEEP");
     else if (tel.kill)       display.print("STOPPED");
     else if (tel.pre)        display.print("PRECHARGE");
     else                     if (adcPerm) display.printf("ADC ERR %d%%", (int)(adcErrPct ? adcErrPct : 10));
@@ -5609,7 +5662,7 @@ void drawRun1() {
   }
   else if (simMode == SIM_LINK) display.print("SIM: READY");
   else                          display.print("NO SIGNAL");
-  if (rxLinked() && !hlSyncBusy && !(simMode == SIM_RADIO && (tel.kill || tel.pre))) drawTick(102, 42, 9); else drawCross(102, 42, 9);
+  if (rxLinked() && !hlSyncBusy && !(simMode == SIM_RADIO && (tel.kill || tel.pre || tel.slp))) drawTick(102, 42, 9); else drawCross(102, 42, 9);
 
   drawHintText("hold MENU = menu", 56);
   drawBatteryBig();
@@ -6469,6 +6522,17 @@ void hintLine(const char* what) {
   drawHintText(h, 54);
 }
 
+void drawSleepHold() {
+  if (sleepHoldPct < 0) return;
+  display.fillRect(10, 18, 108, 34, SH110X_BLACK);
+  display.drawRect(10, 18, 108, 34, SH110X_WHITE);
+  display.setTextColor(SH110X_WHITE);
+  display.setCursor(16, 22);  display.print(tel.slp ? "WAKE RX" : "SLEEP RX");
+  display.setCursor(16, 32);  display.print("keep holding");
+  display.drawRect(16, 42, 96, 6, SH110X_WHITE);
+  display.fillRect(16, 42, 96 * sleepHoldPct / 100, 6, SH110X_WHITE);
+}
+
 void drawMenu() {
   startScreen();
   display.setCursor(0, 0);
@@ -6516,6 +6580,7 @@ void drawMenu() {
       break;
     case MS_RXBULK:  display.print(bulk.kind == 2 ? "COPY TO ALL" : "WRITING TO RX"); break;
     case MS_RXGLOB:  display.print("RX GLOBAL"); break;
+    case MS_RXSLEEP: display.print("RX SLEEP"); break;
     default: break;
   }
   int cnt = menuCount();
@@ -6541,6 +6606,7 @@ void drawMenu() {
     display.raw = false;
   }
   hintLine("%d:move %d:ok/back");
+  drawSleepHold();
   drawBattery();
   oledCommit();
 }
@@ -7200,6 +7266,24 @@ void stepLogic(unsigned long now) {
   }
 }
 
+// жест сна: MENU удерживается дольше меню (меню открылось, кнопка не отпущена) - через SLEEP_HOLD_MS приёмник засыпает / просыпается
+void sleepHoldTick(unsigned long now) {
+  sleepHoldPct = -1;
+  if (!btnMenu.state) { sleepArm = false; sleepFired = false; return; }
+  if (!sleepArm || sleepFired || estop.state || state != ST_MENU || menuScr != MS_MAIN) return;
+  unsigned long held = now - btnMenu.pressStart;
+  if (held >= SLEEP_HOLD_MS) {
+    sleepFired = true;
+    if (simMode != SIM_RADIO || !rxReady()) toast("Not possible now");
+    else if (tel.slp) { hlCfgPut(HLO_CMD, HLC_WAKE, 0, 0, HL_FACTORY_KEY, false, 0, 0); logLine("RX wake requested"); toast("RX wake sent"); }
+    else if (!rxQuery(0, 0, RXP_SLPEN)) toast("Sleep is off");
+    else { hlCfgPut(HLO_CMD, HLC_SLEEP, 0, 0, HL_FACTORY_KEY, false, 0, 0); logLine("RX sleep requested"); toast("RX sleep sent"); }
+    exitMenu();
+    return;
+  }
+  if (held >= SLEEP_SHOW_MS) sleepHoldPct = (int)((held - SLEEP_SHOW_MS) * 100UL / (SLEEP_HOLD_MS - SLEEP_SHOW_MS));
+}
+
 void handleMenuButton() {
   if (estop.state) return;
   switch (state) {
@@ -7208,10 +7292,10 @@ void handleMenuButton() {
         screenNo = scrNext((uint8_t)screenNo);
         LOGF("SCREEN -> %s", SCR_NAME[screenNo]);
       }
-      if (btnMenu.longEv) enterMenu();
+      if (btnMenu.longEv) { sleepArm = true; enterMenu(); }
       break;
     case ST_SAFE:
-      if (btnMenu.longEv) enterMenu();
+      if (btnMenu.longEv) { sleepArm = true; enterMenu(); }
       break;
     case ST_MENU:
       if (btnMenu.shortEv) menuBack();
@@ -7327,6 +7411,7 @@ void loop() {
   }
 
   handleMenuButton();
+  sleepHoldTick(millis());
   wifiTick(now);
   ghTick(now);
   hlStep(now);                                 // радио: на каждом проходе цикла
