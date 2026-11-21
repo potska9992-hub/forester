@@ -150,7 +150,8 @@ static const RxParamDef RXP[NUM_RXP] = {
 #define BK_MS         5
 #define BK_N          32            // хранится 32 x 5 мс = 160 мс
 #define BK_WIN        8             // основное окно 8 x 5 мс = 40 мс
-#define PULSE_MIN_N   3             // меньше отсчётов внутри импульса - окно для тока импульса расширяется (до 160 мс)
+#define PULSE_MIN_N   8             // меньше отсчётов внутри импульса (8) - окно для тока импульса расширяется (до 160 мс)
+#define SMOOTH_ALPHA  0.2f          // сглаживание тока (шаг 5 мс, постоянная времени около 25 мс)
 #define PULSE_FLOOR_A 0.05f         // нижний порог отбора отсчётов импульса, А
 #define K_DEF         1.70f         // А на вольт по умолчанию, пока модуль не откалиброван
 #define I_LIM_DEF     2.0f
@@ -608,12 +609,16 @@ static void bkPublish(uint32_t tms) {
       if (nOn >= PULSE_MIN_N || span >= BK_N) break;
       span = (uint8_t)(span * 2);
     }
+    static bool sm[NMOD];                                   // сглаживание уже запущено (после простоя модуля начинается с первого значения)
     if (n) {
       float floorV = iZ[m] + PULSE_FLOOR_A / iK[m];
-      pubPeakV[m] = mx; pubMeanV[m] = sum / n;
-      if (nOn >= PULSE_MIN_N) { float pm = sOn / nOn; pubPulseV[m] = pm; float th = iZ[m] + 0.5f * (pm - iZ[m]); thrV[m] = th > floorV ? th : floorV; }
-      else { pubPulseV[m] = sum / n; thrV[m] = floorV; }
-    }
+      float mean = sum / n, pulse;
+      pubPeakV[m] = mx;
+      if (nOn >= PULSE_MIN_N) { float pm = sOn / nOn; pulse = pm; float th = iZ[m] + 0.5f * (pm - iZ[m]); thrV[m] = th > floorV ? th : floorV; }
+      else { pulse = mean; thrV[m] = floorV; }
+      if (!sm[m]) { sm[m] = true; pubMeanV[m] = mean; pubPulseV[m] = pulse; }
+      else { pubMeanV[m] += SMOOTH_ALPHA * (mean - pubMeanV[m]); pubPulseV[m] += SMOOTH_ALPHA * (pulse - pubPulseV[m]); }
+    } else sm[m] = false;
     pubN[m] = (uint16_t)n;
   }
 }
@@ -771,6 +776,7 @@ static bool anyUncal() { for (uint8_t i = 0; i < NMOD; i++) if (!iCal[i]) return
 static float sDuty[16];                    // команда скважности соленоида до дизеринга, %
 static float sCap[16];                     // потолок скважности от ограничения по току, %
 static float sReg[16];                     // регулятор тока (режим CURRENT), %
+static float sIt[16];                      // прошлая цель тока регулятора, А (для мгновенного пересчёта скважности при смене цели)
 static bool  limFlag[NUM_CH];
 static bool  ovlLatch[NUM_CH];             // перегрузка: канал выключен, пока рычаг не вернётся в центр
 static unsigned long ovlSince[NUM_CH];
@@ -787,7 +793,7 @@ static bool    killNow = true;
 static bool    anyActive = false;
 
 static void runReset() {
-  for (int i = 0; i < 16; i++) { sDuty[i] = 0; sCap[i] = 100.0f; sReg[i] = 0; }
+  for (int i = 0; i < 16; i++) { sDuty[i] = 0; sCap[i] = 100.0f; sReg[i] = 0; sIt[i] = 0; }
   for (int c = 0; c < NUM_CH; c++) { limFlag[c] = false; ovlLatch[c] = false; ovlSince[c] = 0; openFlag[c] = false; openSince[c] = 0; }
   armedRun = false;
 }
@@ -868,7 +874,14 @@ static void runCurrentChecks(unsigned long now) {
     if (modeCurrent()) {                                    // режим CURRENT: подстройка скважности по току в импульсе
       int v = abs((int)ctlSh.v[ch]);
       float iT = (ramP[RXP_STARTI][ch][side] + (ramP[RXP_MAXI][ch][side] - ramP[RXP_STARTI][ch][side]) * v / 100.0f) / 10.0f;
-      sReg[s] += constrain(0.5f * (iT - I), -1.0f, 1.0f);
+      if (sReg[s] > 0.0f && sIt[s] > 0.01f) sReg[s] *= constrain(iT / sIt[s], 0.5f, 2.0f);   // цель сменилась: скважность сразу пропорционально (ток примерно пропорционален скважности)
+      sIt[s] = iT;
+      float band = iT * 0.03f; if (band < 0.03f) band = 0.03f;                              // зона нечувствительности 3 % цели (не меньше 0.03 А)
+      if (sReg[s] > 0.0f && fabsf(iT - I) > band) {
+        float f = iT / (I > 0.05f ? I : 0.05f);                                              // нужно умножить скважность на цель / ток
+        f = constrain(f, 0.7f, 1.4f);
+        sReg[s] = constrain(sReg[s] * (1.0f + 0.5f * (f - 1.0f)), 0.1f, 100.0f);             // половина ошибки за шаг 40 мс: сходится за 2-3 шага без раскачки
+      }
     }
   }
 }
