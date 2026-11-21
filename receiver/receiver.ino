@@ -326,6 +326,7 @@ static uint8_t relayState = RS_OFF;
 static unsigned long relayChangeAt = 0, relayOffAt = 0, relayBadAt = 0;
 static char relayMsg[100] = "-";
 
+static unsigned long restartAt = 0;
 static bool estopRaw = false, estopBtn = false;   // аварийная кнопка приёмника (HIGH = нажата или обрыв)
 static unsigned long estopRawAt = 0;
 
@@ -1453,7 +1454,6 @@ static void radioTask(void*) {
 // Вкладка Test: команды (порт из hwtest) и защита
 // ============================================================
 static bool outR = false, outG = false, outB = false;
-static unsigned long restartAt = 0;
 static unsigned long lastPoll = 0;
 static float lastRunFreq = -1;
 
