@@ -47,7 +47,7 @@
 #include "esp_system.h"
 
 #define PROJECT_NAME  "receiver"
-#define FW_VERSION    "1.0"
+#define FW_VERSION    "1.4"
 #define RF_TURNAROUND_MS 5UL                               // пауза перед ответом пульту
 static const char FW_TAG[] __attribute__((used)) = "FWTAG:" PROJECT_NAME ":" FW_VERSION ";";
 
@@ -72,6 +72,7 @@ static const char FW_TAG[] __attribute__((used)) = "FWTAG:" PROJECT_NAME ":" FW_
 #define PIN_OE        33     // PCA9685 OE: LOW = выходы разрешены
 #define PIN_ESTOP     34     // аварийная кнопка NC: HIGH = нажата или обрыв
 #define PIN_EN        38     // EN всех драйверов: HIGH = разрешено
+#define PIN_PC        18     // предзаряд: HIGH = включён (AO3400 -> IRF4905 -> NTC 10D-20 параллельно контактам реле)
 #define PIN_LED       35     // белый светодиод платы
 #define PIN_USER      0      // кнопка USER, LOW = нажата
 #define PIN_NSS       8
@@ -111,8 +112,8 @@ enum { WE_NONET = 1, WE_PASS, WE_GHDOWN, WE_NOREL, WE_DLFAIL, WE_SUM, WE_WRONG, 
 
 // ---- Параметры (порядок и пределы те же, что в пульте) ----
 enum { PS_SOL, PS_CH, PS_GLOB };
-enum { RXP_LIMIT, RXP_DUTY, RXP_MAXD, RXP_RAMPUP, RXP_RAMPDN, RXP_CHEN, RXP_OVLDLY, RXP_LINKTMO, RXP_PWMFREQ, RXP_DITHAMP, RXP_DITHFRQ, RXP_PWR, RXP_MODE, RXP_STARTI, RXP_MAXI, RXP_ADCCLK, NUM_RXP };
-enum { RXL_ADCSPS = 16, RXL_ADCERR = 17 };       // живые параметры только для чтения (запрос GET): замеров АЦП в секунду / 10, процент ошибок АЦП
+enum { RXP_LIMIT, RXP_DUTY, RXP_MAXD, RXP_RAMPUP, RXP_RAMPDN, RXP_CHEN, RXP_OVLDLY, RXP_LINKTMO, RXP_PWMFREQ, RXP_DITHAMP, RXP_DITHFRQ, RXP_PWR, RXP_MODE, RXP_STARTI, RXP_MAXI, RXP_ADCCLK, RXP_IPROT, NUM_RXP };
+enum { RXL_ADCSPS = 17, RXL_ADCERR = 18 };       // живые параметры только для чтения (запрос GET): замеров АЦП в секунду / 10, процент ошибок АЦП
 struct RxParamDef { uint8_t scope; int16_t mn, mx, def; };
 static const RxParamDef RXP[NUM_RXP] = {
   { PS_SOL,     5,  100,  20 },   // LIMIT, 0.1 А
@@ -130,7 +131,8 @@ static const RxParamDef RXP[NUM_RXP] = {
   { PS_GLOB,    0,    1,   0 },   // CONTROL: 0 PWM, 1 CURRENT
   { PS_SOL,     0,  100,   5 },   // START I, 0.1 А
   { PS_SOL,     5,  100,  15 },   // MAX I, 0.1 А
-  { PS_GLOB, 1000, 2000, 1000 }   // ADC CLOCK: такт SPI МЦП3208, кГц
+  { PS_GLOB, 1000, 2000, 1000 },  // ADC CLOCK: такт SPI МЦП3208, кГц
+  { PS_GLOB,    0,    1,   0 }    // CURR PROT: 0 по току импульса, 1 по среднему току
 };
 
 #define NMOD          8
@@ -146,14 +148,17 @@ static const RxParamDef RXP[NUM_RXP] = {
 #define MCP_MIN_CHK   20            // меньше проверок в окне - уровень не пересматривается
 #define IDLE_SCAN_MS  25
 #define BK_MS         5
-#define BK_N          8             // окно 8 x 5 мс = 40 мс
+#define BK_N          32            // хранится 32 x 5 мс = 160 мс
+#define BK_WIN        8             // основное окно 8 x 5 мс = 40 мс
+#define PULSE_MIN_N   3             // меньше отсчётов внутри импульса - окно для тока импульса расширяется (до 160 мс)
+#define PULSE_FLOOR_A 0.05f         // нижний порог отбора отсчётов импульса, А
 #define K_DEF         1.70f         // А на вольт по умолчанию, пока модуль не откалиброван
 #define I_LIM_DEF     2.0f
 #define OVL_WINDOWS   3
 #define ZERO_MS       1200
 #define R_COIL_NOM    5.6f          // номинальное сопротивление катушки, Ом (для начального приближения режима CURRENT)
 
-struct Bk { uint32_t ep; float mx; float sum; uint16_t n; };
+struct Bk { uint32_t ep; float mx; float sum; float sumOn; uint16_t n; uint16_t nOn; };
 struct AdcMon { uint16_t c[8], e[8]; uint8_t i; int64_t at; };   // подсчёт ошибок АЦП: 8 ячеек по 250 мс
 static Bk bk[NMOD][BK_N];
 
@@ -165,7 +170,7 @@ static portMUX_TYPE shMux = portMUX_INITIALIZER_UNLOCKED;
 
 struct CtlShared { int8_t v[NUM_CH]; uint32_t rxAt; uint32_t nzAt; bool estop; bool lever; bool have; };
 static CtlShared ctlSh = { { 0 }, 0, 0, false, false, false };
-struct TelShared { uint8_t cur[NUM_CH]; int8_t pwm[NUM_CH]; uint8_t mLim, mOvl, mOpen, side; uint8_t kill, reason; uint8_t vrx; };
+struct TelShared { uint8_t cur[NUM_CH]; int8_t pwm[NUM_CH]; uint8_t mLim, mOvl, mOpen, side; uint8_t kill, reason; uint8_t vrx; uint8_t pre; };
 static TelShared telSh = { { 0 }, { 0 }, 0, 0, 0, 0, 1, 3, 0 };
 static void logRaw(const char* s) { while (*s) { logBuf[logTotal % LOG_SZ] = *s++; logTotal++; } }
 static void plog(const char* fmt, ...) {
@@ -258,7 +263,9 @@ static void cfgLoad() {
   cfgDefaults(nvsP);
   q.begin("rxcfg", false);
   uint16_t tmp[NUM_RXP][NUM_CH][2];
-  if (q.getBytes("p", tmp, sizeof(tmp)) == sizeof(tmp)) { memcpy(nvsP, tmp, sizeof(nvsP)); cfgFix(nvsP); }
+  size_t szSaved = q.getBytesLength("p");
+  if (szSaved == sizeof(tmp)) { q.getBytes("p", tmp, sizeof(tmp)); memcpy(nvsP, tmp, sizeof(nvsP)); cfgFix(nvsP); }
+  else if (szSaved == sizeof(uint16_t) * (NUM_RXP - 1) * NUM_CH * 2) { q.getBytes("p", nvsP, szSaved); cfgFix(nvsP); }   // прошивка 1.0-1.3: 16 параметров, новый (CURR PROT) остаётся по умолчанию
   bootCount = (uint8_t)(q.getUChar("boots", 0) + 1);
   q.putUChar("boots", bootCount);
   q.end();
@@ -313,7 +320,7 @@ static float emaB = 0, emaF = 0, vBus = 0, vFb = 0;
 static bool  adcInit = false;
 static unsigned long adcAt = 0;
 
-enum { RS_OFF, RS_CLOSING, RS_ON, RS_OPENING };
+enum { RS_OFF, RS_CLOSING, RS_ON, RS_OPENING, RS_PRECHARGE };
 static uint8_t relayState = RS_OFF;
 static unsigned long relayChangeAt = 0, relayOffAt = 0, relayBadAt = 0;
 static char relayMsg[100] = "-";
@@ -324,7 +331,8 @@ static unsigned long estopRawAt = 0;
 // ---- ток ----
 static bool     mcpPresent = false;
 static volatile uint8_t  wantMask = 0;
-static volatile float    pubPeakV[NMOD], pubMeanV[NMOD];
+static volatile float    pubPeakV[NMOD], pubMeanV[NMOD], pubPulseV[NMOD];   // пик, среднее по окну (средний ток), среднее внутри импульса
+static float thrV[NMOD];                       // порог отбора отсчётов импульса, В (только задача сэмплера)
 static volatile uint16_t pubN[NMOD];
 static volatile float    lastV[NMOD];
 static volatile bool     lastHave[NMOD];
@@ -335,7 +343,8 @@ static volatile uint32_t adcChkTotal = 0, adcErrTotal = 0;
 static float iK[NMOD], iZ[NMOD];
 static bool  iCal[NMOD];
 static float iLim = I_LIM_DEF;               // предел вкладки Test (в рабочем режиме лимиты берутся из параметров LIMIT)
-static float iPeakA[NMOD];                   // пик тока модуля, А (-1 = нет данных)
+static float iPeakA[NMOD];                   // ток модуля для защит, А (по выбору CURR PROT: импульс или средний; -1 = нет данных)
+static float iPulseA[NMOD], iAvgA[NMOD];     // ток в импульсе и средний ток, А (-1 = нет данных)
 static uint8_t zeroMask = 0;
 static unsigned long zeroDoneAt = 0;
 
@@ -424,10 +433,13 @@ static void setEn(bool on) { enOn = on; digitalWrite(PIN_EN, on ? HIGH : LOW); }
 // EN драйверов включается вместе с реле и остаётся включённым после его размыкания (конденсаторы разряжаются через драйверы).
 // Выключается только при аварии (setFault): реле залипло (1) или не замкнулось / обрыв за реле (2), а также потеря PCA (3). Выходы PCA9685 (OE) при остановке выключаются как раньше.
 static bool enHold = false;
+static bool pcOn = false;                  // предзаряд включён (GPIO18 HIGH)
+static void pcSet(bool on) { pcOn = on; digitalWrite(PIN_PC, on ? HIGH : LOW); }
 static bool enForceOff = false;            // только вкладка Test: команда 'en 0' держит EN выключенным даже при замкнутом реле (для экспериментов)
 static void relayPin(bool on) {
   if (on && !faultCode) { enHold = true; if (!enForceOff) setEn(true); }
   digitalWrite(PIN_RELAY, on ? LOW : HIGH);
+  if (!on) pcSet(false);
 }
 
 // все выходы в безопасное состояние: сначала аппаратно (OE, EN), потом PCA, потом реле
@@ -440,6 +452,7 @@ static void hardOff() {
 
 static void relayOpen(unsigned long now) {
   relayPin(false);
+  if (relayState == RS_PRECHARGE) { relayState = RS_OFF; relayOffAt = now; return; }
   if (relayState != RS_OFF && relayState != RS_OPENING) { relayState = RS_OPENING; relayChangeAt = now; }
 }
 
@@ -449,7 +462,9 @@ static void setFault(uint8_t code, const char* why) {
   enHold = false;
   setOe(false);
   setEn(false);
+  pcSet(false);
   relayPin(false);
+  if (relayState == RS_PRECHARGE) relayState = RS_OFF;
   if (relayState == RS_CLOSING || relayState == RS_ON) { relayState = RS_OPENING; relayChangeAt = millis(); }
   plog("FAULT %u: %s. Outputs, EN and relay switched off until the receiver restarts", (unsigned)code, why);
 }
@@ -471,27 +486,70 @@ static void relayMsgSet(const char* fmt, ...) {
 #define RELAY_STUCK_MS  5000UL
 #define RELAY_DV        2.0f
 #define RELAY_MIN_OFF_MS 300UL
+#define PC_TARGET       0.90f                               // предзаряд до 90 % бортового напряжения, потом реле
+#define PC_STALL_MS     400UL                               // защита: за это время напряжение за реле должно вырасти хотя бы на PC_STALL_DV
+#define PC_STALL_DV     0.5f
+#define PC_MAX_MS       3000UL                              // защита: предзаряд не дольше (NTC перегреется на коротком замыкании)
+#define PC_OFF_DELAY_MS 150UL                               // предзаряд выключается через это время после включения реле
+#define EN_DISCH_DV     4.0f                                // EN держится, пока напряжение за реле не упадёт на 4 В ниже бортового (2 В порог аварии + 2 В запас)
 static bool relayWatch = false;                             // идёт слежение за падением напряжения после размыкания
+static bool pcBlocked = false;                              // предзаряд сорван защитой: до снятия команды на реле не повторяем
+static float pcRefV = 0; static unsigned long pcRefAt = 0;
+static bool testPc = false; static unsigned long testPcAt = 0;
+static void pcStall(unsigned long now, bool chk, const char* why) {
+  pcSet(false); relayState = RS_OFF; relayOffAt = now; pcBlocked = true; testRelay = false;
+  char m[110]; snprintf(m, sizeof(m), "precharge failed: %s (bus %.2f V, after relay %.2f V)", why, vBus, vFb);
+  if (chk) setFault(2, m); else plog("%s", m);
+}
 
 static void relayTick(unsigned long now, bool want) {
   bool busOk = vBus > 5.0f;
   if (faultCode) want = false;
   bool chk = (wifiSt == HLW_OFF);                           // в режиме Wi-Fi (Update/Test/GitHub) проверки реле выключены: аварии не ставятся
   bool vNear = busOk && ((vBus - vFb) <= RELAY_DV);          // напряжение за реле не отличается от бортового больше чем на 2 В
+  if (!want) pcBlocked = false;
+  // разряд конденсаторов через EN: после размыкания реле EN остаётся включённым, пока напряжение за реле не упадёт на EN_DISCH_DV ниже бортового; дальше EN выключается и конденсаторы держат остаток
+  if (enHold && !faultCode && (relayState == RS_OFF || relayState == RS_OPENING) && busOk && (vBus - vFb) >= EN_DISCH_DV) {
+    enHold = false;
+    plog("Capacitors discharged to %.2f V (bus %.2f V): drivers EN off", vFb, vBus);
+  }
   switch (relayState) {
     case RS_OFF:
       if (relayWatch) {                                     // реле считается разомкнутым, но напряжение ещё держится
         if (!chk || !busOk || !vNear) { relayWatch = false; relayMsgSet("Relay OFF OK (bus %.2f V, after relay %.2f V)", vBus, vFb); }
         else if ((now - relayChangeAt) >= RELAY_STUCK_MS) { relayWatch = false; char m[96]; snprintf(m, sizeof(m), "relay stuck: voltage after relay held %lu s after opening (bus %.2f V, after relay %.2f V)", (unsigned long)(RELAY_STUCK_MS / 1000UL), vBus, vFb); setFault(1, m); }
       }
-      if (want && busOk && adcInit && now > 1500UL && (now - relayOffAt) >= RELAY_MIN_OFF_MS) {
-        relayPin(true);
-        relayState = RS_CLOSING;
-        relayChangeAt = now;
+      if (want && !pcBlocked && busOk && adcInit && now > 1500UL && (now - relayOffAt) >= RELAY_MIN_OFF_MS) {
         relayWatch = false;
+        if (vFb >= PC_TARGET * vBus) {                      // напряжение за реле уже >= 90 % бортового: предзаряд не нужен
+          relayPin(true);
+          relayState = RS_CLOSING;
+          relayChangeAt = now;
+        } else {                                            // сначала предзаряд, реле после
+          pcSet(true);
+          relayState = RS_PRECHARGE;
+          relayChangeAt = now; pcRefV = vFb; pcRefAt = now;
+          relayMsgSet("Precharge ON (bus %.2f V, after relay %.2f V)", vBus, vFb);
+        }
       }
       break;
+    case RS_PRECHARGE:                                      // проверка залипания реле здесь не работает: напряжение за реле растёт от предзаряда
+      if (!want || !busOk) { pcSet(false); relayState = RS_OFF; relayOffAt = now; relayMsgSet("Precharge cancelled (bus %.2f V, after relay %.2f V)", vBus, vFb); break; }
+      if (vFb >= PC_TARGET * vBus) {
+        relayMsgSet("Precharge done: %.2f V of %.2f V, relay ON", vFb, vBus);
+        relayPin(true);                                     // предзаряд выключится через PC_OFF_DELAY_MS, когда реле уже замкнулось
+        pcOn = true; digitalWrite(PIN_PC, HIGH);
+        relayState = RS_CLOSING; relayChangeAt = now;
+        break;
+      }
+      if ((now - pcRefAt) >= PC_STALL_MS) {
+        if (vFb - pcRefV < PC_STALL_DV) { pcStall(now, chk, "voltage after relay does not rise (short circuit or precharge circuit fault)"); break; }
+        pcRefV = vFb; pcRefAt = now;
+      }
+      if ((now - relayChangeAt) >= PC_MAX_MS) pcStall(now, chk, "voltage did not reach 90 percent in 3 s");
+      break;
     case RS_CLOSING:
+      if (pcOn && (now - relayChangeAt) >= PC_OFF_DELAY_MS) pcSet(false);
       if (!want) { relayPin(false); relayState = RS_OPENING; relayChangeAt = now; break; }
       if ((now - relayChangeAt) >= RELAY_CHECK_MS) {
         if (vNear || !chk) { relayState = RS_ON; relayMsgSet("Relay ON OK (bus %.2f V, after relay %.2f V)", vBus, vFb); }
@@ -504,8 +562,11 @@ static void relayTick(unsigned long now, bool want) {
       else relayBadAt = 0;
       break;
     case RS_OPENING:
-      if (want && busOk && !faultCode && (now - relayChangeAt) >= RELAY_MIN_OFF_MS) {   // сигнал вернулся до конца проверки: замыкаем сразу
-        relayPin(true); relayState = RS_CLOSING; relayChangeAt = now; relayWatch = false; break;
+      if (want && !pcBlocked && busOk && !faultCode && (now - relayChangeAt) >= RELAY_MIN_OFF_MS) {   // сигнал вернулся до конца проверки: если за реле осталось меньше 90 % - через предзаряд (состояние OFF), иначе замыкаем сразу
+        relayWatch = false;
+        if (vFb >= PC_TARGET * vBus) { relayPin(true); relayState = RS_CLOSING; relayChangeAt = now; }
+        else { relayState = RS_OFF; relayOffAt = now - RELAY_MIN_OFF_MS; }
+        break;
       }
       if ((now - relayChangeAt) >= RELAY_CHECK_MS) {
         relayState = RS_OFF; relayOffAt = now; relayBadAt = 0;
@@ -522,19 +583,37 @@ static void relayTick(unsigned long now, bool want) {
 static void bkAdd(uint8_t m, float v, uint32_t tms) {
   uint32_t ep = tms / BK_MS;
   Bk& b = bk[m][ep % BK_N];
-  if (b.ep != ep || b.n == 0) { b.ep = ep; b.mx = v; b.sum = v; b.n = 1; }
+  if (b.ep != ep || b.n == 0) { b.ep = ep; b.mx = v; b.sum = v; b.n = 1; b.sumOn = 0; b.nOn = 0; }
   else { if (v > b.mx) b.mx = v; b.sum += v; b.n++; }
+  if (v >= thrV[m]) { b.sumOn += v; b.nOn++; }          // отсчёт внутри импульса
 }
 
+// раз в 5 мс: пик и среднее по 40 мс; ток в импульсе = среднее отсчётов, которые выше порога (половина прошлого тока импульса, не меньше PULSE_FLOOR_A)
+// отсчётов внутри импульса мало (малая скважность) - окно для тока импульса расширяется до 160 мс; нет импульса совсем - берётся среднее
 static void bkPublish(uint32_t tms) {
   uint32_t ep0 = tms / BK_MS;
   for (uint8_t m = 0; m < NMOD; m++) {
     float mx = -1000.0f, sum = 0; uint32_t n = 0;
-    for (uint8_t i = 0; i < BK_N; i++) {
-      const Bk& b = bk[m][i];
-      if (b.n && ep0 >= b.ep && (ep0 - b.ep) < BK_N) { if (b.mx > mx) mx = b.mx; sum += b.sum; n += b.n; }
+    float sOn = 0; uint32_t nOn = 0;
+    uint8_t span = BK_WIN;
+    for (;;) {
+      sOn = 0; nOn = 0; mx = -1000.0f; sum = 0; n = 0;
+      for (uint8_t i = 0; i < BK_N; i++) {
+        const Bk& b = bk[m][i];
+        if (!b.n || ep0 < b.ep) continue;
+        uint32_t age = ep0 - b.ep;
+        if (age < BK_WIN) { if (b.mx > mx) mx = b.mx; sum += b.sum; n += b.n; }
+        if (age < span) { sOn += b.sumOn; nOn += b.nOn; }
+      }
+      if (nOn >= PULSE_MIN_N || span >= BK_N) break;
+      span = (uint8_t)(span * 2);
     }
-    if (n) { pubPeakV[m] = mx; pubMeanV[m] = sum / n; }
+    if (n) {
+      float floorV = iZ[m] + PULSE_FLOOR_A / iK[m];
+      pubPeakV[m] = mx; pubMeanV[m] = sum / n;
+      if (nOn >= PULSE_MIN_N) { float pm = sOn / nOn; pubPulseV[m] = pm; float th = iZ[m] + 0.5f * (pm - iZ[m]); thrV[m] = th > floorV ? th : floorV; }
+      else { pubPulseV[m] = sum / n; thrV[m] = floorV; }
+    }
     pubN[m] = (uint16_t)n;
   }
 }
@@ -672,7 +751,8 @@ static void calibLoad() {
     keyName(k, "iz", m);
     iZ[m] = prefs.getFloat(k, 0.0f);
     if (iZ[m] < 0.0f || iZ[m] > 0.3f) iZ[m] = 0.0f;
-    iPeakA[m] = -1.0f; pubN[m] = 0; lastHave[m] = false;
+    iPeakA[m] = iPulseA[m] = iAvgA[m] = -1.0f; pubN[m] = 0; lastHave[m] = false;
+    thrV[m] = iZ[m] + PULSE_FLOOR_A / iK[m];
   }
   kBus = prefs.getFloat("kbus", K_BUS_DEF);
   kFb  = prefs.getFloat("kfb", K_FB_DEF);
@@ -725,7 +805,13 @@ static float triWave(unsigned long now, float hz) {
 static void currentEval(unsigned long now) {
   uint8_t act = modActive();
   wantMask = act | zeroMask;
-  for (uint8_t m = 0; m < NMOD; m++) iPeakA[m] = ((act & (1u << m)) && pubN[m] > 0) ? voltToAmp(m, pubPeakV[m]) : -1.0f;
+  bool byAvg = (ramP[RXP_IPROT][0][0] == 1);
+  for (uint8_t m = 0; m < NMOD; m++) {
+    bool ok = (act & (1u << m)) && pubN[m] > 0;
+    iPulseA[m] = ok ? voltToAmp(m, pubPulseV[m]) : -1.0f;
+    iAvgA[m]   = ok ? voltToAmp(m, pubMeanV[m])  : -1.0f;
+    iPeakA[m]  = byAvg ? iAvgA[m] : iPulseA[m];
+  }
   if (zeroMask && (long)(now - zeroDoneAt) >= 0) {
     uint8_t mask = zeroMask; zeroMask = 0;
     for (uint8_t m = 0; m < NMOD; m++) {
@@ -776,7 +862,7 @@ static void runCurrentChecks(unsigned long now) {
       if (sCap[s] < 100.0f) { sCap[s] += 0.5f; if (sCap[s] > 100.0f) sCap[s] = 100.0f; }
     }
     if (currentBackendFast()) {                             // обрыв: ШИМ выше стартового, ток в импульсе меньше 0.1 А дольше 300 мс
-      if (d > startD && I < 0.1f) { if (!openSince[ch]) openSince[ch] = now; else if ((now - openSince[ch]) >= 300UL) openFlag[ch] = true; }
+      if (d > startD && iPulseA[ch] >= 0.0f && iPulseA[ch] < 0.1f) { if (!openSince[ch]) openSince[ch] = now; else if ((now - openSince[ch]) >= 300UL) openFlag[ch] = true; }
       else { openSince[ch] = 0; openFlag[ch] = false; }
     } else { openFlag[ch] = false; }
     if (modeCurrent()) {                                    // режим CURRENT: подстройка скважности по току в импульсе
@@ -859,6 +945,7 @@ static void telPublish() {
   t.vrx = (uint8_t)(vb > 255.0f ? 255 : (vb < 0 ? 0 : (int)lroundf(vb)));
   t.kill = killNow ? 1 : 0;
   t.reason = killReasonNow;
+  t.pre = (relayState == RS_PRECHARGE) ? 1 : 0;
   taskENTER_CRITICAL(&shMux);
   telSh = t;
   taskEXIT_CRITICAL(&shMux);
@@ -910,10 +997,15 @@ static void controlTick(unsigned long now) {
   killNow = kill; killReasonNow = reason;
 
   bool tm = testMode();
+  if (!(tm && testPc) && pcOn && relayState != RS_PRECHARGE && relayState != RS_CLOSING) pcSet(false);   // предзаряд горит только в своём состоянии
   if (tm) {
     relayTick(now, testRelay && !kill);
     bool allow = !faultCode && !btnLatched;
-    if (!allow) { testRelay = false; testOe = false; testEn = false; hardOff(); }
+    if (!allow) { testRelay = false; testOe = false; testEn = false; testPc = false; hardOff(); }
+    if (relayState == RS_OFF && (testPc || pcOn)) {         // ручной предзаряд (команда pc 1): не дольше PC_MAX_MS, при кнопке/аварии выключается
+      if (testPc && (!allow || kill || (now - testPcAt) >= PC_MAX_MS)) { testPc = false; plog("Manual precharge OFF (%s)", (now - testPcAt) >= PC_MAX_MS ? "3 s limit" : "alarm"); }
+      pcSet(testPc);
+    }
     setOe(allow && testOe);
     setEn(allow && !enForceOff && (testEn || enHold));
     outAct = false;
@@ -934,7 +1026,7 @@ static void controlTick(unsigned long now) {
     else { hardOff(); runReset(); plog("Outputs OFF"); }
   }
   if (!act && (oeOn || enOn != (enHold && !faultCode))) hardOff();
-  if (!act) { for (int i = 0; i < NMOD; i++) iPeakA[i] = -1.0f; currentEval(now); telPublish(); ctlAt = now; return; }
+  if (!act) { for (int i = 0; i < NMOD; i++) iPeakA[i] = iPulseA[i] = iAvgA[i] = -1.0f; currentEval(now); telPublish(); ctlAt = now; return; }
 
   if (!armedRun) {                                          // Safe Start приёмника: сначала нули
     bool z = true;
@@ -1089,7 +1181,7 @@ static void sendTelem() {
   b[6] = missedCnt; missedCnt = 0;
   for (int i = 0; i < NUM_CH; i++) { b[7 + i] = t.cur[i]; b[15 + i] = (uint8_t)t.pwm[i]; }
   b[23] = t.mLim; b[24] = t.mOvl; b[25] = t.mOpen; b[26] = t.side;
-  b[27] = (uint8_t)((t.kill ? 1 : 0) | ((t.reason & 3) << 1) | ((adcLvl & 3) << 3));   // биты 3-4: уровень ошибок АЦП
+  b[27] = (uint8_t)((t.kill ? 1 : 0) | ((t.reason & 3) << 1) | ((adcLvl & 3) << 3) | (t.pre ? 0x20 : 0));   // биты 3-4: уровень ошибок АЦП, бит 5: идёт предзаряд
   b[28] = t.vrx;
   b[29] = (uint8_t)lastRssi;
   b[30] = bootCount;
@@ -1176,7 +1268,7 @@ static void handleControl(const uint8_t* p, size_t len, unsigned long now) {
   int k = 5;
   bool nz = false;
   for (int i = 0; i < NUM_CH; i++) if (mask & (1 << i)) { int raw = (int)(int8_t)p[k++]; v[i] = (int8_t)constrain(raw, -100, 100); if (v[i]) nz = true; }
-  if (flags & HLF_ESTOP) { digitalWrite(PIN_OE, HIGH); digitalWrite(PIN_EN, LOW); }       // E-Stop: аппаратно сразу, остальное в такте управления
+  if (flags & HLF_ESTOP) { digitalWrite(PIN_OE, HIGH); digitalWrite(PIN_PC, LOW); }       // E-Stop: аппаратно сразу (OE, предзаряд); EN не трогаем - конденсаторы разряжаются через драйверы, EN выключает логика разряда; остальное в такте управления
   taskENTER_CRITICAL(&shMux);
   memcpy(ctlSh.v, v, sizeof(v));
   ctlSh.rxAt = now ? now : 1;
@@ -1347,7 +1439,7 @@ static float lastRunFreq = -1;
 static void testOff(const char* why) {
   bool was = testOK;
   testOK = false;
-  testRelay = testOe = testEn = false;
+  testRelay = testOe = testEn = testPc = false;
   enForceOff = false;
   manRed = manGreen = manBuz = false; blinkMode = 0;
   sweepMask = 0;
@@ -1407,7 +1499,7 @@ static void clearOvlCh(uint16_t chmask) { for (uint8_t ch = 0; ch < 16; ch++) if
 static void printHelp() {
   plog("Commands (Test tab):");
   plog(" s | scan | adc | i      status, I2C scan, MCP3208 inputs, currents");
-  plog(" r 1|0   oe 1|0   en 1|0   relay, PCA OE, drivers EN");
+  plog(" r 1|0   pc 1|0   oe 1|0   en 1|0   relay, precharge, PCA OE, drivers EN");
   plog(" red/green/buz 1|0, blink 0..3");
   plog(" pwm 5 40 | pwm all 40   channel duty %%; sweep 5|all|off; freq 200");
   plog(" izero 1|all   ical 1 2.0   ireset 1|all   ilim 2.0   (current sensors)");
@@ -1418,7 +1510,7 @@ static void printHelp() {
 static void printStatus() {
   plog("STATUS receiver %s, uptime %lu s, boots %u, last reset: %s", FW_VERSION, millis() / 1000UL, (unsigned)bootCount, rstReasonText());
   plog("Bus %.2f V (k %.3f), after relay %.2f V (k %.3f)", vBus, kBus, vFb, kFb);
-  plog("Relay state %d, OE %s, EN %s, RX E-STOP %s, fault %u", (int)relayState, oeOn ? "ON" : "off", enOn ? "ON" : "off", estopBtn ? "ACTIVE" : "released", (unsigned)faultCode);
+  plog("Relay state %d, precharge %s, OE %s, EN %s, RX E-STOP %s, fault %u, current protection by %s", (int)relayState, pcOn ? "ON" : "off", oeOn ? "ON" : "off", enOn ? "ON" : "off", estopBtn ? "ACTIVE" : "released", (unsigned)faultCode, ramP[RXP_IPROT][0][0] ? "AVERAGE" : "PULSE");
   plog("PCA9685 %s, PWM %.0f Hz; MCP3208 %s", pcaOk ? "found" : "NOT FOUND", pwmFreq, mcpPresent ? "found" : "NOT FOUND");
   plog("Current: MCP3208 clock %u kHz, samples/s %u, ADC checks %lu errors %lu (%u pct, level %u), calibrated %u of 8", (unsigned)ramP[RXP_ADCCLK][0][0], (unsigned)adcSps10 * 10u, (unsigned long)adcChkTotal, (unsigned long)adcErrTotal, (unsigned)adcErrPct, (unsigned)adcLvl, (unsigned)__builtin_popcount(calMaskBits()));
   plog("Radio: %s", hlInit ? "OK" : "FAILED");
@@ -1444,11 +1536,11 @@ static void scanBuses() {
 }
 
 static void printCur() {
-  plog("Current per module (peak over 40 ms), MCP3208 samples/s: %u", (unsigned)adcSps10 * 10u);
+  plog("Current per module (pulse = mean inside the PWM pulse, avg = mean over the period; 40 ms window, protection by %s), MCP3208 samples/s: %u", ramP[RXP_IPROT][0][0] ? "AVERAGE" : "PULSE", (unsigned)adcSps10 * 10u);
   for (uint8_t m = 0; m < NMOD; m++) {
-    char pk[24];
-    if (iPeakA[m] >= 0) snprintf(pk, sizeof(pk), "%.2f A", iPeakA[m]); else snprintf(pk, sizeof(pk), "--");
-    plog("M%u: duty %.0f pct, peak %s, k %.3f A/V (%s), zero %.4f V%s", m + 1, modDuty(m), pk, iK[m], iCal[m] ? "calibrated" : "NOT calibrated", iZ[m],
+    char pk[40];
+    if (iPulseA[m] >= 0) snprintf(pk, sizeof(pk), "%.2f A, avg %.2f A", iPulseA[m], iAvgA[m]); else snprintf(pk, sizeof(pk), "--");
+    plog("M%u: duty %.0f pct, pulse %s, k %.3f A/V (%s), zero %.4f V%s", m + 1, modDuty(m), pk, iK[m], iCal[m] ? "calibrated" : "NOT calibrated", iZ[m],
          (tOvlMask & (1u << m)) ? "  OVERLOAD (switched off)" : "");
   }
 }
@@ -1541,12 +1633,20 @@ static void execCmd(char* line) {
     if (v < 0.3f || v > 6.0f) { plog("Usage: ilim 2.0  (Test tab current limit, A, 0.3..6; now %.2f)", iLim); return; }
     iLim = v; prefs.putFloat("ilim", v); plog("Test current limit %.2f A (saved)", v);
   }
-  else if (!strcmp(c, "stop")) { testRelay = testOe = testEn = false; enForceOff = false; manRed = manGreen = manBuz = false; blinkMode = 0; hardOff(); relayOpen(millis()); plog("ALL OFF"); }
+  else if (!strcmp(c, "stop")) { testRelay = testOe = testEn = testPc = false; pcSet(false); enForceOff = false; manRed = manGreen = manBuz = false; blinkMode = 0; hardOff(); relayOpen(millis()); plog("ALL OFF"); }
   else if (!strcmp(c, "r") || !strcmp(c, "relay")) {
     if (!arg01) { plog("Usage: r 1 or r 0"); return; }
     if (on && bad) { plog("REFUSED: alarm or fault is active"); return; }
     testRelay = on;
     plog("Relay %s, checking feedback...", on ? "ON" : "OFF");
+  }
+  else if (!strcmp(c, "pc")) {
+    if (!arg01) { plog("Usage: pc 1 or pc 0 (manual precharge, relay must be OFF, auto-off after 3 s)"); return; }
+    if (on && bad) { plog("REFUSED: alarm or fault is active"); return; }
+    if (on && relayState != RS_OFF) { plog("REFUSED: relay is not in the OFF state"); return; }
+    if (on && !testPc) testPcAt = millis();
+    testPc = on;
+    plog("Precharge %s (bus %.2f V, after relay %.2f V)", on ? "ON (3 s max)" : "OFF", vBus, vFb);
   }
   else if (!strcmp(c, "oe")) {
     if (!arg01) { plog("Usage: oe 1 or oe 0"); return; }
@@ -1705,9 +1805,10 @@ progress{width:100%;height:18px}
 
 <div class="card"><h2>Power</h2>
  <div class="row"><button id="t_rl" onclick="tog('rl','r')">Relay</button>
+  <button id="t_pc" onclick="tog('pc','pc')">Precharge</button>
   <button id="t_oe" onclick="tog('oe','oe')">PCA OE</button>
   <button id="t_en" onclick="tog('en','en')">Drivers EN</button></div>
- <small>Relay: LOW on GPIO21 = ON (feedback is checked). OE: PCA9685 outputs. EN: all driver enables.</small>
+ <small>Relay: LOW on GPIO21 = ON (feedback is checked); with the voltage after the relay below 90% of the bus it closes through precharge. Precharge: manual, relay OFF, 3 s max. OE: PCA9685 outputs. EN: all driver enables.</small>
 </div>
 
 <div class="card"><h2>Beacon and buzzer</h2>
@@ -1729,14 +1830,14 @@ progress{width:100%;height:18px}
 </div>
 
 <div class="card"><h2>Current sensors (IS)</h2>
- <table id="ct"><tr><th>Mod</th><th>Duty</th><th>Peak, A</th><th>k, A/V</th><th>State</th></tr></table>
+ <table id="ct"><tr><th>Mod</th><th>Duty</th><th>Pulse, A</th><th>Avg, A</th><th>k, A/V</th><th>State</th></tr></table>
  <small id="ci"></small>
  <div class="row" style="margin-top:8px"><small>Module</small><select id="cm" style="background:#0d1219;color:#e8edf3;border:1px solid #2c3848;border-radius:8px;padding:8px;font-size:16px"></select>
   <button onclick="cmd('pwm '+(2*($('cm').value-1))+' 100')">PWM 100%</button><button onclick="cmd('pwm all 0')">PWM 0</button></div>
  <div class="row"><button onclick="cmd('izero '+$('cm').value)">1. Measure zero (no load)</button></div>
  <div class="row"><small>Load current, A</small><input id="ca" type="number" step="0.01" value="2.00" inputmode="decimal"><button onclick="cmd('ical '+$('cm').value+' '+$('ca').value)">2. Calibrate (PWM 100%, load ON)</button></div>
  <div class="row"><small>Test limit, A</small><input id="cl2" type="number" step="0.1" value="2.0" inputmode="decimal"><button onclick="cmd('ilim '+$('cl2').value)">Set limit</button><button class="sm" onclick="cmd('ireset '+$('cm').value)">Reset module</button></div>
- <small>Procedure: pick the module, press 1 with the solenoids and load disconnected. Then connect the electronic load in CC mode to the module output, press PWM 100%, enter the current shown by the load, press 2. Values are saved in flash and used by the working firmware. Peak = highest reading in the last 40 ms. Valid only when the PWM pulse is long enough (about 20% at 100 Hz).</small>
+ <small>Procedure: pick the module, press 1 with the solenoids and load disconnected. Then connect the electronic load in CC mode to the module output, press PWM 100%, enter the current shown by the load, press 2. Values are saved in flash and used by the working firmware. Pulse = mean of the readings inside the PWM pulse (any duty; at low duty the window widens up to 160 ms). Avg = mean over the whole period (40 ms). Calibration uses PWM 100%, where both are equal. Which of them the limit, overload and CURRENT mode use is set by the CURR PROT parameter.</small>
 </div>
 
 <div class="card"><h2>MCP3208 inputs (volts, latest sample)</h2>
@@ -1775,7 +1876,7 @@ $('go').onclick=function(){var f=$('f').files[0];if(!f)return;$('go').disabled=t
  x.onerror=function(){$('ust').textContent='Connection lost';$('go').disabled=false};x.send(d)};
 var H='';for(var i=0;i<16;i++){H+='<div class="ch"><span class="n">CH'+i+'</span><input type="range" min="0" max="100" value="0" id="s'+i+'" oninput="sl('+i+',this.value)" onchange="fin('+i+',this.value)"><span class="p" id="p'+i+'">0%</span><button class="sm" id="w'+i+'" onclick="swp('+i+')">Sweep</button></div>'}
 $('chs').innerHTML=H;
-var T='',O='';for(var i=0;i<8;i++){T+='<tr><td>M'+(i+1)+'</td><td id="cd'+i+'">-</td><td id="ca'+i+'">-</td><td id="ck'+i+'">-</td><td id="cs'+i+'">-</td></tr>';O+='<option value="'+(i+1)+'">Module '+(i+1)+'</option>'}
+var T='',O='';for(var i=0;i<8;i++){T+='<tr><td>M'+(i+1)+'</td><td id="cd'+i+'">-</td><td id="ca'+i+'">-</td><td id="cv'+i+'">-</td><td id="ck'+i+'">-</td><td id="cs'+i+'">-</td></tr>';O+='<option value="'+(i+1)+'">Module '+(i+1)+'</option>'}
 $('ct').insertAdjacentHTML('beforeend',T);$('cm').innerHTML=O;
 $('sa').oninput=function(){$('pa').textContent=this.value+'%'};
 function sl(i,v){drag[i]=Date.now()+1500;$('p'+i).textContent=v+'%';var t=Date.now();if(t-(lastSend[i]||0)>120){lastSend[i]=t;send('pwm '+i+' '+v)}}
@@ -1791,7 +1892,7 @@ function render(d){S=d;fails=0;
  if(!d.tk)return;
  $('vb').textContent=d.vb.toFixed(2);$('vf').textContent=d.vf.toFixed(2);$('rm').textContent=d.rm;
  $('k').textContent='bus '+d.kb.toFixed(3)+', after relay '+d.kf.toFixed(3);
- ['rl','oe','en','rd','gn','bz'].forEach(function(k){on('t_'+k,d[k])});
+ ['rl','pc','oe','en','rd','gn','bz'].forEach(function(k){on('t_'+k,d[k])});
  for(var b=0;b<4;b++)on('bl'+b,d.bl===b);
  on('swall',d.sw===65535);
  for(var i=0;i<16;i++){if(Date.now()>(drag[i]||0)){$('s'+i).value=Math.round(d.pw[i]);$('p'+i).textContent=Math.round(d.pw[i])+'%'}on('w'+i,(d.sw>>i)&1)}
@@ -1803,6 +1904,7 @@ function render(d){S=d;fails=0;
   else if(!cal){st='not calibrated';cl='color:#8b9ab0'}
   $('cd'+m).textContent=du>0?Math.round(du)+'%':'-';
   $('ca'+m).textContent=d.ia[m]===null?'--':d.ia[m].toFixed(2);
+  $('cv'+m).textContent=d.iv[m]===null?'--':d.iv[m].toFixed(2);
   $('ck'+m).textContent=d.ik[m].toFixed(3)+(cal?'':'*');
   $('cs'+m).textContent=st;$('cs'+m).style.cssText=cl}
  $('ci').textContent='MCP3208 samples/s: '+d.sps[0]+', ADC errors '+d.er[0]+'% (level '+d.er[1]+', last 2 s, active modules only), limit '+d.lim.toFixed(2)+' A. * = default k, not calibrated.';
@@ -1900,13 +2002,14 @@ static void hState() {
   int n = snprintf(b, cap,
     "{\"up\":%lu,\"tk\":%d,\"fl\":%u,\"vb\":%.2f,\"vf\":%.2f,\"kb\":%.3f,\"kf\":%.3f,\"rl\":%d,\"oe\":%d,\"en\":%d,\"es\":%d,"
     "\"rd\":%d,\"gn\":%d,\"bz\":%d,\"bl\":%d,\"fq\":%.0f,\"os\":%.3f,\"sw\":%u,\"pca\":%d,\"ap\":[%d,%d],\"rm\":\"%s\","
-    "\"lim\":%.2f,\"ov\":%u,\"ic\":%u,\"zm\":%u,\"sps\":[%u,%u],\"er\":[%lu,%lu],\"fw\":\"%s\",\"pw\":[",
+    "\"pc\":%d,\"lim\":%.2f,\"ov\":%u,\"ic\":%u,\"zm\":%u,\"sps\":[%u,%u],\"er\":[%lu,%lu],\"fw\":\"%s\",\"pw\":[",
     millis() / 1000UL, testOK ? 1 : 0, (unsigned)faultCode, vBus, vFb, kBus, kFb, (relayState == RS_ON || relayState == RS_CLOSING) ? 1 : 0, oeOn, enOn, es,
     outR, outG, outB, blinkMode, pwmFreq, oscHz / 1e6f, (unsigned)sweepMask, pcaOk, mcpPresent, 0, relayMsg,
-    iLim, (unsigned)tOvlMask, (unsigned)calMaskBits(), (unsigned)zeroMask, (unsigned)adcSps10 * 10u, 0u, (unsigned long)adcErrPct, (unsigned long)adcLvl, FW_VERSION);
+    pcOn ? 1 : 0, iLim, (unsigned)tOvlMask, (unsigned)calMaskBits(), (unsigned)zeroMask, (unsigned)adcSps10 * 10u, 0u, (unsigned long)adcErrPct, (unsigned long)adcLvl, FW_VERSION);
   for (int i = 0; i < 16 && n < cap - 20; i++) n += snprintf(b + n, cap - n, "%s%.1f", i ? "," : "", pwmDuty[i]);
   n += snprintf(b + n, cap - n, "],");
-  jf(b, n, cap, "ia", iPeakA, NMOD, "%.2f", true);
+  jf(b, n, cap, "ia", iPulseA, NMOD, "%.2f", true);
+  jf(b, n, cap, "iv", iAvgA, NMOD, "%.2f", true);
   jf(b, n, cap, "ik", iK, NMOD, "%.3f", false);
   n += snprintf(b + n, cap - n, "\"ad\":[");
   for (int i = 0; i < 8 && n < cap - 20; i++) {
@@ -1939,7 +2042,7 @@ static void hTestOk() {
   if (!testOK) {
     testOK = true; lastPoll = now;
     wifiSt = HLW_PH_TEST;
-    testRelay = testOe = testEn = false;
+    testRelay = testOe = testEn = testPc = false;
     enForceOff = false;
     hardOff();
     plog("Test mode ON (confirmed on the page)");
@@ -2362,6 +2465,7 @@ void setup() {
   pinOutHigh(PIN_RELAY);     // реле выключено
   pinOutHigh(PIN_OE);        // выходы PCA9685 выключены
   pinOutLow(PIN_EN);         // драйверы выключены
+  pinOutLow(PIN_PC);         // предзаряд выключен
   pinOutLow(PIN_RED); pinOutLow(PIN_GREEN); pinOutLow(PIN_BUZ);
   pinOutLow(PIN_LED);
   pinMode(PIN_USER, INPUT_PULLUP);
