@@ -251,4 +251,7 @@ D.update({
 "adc clock": "такт АЦП", "adc errors": "ошибки АЦП", "adc!": "АЦП!", "adc": "АЦП", "samples/s": "замеров/с",
 "samples/s: ...": "замеров/с: ...", "mhz": "МГц", "adcok": "АЦПок", "adc err": "ОШ АЦП",
 })
-
+D.update({
+"curr prot": "защита тока", "impulse": "ИМПУЛЬС", "average": "СРЕДНИЙ", "average=lamp test": "СРЕДН = для лампы",
+"precharge": "ПРЕДЗАРЯД",
+})

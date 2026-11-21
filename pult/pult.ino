@@ -251,7 +251,7 @@ static const uint8_t RU_GLYPH[64][8] = {   // 32 capitals, 32 lowercase; 5 colum
   {0x00,0x00,0x0F,0x11,0x0F,0x09,0x11,0x00},  // я
 };
 struct RuTr { const char* en; const char* ru; };
-static const RuTr RU_TR[645] = {
+static const RuTr RU_TR[650] = {
   {"  pass:", "  пр:"},
   {"!ovl l=lim o=open", "!П Л=лим О=обр"},
   {"(empty)", "(пусто)"},
@@ -313,6 +313,8 @@ static const RuTr RU_TR[645] = {
   {"assign", "НАЗНАЧ."},
   {"at the bottom.", "внизу."},
   {"aug", "авг"},
+  {"average", "СРЕДНИЙ"},
+  {"average=lamp test", "СРЕДН = для лампы"},
   {"b pulse", "B имп."},
   {"b: lim 3.0, now 3.1", "B: лим 3.0, тек 3.1"},
   {"back", "назад"},
@@ -394,6 +396,7 @@ static const RuTr RU_TR[645] = {
   {"critical: charge!", "Критично: зарядка!"},
   {"cur limit", "ЛИМИТ"},
   {"cur. limit", "лимит тока"},
+  {"curr prot", "защита тока"},
   {"current", "ТОК"},
   {"current limited", "Ток ограничен"},
   {"current limits", "лимиты тока"},
@@ -512,6 +515,7 @@ static const RuTr RU_TR[645] = {
   {"id = receiver code.", "ID = код приемника."},
   {"idle", "ожидание"},
   {"idle exit", "бездейств. выход"},
+  {"impulse", "ИМПУЛЬС"},
   {"in", "через"},
   {"in adc counts.", "в отсчетах АЦП."},
   {"in range", "рядом"},
@@ -674,6 +678,7 @@ static const RuTr RU_TR[645] = {
   {"phone: update/test", "телефон: обн/тест"},
   {"play", "играть"},
   {"power", "питание"},
+  {"precharge", "ПРЕДЗАРЯД"},
   {"preset applied", "режим применен"},
   {"preset:", "режим:"},
   {"presets", "режимы"},
@@ -899,7 +904,7 @@ static const RuTr RU_TR[645] = {
   {"you want", "которую нужно"}
 };
 struct RuIdx { uint16_t s, n; };
-static const RuIdx RU_IDX[128] = { {0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,1},{1,1},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{2,5},{0,0},{0,0},{0,0},{0,0},{7,4},{0,0},{0,0},{11,2},{13,1},{14,1},{0,0},{0,0},{0,0},{15,2},{0,0},{17,1},{0,0},{0,0},{0,0},{0,0},{18,3},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{21,40},{61,29},{90,58},{148,35},{183,27},{210,25},{235,9},{244,10},{254,20},{274,6},{280,5},{285,37},{322,26},{348,39},{387,21},{408,31},{439,1},{440,73},{513,61},{574,33},{607,9},{616,6},{622,20},{642,1},{643,2},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0} };
+static const RuIdx RU_IDX[128] = { {0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,1},{1,1},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{2,5},{0,0},{0,0},{0,0},{0,0},{7,4},{0,0},{0,0},{11,2},{13,1},{14,1},{0,0},{0,0},{0,0},{15,2},{0,0},{17,1},{0,0},{0,0},{0,0},{0,0},{18,3},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{21,42},{63,29},{92,59},{151,35},{186,27},{213,25},{238,9},{247,10},{257,21},{278,6},{284,5},{289,37},{326,26},{352,39},{391,21},{412,32},{444,1},{445,73},{518,61},{579,33},{612,9},{621,6},{627,20},{647,1},{648,2},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0} };
 
 // Вспомогательные функции собраны в структуру: в .ino свободная функция раньше типов сбила бы автогенерацию прототипов Arduino.
 struct RuUtil {
@@ -1102,11 +1107,11 @@ enum LogType { LT_ESTOP, LT_RXALARM, LT_NOLINK, LT_LINKOK, LT_RXFAULT, LT_LIMIT,
 // параметры приёмника (SetConfig): SOL = на соленоид (канал x сторона A/B), CH = на канал, GLOB = общие
 enum RxParam { RXP_LIMIT, RXP_DUTY, RXP_MAXD, RXP_RAMPUP, RXP_RAMPDN, RXP_CHEN,
                RXP_OVLDLY, RXP_LINKTMO, RXP_PWMFREQ, RXP_DITHAMP, RXP_DITHFRQ, RXP_PWR,
-               RXP_MODE, RXP_STARTI, RXP_MAXI, RXP_ADCCLK, NUM_RXP };
+               RXP_MODE, RXP_STARTI, RXP_MAXI, RXP_ADCCLK, RXP_IPROT, NUM_RXP };
 // живые параметры только для чтения (не хранятся, в CRC и синхронизацию не входят): читаются запросом HLO_GET (значение 0xFFFF)
-enum { RXL_ADCSPS = 16, RXL_ADCERR = 17 };
+enum { RXL_ADCSPS = 17, RXL_ADCERR = 18 };
 enum RxScope { PS_SOL, PS_CH, PS_GLOB };
-enum RxFmt { F_AMP, F_PCT, F_MS, F_HZ, F_ONOFF, F_DBM, F_MODE, F_PCT10, F_MHZ };
+enum RxFmt { F_AMP, F_PCT, F_MS, F_HZ, F_ONOFF, F_DBM, F_MODE, F_PCT10, F_MHZ, F_IPROT };
 struct RxParamDef { const char* name; uint8_t scope; int16_t mn, mx, step, def; uint8_t fmt; };
 struct LogEv { uint8_t type, ch, side, cnt; uint16_t dA; uint32_t t; bool old; };
 struct Telem {
@@ -1122,6 +1127,7 @@ struct Telem {
   uint8_t cfgCrc;           // CRC8 сохранённой конфигурации приёмника
   uint8_t wifi, wifiArg;    // состояние Wi-Fi приёмника и параметр (процент / код ошибки)
   uint8_t adc;              // уровень ошибок АЦП тока: 0 норма, 1 от 2 %, 2 от 5 %, 3 от 10 % (биты 3-4 байта Status)
+  uint8_t pre;              // 1 = идёт предзаряд конденсаторов, реле ещё не включено (бит 5 байта Status)
 };
 // ---- радио HydroLink: константы (описание протокола ниже, в блоке РАДИО) ----
 #define HL_PROTO        1
@@ -1173,8 +1179,13 @@ const RxParamDef RXP[NUM_RXP] = {
   { "CONTROL",   PS_GLOB,   0,    1,  1,   0, F_MODE  },   // 0 = PWM (без обратной связи), 1 = CURRENT (по току)
   { "START I",   PS_SOL,    0,  100,  1,   5, F_AMP   },   // стартовый ток, режим CURRENT (0.1 А)
   { "MAX I",     PS_SOL,    5,  100,  1,  15, F_AMP   },   // максимальный рабочий ток, режим CURRENT
-  { "ADC CLOCK", PS_GLOB, 1000, 2000, 250, 1000, F_MHZ }    // такт SPI АЦП тока в кГц: 1.00..2.00 МГц шагом 0.25, по умолчанию 1.00
+  { "ADC CLOCK", PS_GLOB, 1000, 2000, 250, 1000, F_MHZ },   // такт SPI АЦП тока в кГц: 1.00..2.00 МГц шагом 0.25, по умолчанию 1.00
+  { "CURR PROT", PS_GLOB,    0,    1,  1,    0, F_IPROT }    // защита по току: 0 = по току в импульсе (по умолчанию), 1 = по среднему току за период (для проверок с лампой)
 };
+
+// порядок пунктов меню RX Global (параметры приёмника, PS_GLOB)
+const uint8_t RXG_PARAM[] = { RXP_MODE, RXP_IPROT, RXP_OVLDLY, RXP_LINKTMO, RXP_PWMFREQ, RXP_DITHAMP, RXP_DITHFRQ, RXP_ADCCLK };
+#define RXG_N  ((int)(sizeof(RXG_PARAM) / sizeof(RXG_PARAM[0])))
 
 // цвета: 0 красный, 1 зелёный, 2 янтарный (оба)
 #define COL_RED    0
@@ -2614,6 +2625,7 @@ static void hlOnTelem(const uint8_t* p, size_t len, unsigned long now) {
   t.vrx = p[28]; t.rssi = (int8_t)p[29];
   t.boots = p[30]; t.cfgCrc = p[31]; t.wifi = p[32]; t.wifiArg = p[33];
   t.adc = (p[27] >> 3) & 3;
+  t.pre = (p[27] >> 5) & 1;
   bool first = !hlUp;
   hlBootsNow = t.boots;
   tel = t;
@@ -2730,7 +2742,7 @@ void hlStep(unsigned long now) {
       if (hlCur.tries >= HL_CFG_TRIES) {
         hlCurOn = false;
         LOGF("Cfg: no answer (op %d p %d)", hlCur.op, hlCur.param);
-        if (hlCur.kind == 1 && hlCur.op == HLO_BATCH && hlCur.param == RXP_ADCCLK) { /* старый приёмник не знает такт АЦП: синхронизация идёт дальше */ }
+        if (hlCur.kind == 1 && hlCur.op == HLO_BATCH && (hlCur.param == RXP_ADCCLK || hlCur.param == RXP_IPROT)) { /* старый приёмник не знает такт АЦП и защиту по току: синхронизация идёт дальше */ }
         else if (hlCur.kind == 1) { hlSyncBusy = false; hlSynced = false; hlSyncRetryAt = now + 2000UL; }
         else {
           if (hlCur.op == HLO_SET) { simRam[hlCur.param][hlCur.ch][hlCur.dir] = hlCur.old; if (hlCur.param == RXP_MODE) rxModeCache = hlCur.old; }
@@ -2929,7 +2941,7 @@ int menuCount() {
     case MS_RXWIFIM: return RW_COUNT;
     case MS_RXCH:    { RxItem it[16]; return rxItems(it); }
     case MS_RXDIR:   return 3;
-    case MS_RXGLOB:  return 8;
+    case MS_RXGLOB:  return RXG_N + 1;
     default:         return 0;
   }
 }
@@ -3012,6 +3024,7 @@ void fmtParam(int p, int v, char* b, size_t n) {
     case F_ONOFF: snprintf(b, n, "%s", v ? "ON" : "OFF"); break;
     case F_MODE:  snprintf(b, n, "%s", v ? "CURRENT" : "PWM"); break;
     case F_MHZ:   snprintf(b, n, "%d.%02dMHz", v / 1000, (v % 1000) / 10); break;
+    case F_IPROT: snprintf(b, n, "%s", v ? "AVERAGE" : "IMPULSE"); break;
     default:      snprintf(b, n, "%ddBm", v); break;
   }
 }
@@ -3557,9 +3570,9 @@ void menuLabel(int i, char* b, size_t n) {
       snprintf(b, n, "Back");
       break;
     case MS_RXGLOB:
-      if (i < 7) {
+      if (i < RXG_N) {
         char v[12];
-        int p = (i == 0) ? RXP_MODE : (i == 6) ? RXP_ADCCLK : RXP_OVLDLY + i - 1;
+        int p = RXG_PARAM[i];
         fmtParam(p, rxQuery(0, 0, p), v, sizeof(v));
         snprintf(b, n, "%-9s %s", RXP[p].name, v);
       } else snprintf(b, n, "Back");
@@ -3760,7 +3773,7 @@ void rxEditStep(int a, int m) {
     rxCur = rxSet(rxCh, rxDir, rxParam, TXP_LIST[idx], false);
     return;
   }
-  if (d.fmt == F_ONOFF || d.fmt == F_MODE) {
+  if (d.fmt == F_ONOFF || d.fmt == F_MODE || d.fmt == F_IPROT) {
     rxCur = rxSet(rxCh, rxDir, rxParam, a > 0 ? 1 : 0, false);
     return;
   }
@@ -4089,7 +4102,7 @@ void menuSelect(int i) {
       break;
     case MS_RXGLOB:
       idxRxGlob = i;
-      if (i < 7) startRxEdit((i == 0) ? RXP_MODE : (i == 6) ? RXP_ADCCLK : RXP_OVLDLY + i - 1, 0, 0, MS_RXGLOB);
+      if (i < RXG_N) startRxEdit(RXG_PARAM[i], 0, 0, MS_RXGLOB);
       else       gotoScr(MS_RX, idxRx);
       break;
     case MS_SCREENS:
@@ -5569,12 +5582,13 @@ void drawRun1() {
     else if (!hlUp)          display.print("NO SIGNAL");
     else if (hlSyncBusy)     display.printf("SYNC %d%%", hlSyncPct());
     else if (tel.kill)       display.print("STOPPED");
+    else if (tel.pre)        display.print("PRECHARGE");
     else                     if (adcPerm) display.printf("ADC ERR %d%%", (int)(adcErrPct ? adcErrPct : 10));
     else         display.print("READY");
   }
   else if (simMode == SIM_LINK) display.print("SIM: READY");
   else                          display.print("NO SIGNAL");
-  if (rxLinked() && !hlSyncBusy && !(simMode == SIM_RADIO && tel.kill)) drawTick(102, 42, 9); else drawCross(102, 42, 9);
+  if (rxLinked() && !hlSyncBusy && !(simMode == SIM_RADIO && (tel.kill || tel.pre))) drawTick(102, 42, 9); else drawCross(102, 42, 9);
 
   drawHintText("hold MENU = menu", 56);
   drawBatteryBig();
@@ -6646,6 +6660,8 @@ void drawRxEdit() {
     display.print("all channels");
   } else if (rxParam == RXP_MODE) {
     display.print("PWM=open CUR=PI");
+  } else if (rxParam == RXP_IPROT) {
+    display.print("AVERAGE=lamp test");
   } else if (rxParam == RXP_ADCCLK) {
     if (adcSps) display.printf("%lu samples/s", (unsigned long)adcSps);
     else        display.print("samples/s: ...");
