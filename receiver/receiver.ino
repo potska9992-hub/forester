@@ -105,15 +105,15 @@ static const char FW_TAG[] __attribute__((used)) = "FWTAG:" PROJECT_NAME ":" FW_
 enum { HLT_CONTROL = 1, HLT_TELEM, HLT_CFG, HLT_ACK, HLT_BATCH, HLT_NET, HLT_INFO, HLT_BIND, HLT_BINDOK };
 enum { HLF_ESTOP = 1, HLF_REQT = 2, HLF_LEVER = 4, HLF_BOOT = 8 };
 enum { HLO_SET, HLO_GET, HLO_BATCH, HLO_CMD, HLO_NET };
-enum { HLC_PROTO = 1, HLC_CHMASK, HLC_CHTYPES, HLC_TXPWR, HLC_FACTORY = 0x10, HLC_REBOOT, HLC_WIFI_PHONE = 0x20, HLC_WIFI_GH, HLC_WIFI_OFF, HLC_WIFI_YES };
+enum { HLC_PROTO = 1, HLC_CHMASK, HLC_CHTYPES, HLC_TXPWR, HLC_FACTORY = 0x10, HLC_REBOOT, HLC_SLEEP, HLC_WAKE, HLC_WIFI_PHONE = 0x20, HLC_WIFI_GH, HLC_WIFI_OFF, HLC_WIFI_YES };
 enum { HLW_OFF = 0, HLW_PH_WAIT = 2, HLW_PH_CONN, HLW_PH_TEST, HLW_PH_UP, HLW_PH_DONE,
        HLW_GH_CONN = 10, HLW_GH_CHECK, HLW_GH_ASK, HLW_GH_DL, HLW_GH_VERIFY, HLW_GH_DONE, HLW_ERR = 20 };
 enum { WE_NONET = 1, WE_PASS, WE_GHDOWN, WE_NOREL, WE_DLFAIL, WE_SUM, WE_WRONG, WE_UPD, WE_BUSY };
 
 // ---- Параметры (порядок и пределы те же, что в пульте) ----
 enum { PS_SOL, PS_CH, PS_GLOB };
-enum { RXP_LIMIT, RXP_DUTY, RXP_MAXD, RXP_RAMPUP, RXP_RAMPDN, RXP_CHEN, RXP_OVLDLY, RXP_LINKTMO, RXP_PWMFREQ, RXP_DITHAMP, RXP_DITHFRQ, RXP_PWR, RXP_MODE, RXP_STARTI, RXP_MAXI, RXP_ADCCLK, RXP_IPROT, NUM_RXP };
-enum { RXL_ADCSPS = 17, RXL_ADCERR = 18 };       // живые параметры только для чтения (запрос GET): замеров АЦП в секунду / 10, процент ошибок АЦП
+enum { RXP_LIMIT, RXP_DUTY, RXP_MAXD, RXP_RAMPUP, RXP_RAMPDN, RXP_CHEN, RXP_OVLDLY, RXP_LINKTMO, RXP_PWMFREQ, RXP_DITHAMP, RXP_DITHFRQ, RXP_PWR, RXP_MODE, RXP_STARTI, RXP_MAXI, RXP_ADCCLK, RXP_IPROT, RXP_SLPEN, RXP_SLPAUTO, RXP_SLPMIN, NUM_RXP };
+enum { RXL_ADCSPS = 20, RXL_ADCERR = 21 };       // живые параметры только для чтения (запрос GET): замеров АЦП в секунду / 10, процент ошибок АЦП
 struct RxParamDef { uint8_t scope; int16_t mn, mx, def; };
 static const RxParamDef RXP[NUM_RXP] = {
   { PS_SOL,     5,  100,  20 },   // LIMIT, 0.1 А
@@ -132,7 +132,10 @@ static const RxParamDef RXP[NUM_RXP] = {
   { PS_SOL,     0,  100,   5 },   // START I, 0.1 А
   { PS_SOL,     5,  100,  15 },   // MAX I, 0.1 А
   { PS_GLOB, 1000, 2000, 1000 },  // ADC CLOCK: такт SPI МЦП3208, кГц
-  { PS_GLOB,    0,    1,   0 }    // CURR PROT: 0 по току импульса, 1 по среднему току
+  { PS_GLOB,    0,    1,   0 },   // CURR PROT: 0 по току импульса, 1 по среднему току
+  { PS_GLOB,    0,    1,   1 },   // SLEEP: функция сна включена (жест на пульте, пробуждение)
+  { PS_GLOB,    0,    1,   0 },   // AUTO SLEEP: автосон по времени без связи
+  { PS_GLOB,    2,   15,  10 }    // SLEEP TIMER: минут без связи до автосна (в меню пульта 2, 5, 10, 15)
 };
 
 #define NMOD          8
@@ -171,7 +174,7 @@ static portMUX_TYPE shMux = portMUX_INITIALIZER_UNLOCKED;
 
 struct CtlShared { int8_t v[NUM_CH]; uint32_t rxAt; uint32_t nzAt; bool estop; bool lever; bool have; };
 static CtlShared ctlSh = { { 0 }, 0, 0, false, false, false };
-struct TelShared { uint8_t cur[NUM_CH]; int8_t pwm[NUM_CH]; uint8_t mLim, mOvl, mOpen, side; uint8_t kill, reason; uint8_t vrx; uint8_t pre; };
+struct TelShared { uint8_t cur[NUM_CH]; int8_t pwm[NUM_CH]; uint8_t mLim, mOvl, mOpen, side; uint8_t kill, reason; uint8_t vrx; uint8_t pre; uint8_t slp; };
 static TelShared telSh = { { 0 }, { 0 }, 0, 0, 0, 0, 1, 3, 0 };
 static void logRaw(const char* s) { while (*s) { logBuf[logTotal % LOG_SZ] = *s++; logTotal++; } }
 static void plog(const char* fmt, ...) {
@@ -265,8 +268,9 @@ static void cfgLoad() {
   q.begin("rxcfg", false);
   uint16_t tmp[NUM_RXP][NUM_CH][2];
   size_t szSaved = q.getBytesLength("p");
+  const size_t perParam = sizeof(uint16_t) * NUM_CH * 2;
   if (szSaved == sizeof(tmp)) { q.getBytes("p", tmp, sizeof(tmp)); memcpy(nvsP, tmp, sizeof(nvsP)); cfgFix(nvsP); }
-  else if (szSaved == sizeof(uint16_t) * (NUM_RXP - 1) * NUM_CH * 2) { q.getBytes("p", nvsP, szSaved); cfgFix(nvsP); }   // прошивка 1.0-1.3: 16 параметров, новый (CURR PROT) остаётся по умолчанию
+  else if (szSaved > 0 && szSaved < sizeof(tmp) && (szSaved % perParam) == 0) { q.getBytes("p", nvsP, szSaved); cfgFix(nvsP); }   // сохранено меньше параметров (прошивки 1.0-1.4 до сна): старые читаем, новые остаются по умолчанию
   bootCount = (uint8_t)(q.getUChar("boots", 0) + 1);
   q.putUChar("boots", bootCount);
   q.end();
@@ -327,6 +331,11 @@ static unsigned long relayChangeAt = 0, relayOffAt = 0, relayBadAt = 0;
 static char relayMsg[100] = "-";
 
 static unsigned long restartAt = 0;
+static bool rxSleep = false;                  // режим сна: выходы, реле, предзаряд, мигалка и зуммер выключены, управление игнорируется, радио отвечает
+static volatile bool wakeReq = false;         // запрос пробуждения (радиозадача / кнопка), обрабатывается в controlTick
+static unsigned long sleepAt = 0;             // не 0 = команда сна с пульта принята, уснуть в этот момент (ответ успевает уйти)
+static unsigned long noLinkAt = 0;            // с какого момента нет связи с пультом (для автосна)
+static bool prevPultEs = false;               // E-Stop пульта в прошлом пакете (отпускание будит)
 static bool estopRaw = false, estopBtn = false;   // аварийная кнопка приёмника (HIGH = нажата или обрыв)
 static unsigned long estopRawAt = 0;
 
@@ -960,6 +969,7 @@ static void telPublish() {
   t.kill = killNow ? 1 : 0;
   t.reason = killReasonNow;
   t.pre = (relayState == RS_PRECHARGE) ? 1 : 0;
+  t.slp = rxSleep ? 1 : 0;
   taskENTER_CRITICAL(&shMux);
   telSh = t;
   taskEXIT_CRITICAL(&shMux);
@@ -985,7 +995,7 @@ static void estopTick(unsigned long now) {
   if (estopRaw != estopBtn && (now - estopRawAt) >= 30UL) {
     estopBtn = estopRaw;
     if (estopBtn) { btnLatched = true; plog("RX E-STOP button pressed (or wire broken)"); }
-    else plog("RX E-STOP button released (alarm stays until the pult sends zeros)");
+    else { plog("RX E-STOP button released (alarm stays until the pult sends zeros)"); if (rxSleep) wakeReq = true; }
   }
 }
 
@@ -993,6 +1003,19 @@ static bool wifiActive() { return wifiSt != HLW_OFF; }
 static bool testMode() { return testOK && wifiSt != HLW_OFF; }
 
 static void testCurrentTick(unsigned long now);
+
+static void sleepEnter(unsigned long now, const char* why) {
+  rxSleep = true; sleepAt = 0; noLinkAt = 0;
+  hardOff();                                                // OE, ШИМ; EN по логике разряда (держится, пока напряжение за реле не упадёт на 4 В ниже бортового)
+  relayOpen(now);                                           // реле и предзаряд выключены
+  runReset(); outAct = false; anyActive = false;
+  plog("SLEEP (%s): outputs, relay, precharge, beacon and buzzer off; EN follows the discharge logic", why);
+}
+static void sleepExit(unsigned long now) {
+  rxSleep = false; sleepAt = 0; noLinkAt = 0;
+  runReset();
+  plog("WAKE");
+}
 
 static void controlTick(unsigned long now) {
   CtlShared c;
@@ -1009,6 +1032,24 @@ static void controlTick(unsigned long now) {
   else if (pultEs)      { kill = true; reason = 0; }
   else if (!link)       { kill = true; reason = 3; }
   killNow = kill; killReasonNow = reason;
+
+  // сон: пробуждение, команда сна, автосон по времени без связи
+  if (wakeReq) { wakeReq = false; if (rxSleep) sleepExit(now); }
+  if (link) noLinkAt = 0; else if (!noLinkAt) noLinkAt = now ? now : 1;
+  if (!rxSleep) {
+    if (sleepAt && (long)(now - sleepAt) >= 0) sleepEnter(now, "command from the pult");
+    else if (ramP[RXP_SLPEN][0][0] && ramP[RXP_SLPAUTO][0][0] && wifiSt == HLW_OFF && !bindMode && noLinkAt &&
+             (now - noLinkAt) >= (unsigned long)ramP[RXP_SLPMIN][0][0] * 60000UL) sleepEnter(now, "no link timer");
+  }
+  if (rxSleep && (wifiSt != HLW_OFF || bindMode)) sleepExit(now);   // Wi-Fi или привязка (кнопка USER) - приёмник просыпается
+  if (rxSleep) {                                            // во сне управление игнорируется; реле и EN доводятся логикой реле
+    relayTick(now, false);
+    if (oeOn || enOn != (enHold && !faultCode)) hardOff();
+    outAct = false;
+    for (int i = 0; i < NMOD; i++) iPeakA[i] = iPulseA[i] = iAvgA[i] = -1.0f;
+    currentEval(now); telPublish(); ctlAt = now;
+    return;
+  }
 
   bool tm = testMode();
   if (!(tm && testPc) && pcOn && relayState != RS_PRECHARGE && relayState != RS_CLOSING) pcSet(false);   // предзаряд горит только в своём состоянии
@@ -1065,7 +1106,9 @@ static bool ledOn = false;
 static void lampsTick(unsigned long now) {
   bool r = false, g = false, b = false;
   bool tm = testMode();
-  if (tm && (manRed || manGreen || manBuz || blinkMode)) {
+  if (rxSleep) {
+    r = g = b = false;                                      // сон: мигалка и зуммер выключены
+  } else if (tm && (manRed || manGreen || manBuz || blinkMode)) {
     r = manRed; g = manGreen; b = manBuz;
     if (blinkMode) {
       unsigned long ph = now - blinkT0;
@@ -1195,7 +1238,7 @@ static void sendTelem() {
   b[6] = missedCnt; missedCnt = 0;
   for (int i = 0; i < NUM_CH; i++) { b[7 + i] = t.cur[i]; b[15 + i] = (uint8_t)t.pwm[i]; }
   b[23] = t.mLim; b[24] = t.mOvl; b[25] = t.mOpen; b[26] = t.side;
-  b[27] = (uint8_t)((t.kill ? 1 : 0) | ((t.reason & 3) << 1) | ((adcLvl & 3) << 3) | (t.pre ? 0x20 : 0));   // биты 3-4: уровень ошибок АЦП, бит 5: идёт предзаряд
+  b[27] = (uint8_t)((t.kill ? 1 : 0) | ((t.reason & 3) << 1) | ((adcLvl & 3) << 3) | (t.pre ? 0x20 : 0) | (t.slp ? 0x40 : 0));   // биты 3-4: уровень ошибок АЦП, бит 5: идёт предзаряд, бит 6: приёмник спит
   b[28] = t.vrx;
   b[29] = (uint8_t)lastRssi;
   b[30] = bootCount;
@@ -1282,6 +1325,9 @@ static void handleControl(const uint8_t* p, size_t len, unsigned long now) {
   int k = 5;
   bool nz = false;
   for (int i = 0; i < NUM_CH; i++) if (mask & (1 << i)) { int raw = (int)(int8_t)p[k++]; v[i] = (int8_t)constrain(raw, -100, 100); if (v[i]) nz = true; }
+  { bool es = (flags & HLF_ESTOP) != 0;                     // пробуждение: пульт только что включён (флаг BOOT) или отпущен грибок пульта
+    if ((flags & HLF_BOOT) || (prevPultEs && !es)) wakeReq = true;
+    prevPultEs = es; }
   if (flags & HLF_ESTOP) { digitalWrite(PIN_OE, HIGH); digitalWrite(PIN_PC, LOW); }       // E-Stop: аппаратно сразу (OE, предзаряд); EN не трогаем - конденсаторы разряжаются через драйверы, EN выключает логика разряда; остальное в такте управления
   taskENTER_CRITICAL(&shMux);
   memcpy(ctlSh.v, v, sizeof(v));
@@ -1345,6 +1391,16 @@ static void handleCfg(const uint8_t* p, size_t len, unsigned long now) {
           plog("REBOOT requested from the pult");
           restartAt = (now ? now : 1) + 600UL;                 // ответ успевает уйти; выходы выключаются сразу (runEnable ниже учитывает restartAt)
         }
+        break;
+      case HLC_SLEEP:                                         // сон с пульта (жест MENU): только рычаги в нуле, Wi-Fi закрыт, функция включена
+        if (val != HL_FACTORY_KEY) st = 1;
+        else if (rxSleep) st = 0;
+        else if (!ramP[RXP_SLPEN][0][0] || !hlSafeNow(now) || wifiSt != HLW_OFF) st = 2;
+        else { sleepAt = (now ? now : 1) + 300UL; plog("SLEEP requested from the pult"); }
+        break;
+      case HLC_WAKE:
+        if (val != HL_FACTORY_KEY) st = 1;
+        else { wakeReq = true; plog("WAKE requested from the pult"); }
         break;
       case HLC_WIFI_PHONE:
       case HLC_WIFI_GH:
@@ -1531,7 +1587,7 @@ static void printHelp() {
 static void printStatus() {
   plog("STATUS receiver %s, uptime %lu s, boots %u, last reset: %s", FW_VERSION, millis() / 1000UL, (unsigned)bootCount, rstReasonText());
   plog("Bus %.2f V (k %.3f), after relay %.2f V (k %.3f)", vBus, kBus, vFb, kFb);
-  plog("Relay state %d, precharge %s, OE %s, EN %s, RX E-STOP %s, fault %u, current protection by %s", (int)relayState, pcOn ? "ON" : "off", oeOn ? "ON" : "off", enOn ? "ON" : "off", estopBtn ? "ACTIVE" : "released", (unsigned)faultCode, ramP[RXP_IPROT][0][0] ? "AVERAGE" : "PULSE");
+  plog("%s, relay state %d, precharge %s, OE %s, EN %s, RX E-STOP %s, fault %u, current protection by %s", rxSleep ? "SLEEPING" : "awake", (int)relayState, pcOn ? "ON" : "off", oeOn ? "ON" : "off", enOn ? "ON" : "off", estopBtn ? "ACTIVE" : "released", (unsigned)faultCode, ramP[RXP_IPROT][0][0] ? "AVERAGE" : "PULSE");
   plog("PCA9685 %s, PWM %.0f Hz; MCP3208 %s", pcaOk ? "found" : "NOT FOUND", pwmFreq, mcpPresent ? "found" : "NOT FOUND");
   plog("Current: MCP3208 clock %u kHz, samples/s %u, ADC checks %lu errors %lu (%u pct, level %u), calibrated %u of 8", (unsigned)ramP[RXP_ADCCLK][0][0], (unsigned)adcSps10 * 10u, (unsigned long)adcChkTotal, (unsigned long)adcErrTotal, (unsigned)adcErrPct, (unsigned)adcLvl, (unsigned)__builtin_popcount(calMaskBits()));
   plog("Radio: %s", hlInit ? "OK" : "FAILED");
