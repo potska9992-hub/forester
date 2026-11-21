@@ -251,7 +251,7 @@ static const uint8_t RU_GLYPH[64][8] = {   // 32 capitals, 32 lowercase; 5 colum
   {0x00,0x00,0x0F,0x11,0x0F,0x09,0x11,0x00},  // я
 };
 struct RuTr { const char* en; const char* ru; };
-static const RuTr RU_TR[650] = {
+static const RuTr RU_TR[658] = {
   {"  pass:", "  пр:"},
   {"!ovl l=lim o=open", "!П Л=лим О=обр"},
   {"(empty)", "(пусто)"},
@@ -273,6 +273,7 @@ static const RuTr RU_TR[650] = {
   {"= ch3. a: lim 3.0,", "= К3. A: лим 3.0,"},
   {"= exit", "= вых"},
   {"=exit", "=вых"},
+  {"a few seconds.", "через пару секунд."},
   {"a pulse", "A имп."},
   {"aborted", "прервано"},
   {"about", "около"},
@@ -562,6 +563,7 @@ static const RuTr RU_TR[650] = {
   {"link back", "связь есть"},
   {"link lost", "связь потеряна"},
   {"link restored", "Связь вернулась"},
+  {"link returns in", "связь вернется"},
   {"link tmo", "таймаут связи"},
   {"link: no signal", "СВЯЗЬ: НЕТ"},
   {"link: ok", "СВЯЗЬ: ОК"},
@@ -658,6 +660,7 @@ static const RuTr RU_TR[650] = {
   {"others were saved", "остальные сохр."},
   {"others. enable kept", "остальные, Вкл ост."},
   {"out", "вых."},
+  {"outputs stop,", "выходы стоп,"},
   {"outputs stopped", "Выходы выкл."},
   {"overload", "ПЕРЕГРУЗКА"},
   {"overload 5.2 a.", "перегрузка 5.2 А."},
@@ -734,6 +737,8 @@ static const RuTr RU_TR[650] = {
   {"reset pult?", "СБРОС ПУЛЬТА?"},
   {"reset receiver?", "СБРОС ПРИЕМНИКА?"},
   {"resetting", "сброс"},
+  {"restart receiver?", "ПЕРЕЗАПУСК ПРИЕМНИКА?"},
+  {"restart rx", "перезапуск RX"},
   {"restarting...", "перезапуск..."},
   {"restore", "вернуть"},
   {"ret", "ВТЯ"},
@@ -764,6 +769,9 @@ static const RuTr RU_TR[650] = {
   {"rx refused", "RX отказал"},
   {"rx reset", "сброс RX"},
   {"rx reset sent", "сброс RX отправлен"},
+  {"rx restart", "перезапуск RX"},
+  {"rx restart sent", "перезапуск RX послан"},
+  {"rx restarting", "RX перезапускается"},
   {"rx sends on request", "RX шлет по запросу"},
   {"rx status", "статус RX"},
   {"rx wi-fi error", "ошибка Wi-Fi RX"},
@@ -904,7 +912,7 @@ static const RuTr RU_TR[650] = {
   {"you want", "которую нужно"}
 };
 struct RuIdx { uint16_t s, n; };
-static const RuIdx RU_IDX[128] = { {0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,1},{1,1},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{2,5},{0,0},{0,0},{0,0},{0,0},{7,4},{0,0},{0,0},{11,2},{13,1},{14,1},{0,0},{0,0},{0,0},{15,2},{0,0},{17,1},{0,0},{0,0},{0,0},{0,0},{18,3},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{21,42},{63,29},{92,59},{151,35},{186,27},{213,25},{238,9},{247,10},{257,21},{278,6},{284,5},{289,37},{326,26},{352,39},{391,21},{412,32},{444,1},{445,73},{518,61},{579,33},{612,9},{621,6},{627,20},{647,1},{648,2},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0} };
+static const RuIdx RU_IDX[128] = { {0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,1},{1,1},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{2,5},{0,0},{0,0},{0,0},{0,0},{7,4},{0,0},{0,0},{11,2},{13,1},{14,1},{0,0},{0,0},{0,0},{15,2},{0,0},{17,1},{0,0},{0,0},{0,0},{0,0},{18,3},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{21,43},{64,29},{93,59},{152,35},{187,27},{214,25},{239,9},{248,10},{258,21},{279,6},{285,5},{290,38},{328,26},{354,39},{393,22},{415,32},{447,1},{448,78},{526,61},{587,33},{620,9},{629,6},{635,20},{655,1},{656,2},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0} };
 
 // Вспомогательные функции собраны в структуру: в .ino свободная функция раньше типов сбила бы автогенерацию прототипов Arduino.
 struct RuUtil {
@@ -1101,7 +1109,7 @@ enum WifiItem { WF_PHONE, WF_GH, WF_NETS, WF_BACK, WF_COUNT };
 enum RxWifiItem { RW_PHONE, RW_GH, RW_BACK, RW_COUNT };
 enum ScrId { SC_MAIN, SC_TX, SC_RX, SC_LINK, SC_POWER, SC_LOG };
 enum DbgPage { DP_RADIO, DP_TELEM, DP_LIM, DP_RAW, DP_SYS, DP_LOG };
-enum ConfAct { CA_CLEARLOG, CA_FORGET, CA_FR_TX, CA_FR_RX, CA_NETDEL, CA_NETALL, CA_COPYALL };
+enum ConfAct { CA_CLEARLOG, CA_FORGET, CA_FR_TX, CA_FR_RX, CA_RX_RESTART, CA_NETDEL, CA_NETALL, CA_COPYALL };
 // LT_SHORT больше не создаётся (решение 28.10.2026), номер оставлен, чтобы не сломать старые записи журнала в NVS
 enum LogType { LT_ESTOP, LT_RXALARM, LT_NOLINK, LT_LINKOK, LT_RXFAULT, LT_LIMIT, LT_BATTTX, LT_OVL, LT_SHORT, LT_OPEN, LT_BATTRX, LT_ADC, LT_ADCLONG, LT_ADCOK, LT_COUNT };
 // параметры приёмника (SetConfig): SOL = на соленоид (канал x сторона A/B), CH = на канал, GLOB = общие
@@ -1156,7 +1164,7 @@ struct Telem {
 enum { HLT_CONTROL = 1, HLT_TELEM, HLT_CFG, HLT_ACK, HLT_BATCH, HLT_NET, HLT_INFO, HLT_BIND, HLT_BINDOK };
 enum { HLF_ESTOP = 1, HLF_REQT = 2, HLF_LEVER = 4, HLF_BOOT = 8 };
 enum { HLO_SET, HLO_GET, HLO_BATCH, HLO_CMD, HLO_NET };
-enum { HLC_PROTO = 1, HLC_CHMASK, HLC_CHTYPES, HLC_TXPWR, HLC_FACTORY = 0x10, HLC_WIFI_PHONE = 0x20, HLC_WIFI_GH, HLC_WIFI_OFF, HLC_WIFI_YES };
+enum { HLC_PROTO = 1, HLC_CHMASK, HLC_CHTYPES, HLC_TXPWR, HLC_FACTORY = 0x10, HLC_REBOOT, HLC_WIFI_PHONE = 0x20, HLC_WIFI_GH, HLC_WIFI_OFF, HLC_WIFI_YES };
 enum { HLW_OFF = 0, HLW_PH_WAIT = 2, HLW_PH_CONN, HLW_PH_TEST, HLW_PH_UP, HLW_PH_DONE,
        HLW_GH_CONN = 10, HLW_GH_CHECK, HLW_GH_ASK, HLW_GH_DL, HLW_GH_VERIFY, HLW_GH_DONE, HLW_ERR = 20 };
 #define HL_FACTORY_KEY  0xA55A
@@ -2504,6 +2512,8 @@ void hlCfgDone(const HlCfg &c, uint8_t status, uint16_t applied) {
     if (c.param == HLC_FACTORY) {
       if (status == 0) { hlMirrorForget(); toast("RX reset"); }
       else toast("RX refused");
+    } else if (c.param == HLC_REBOOT) {
+      toast(status == 0 ? "RX restarting" : "RX refused");
     } else if (c.param == HLC_WIFI_PHONE || c.param == HLC_WIFI_GH) {
       hlWifiAck = true; hlWifiAckSt = status;
     }
@@ -2937,7 +2947,7 @@ int menuCount() {
     case MS_WIFI:    return WF_COUNT;
     case MS_NETACT:  return 3;
     case MS_NETPICK: return pickScanning ? 1 : pickN + 2;
-    case MS_RX:      return 6;                     // All Channels, Channels, Global, RX Status, Wi-Fi, Back
+    case MS_RX:      return 7;                     // All Channels, Channels, Global, RX Status, Wi-Fi, Restart RX, Back
     case MS_RXPICK:  return NUM_CH + 1;            // Channel 1..8, Back
     case MS_RXWIFIM: return RW_COUNT;
     case MS_RXCH:    { RxItem it[16]; return rxItems(it); }
@@ -3168,6 +3178,15 @@ void doConfirm() {
     case CA_COPYALL:
       if (!rxReady() || !othersCentered()) { toast("Not possible now"); gotoScr(confBack, confIdx); }
       else { rxRetScr = MS_RXCH; bulkCopy(rxCopySrc); }
+      break;
+    case CA_RX_RESTART:
+      if (!rxReady()) toast("Not possible now");
+      else {
+        if (simMode == SIM_RADIO) hlCfgPut(HLO_CMD, HLC_REBOOT, 0, 0, HL_FACTORY_KEY, false, 0, 0);
+        logLine("RX restart requested");
+        toast(simMode == SIM_RADIO ? "RX restart sent" : "RX restart");
+      }
+      gotoScr(confBack, confIdx);
       break;
     case CA_FR_RX:
       if (!rxReady() || !othersCentered()) {
@@ -3533,8 +3552,8 @@ void menuLabel(int i, char* b, size_t n) {
       break;
     }
     case MS_RX: {
-      static const char* rl[] = { "All Channels", "Channels", "Global", "RX Status", "Wi-Fi", "Back" };
-      snprintf(b, n, "%s", rl[i < 6 ? i : 5]);
+      static const char* rl[] = { "All Channels", "Channels", "Global", "RX Status", "Wi-Fi", "Restart RX", "Back" };
+      snprintf(b, n, "%s", rl[i < 7 ? i : 6]);
       break;
     }
     case MS_RXPICK:
@@ -4060,6 +4079,7 @@ void menuSelect(int i) {
       else if (i == 2)            gotoScr(MS_RXGLOB, idxRxGlob);
       else if (i == 3)            gotoScr(MS_RXSTAT, 0);
       else if (i == 4)            gotoScr(MS_RXWIFIM, idxRxWifi);
+      else if (i == 5)            startConfirm(CA_RX_RESTART, MS_RX, idxRx);
       else                        gotoScr(MS_MAIN, idxMain);
       break;
     case MS_RXPICK:
@@ -6939,6 +6959,12 @@ void drawConfirm() {
       display.setCursor(0, 14);  display.print("Settings of this");
       display.setCursor(0, 24);  display.print("channel go to all");
       display.setCursor(0, 34);  display.print("others. Enable kept");
+      break;
+    case CA_RX_RESTART:
+      display.setCursor(0, 0);   display.print("RESTART RECEIVER?");
+      display.setCursor(0, 14);  display.print("Outputs stop,");
+      display.setCursor(0, 24);  display.print("link returns in");
+      display.setCursor(0, 34);  display.print("a few seconds.");
       break;
     case CA_FR_RX:
       display.setCursor(0, 0);   display.print("RESET RECEIVER?");

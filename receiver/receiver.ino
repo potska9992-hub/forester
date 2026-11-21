@@ -105,7 +105,7 @@ static const char FW_TAG[] __attribute__((used)) = "FWTAG:" PROJECT_NAME ":" FW_
 enum { HLT_CONTROL = 1, HLT_TELEM, HLT_CFG, HLT_ACK, HLT_BATCH, HLT_NET, HLT_INFO, HLT_BIND, HLT_BINDOK };
 enum { HLF_ESTOP = 1, HLF_REQT = 2, HLF_LEVER = 4, HLF_BOOT = 8 };
 enum { HLO_SET, HLO_GET, HLO_BATCH, HLO_CMD, HLO_NET };
-enum { HLC_PROTO = 1, HLC_CHMASK, HLC_CHTYPES, HLC_TXPWR, HLC_FACTORY = 0x10, HLC_WIFI_PHONE = 0x20, HLC_WIFI_GH, HLC_WIFI_OFF, HLC_WIFI_YES };
+enum { HLC_PROTO = 1, HLC_CHMASK, HLC_CHTYPES, HLC_TXPWR, HLC_FACTORY = 0x10, HLC_REBOOT, HLC_WIFI_PHONE = 0x20, HLC_WIFI_GH, HLC_WIFI_OFF, HLC_WIFI_YES };
 enum { HLW_OFF = 0, HLW_PH_WAIT = 2, HLW_PH_CONN, HLW_PH_TEST, HLW_PH_UP, HLW_PH_DONE,
        HLW_GH_CONN = 10, HLW_GH_CHECK, HLW_GH_ASK, HLW_GH_DL, HLW_GH_VERIFY, HLW_GH_DONE, HLW_ERR = 20 };
 enum { WE_NONET = 1, WE_PASS, WE_GHDOWN, WE_NOREL, WE_DLFAIL, WE_SUM, WE_WRONG, WE_UPD, WE_BUSY };
@@ -1030,7 +1030,7 @@ static void controlTick(unsigned long now) {
 
   // рабочий режим
   bool busOk = vBus > 5.0f;
-  bool runEnable = !kill && !bindMode && !wifiActive() && busOk;
+  bool runEnable = !kill && !bindMode && !wifiActive() && busOk && !restartAt;
   relayTick(now, runEnable);
   bool act = runEnable && (relayState == RS_CLOSING || relayState == RS_ON) && !faultCode;   // сигнал на реле пришёл -> работаем, проверка идёт параллельно
   if (act != outAct) {
@@ -1335,6 +1335,14 @@ static void handleCfg(const uint8_t* p, size_t len, unsigned long now) {
           cfgSavePending = true;
           pwrDirty = true;
           plog("FACTORY RESET of the receiver settings");
+        }
+        break;
+      case HLC_REBOOT:                                        // перезагрузка приёмника из меню пульта (на всякий случай, без похода к приёмнику)
+        if (val != HL_FACTORY_KEY) st = 1;
+        else if (wifiSt != HLW_OFF) st = 2;
+        else {
+          plog("REBOOT requested from the pult");
+          restartAt = (now ? now : 1) + 600UL;                 // ответ успевает уйти; выходы выключаются сразу (runEnable ниже учитывает restartAt)
         }
         break;
       case HLC_WIFI_PHONE:
@@ -2541,5 +2549,5 @@ void loop() {
   if (pcaRestartPend && (long)(now - pcaRestartAt) >= 0) { pcaRestartPend = false; pcaWrite1(0x00, 0xA0); }
   if (!testMode() && lastRunFreq != (float)ramP[RXP_PWMFREQ][0][0]) { lastRunFreq = (float)ramP[RXP_PWMFREQ][0][0]; pcaSetFreq(lastRunFreq); }
   if (cfgSavePending) { cfgSavePending = false; cfgSave(); }
-  if (restartAt && (long)(now - restartAt) >= 0) { restartAt = 0; ESP.restart(); }
+  if (restartAt && (long)(now - restartAt) >= 0) { restartAt = 0; hardOff(); relayPin(false); pcSet(false); if (cfgSavePending) { cfgSavePending = false; cfgSave(); } delay(20); ESP.restart(); }
 }
