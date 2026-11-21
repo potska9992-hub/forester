@@ -874,13 +874,13 @@ static void runCurrentChecks(unsigned long now) {
     if (modeCurrent()) {                                    // режим CURRENT: подстройка скважности по току в импульсе
       int v = abs((int)ctlSh.v[ch]);
       float iT = (ramP[RXP_STARTI][ch][side] + (ramP[RXP_MAXI][ch][side] - ramP[RXP_STARTI][ch][side]) * v / 100.0f) / 10.0f;
-      if (sReg[s] > 0.0f && sIt[s] > 0.01f) sReg[s] *= constrain(iT / sIt[s], 0.5f, 2.0f);   // цель сменилась: скважность сразу пропорционально (ток примерно пропорционален скважности)
+      if (sReg[s] > 0.0f && sIt[s] > 0.01f) sReg[s] *= 1.0f + 0.7f * (constrain(iT / sIt[s], 0.5f, 2.0f) - 1.0f);   // цель сменилась: скважность сразу, но на 70 % пропорциональной поправки (без заброса); остальное добирает регулятор
       sIt[s] = iT;
       float band = iT * 0.03f; if (band < 0.03f) band = 0.03f;                              // зона нечувствительности 3 % цели (не меньше 0.03 А)
       if (sReg[s] > 0.0f && fabsf(iT - I) > band) {
         float f = iT / (I > 0.05f ? I : 0.05f);                                              // нужно умножить скважность на цель / ток
         f = constrain(f, 0.7f, 1.4f);
-        sReg[s] = constrain(sReg[s] * (1.0f + 0.5f * (f - 1.0f)), 0.1f, 100.0f);             // половина ошибки за шаг 40 мс: сходится за 2-3 шага без раскачки
+        sReg[s] = constrain(sReg[s] * (1.0f + 0.33f * (f - 1.0f)), 0.1f, 100.0f);            // треть ошибки за шаг 40 мс: мягко, без заброса
       }
     }
   }
@@ -905,7 +905,7 @@ static void controlRun(unsigned long now, const CtlShared& c, float dtMs) {
       if (side == dirIdx && mag > 0 && en && armedRun && !ovlLatch[ch]) {
         if (cur) {
           float iT = (ramP[RXP_STARTI][ch][side] + (ramP[RXP_MAXI][ch][side] - ramP[RXP_STARTI][ch][side]) * mag / 100.0f) / 10.0f;
-          if (sReg[s] <= 0.0f) sReg[s] = constrain(iT * R_COIL_NOM / vb * 100.0f, startD, maxD);
+          if (sReg[s] <= 0.0f) sReg[s] = constrain(0.7f * iT * R_COIL_NOM / vb * 100.0f, startD, maxD);   // первая оценка с запасом 30 %: ток подходит к цели снизу
           tgt = constrain(sReg[s], startD, maxD);
         } else {
           tgt = startD + (maxD - startD) * mag / 100.0f;
