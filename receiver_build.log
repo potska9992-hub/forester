@@ -1,4 +1,4 @@
-Build: 2026-11-21T22:48:24Z  commit fa27cd5
+Build: 2026-11-21T23:41:58Z  commit 224d3a0
 FQBN: esp32:esp32:heltec_wireless_stick_lite_V3
 ID          Installed Latest Name
 esp32:esp32 3.3.11    3.3.12 esp32
@@ -8,46 +8,46 @@ RadioLib 7.1.2         8.0.0         user     Universal wireless communication l
 
 -----
 /home/runner/work/forester/forester/receiver/receiver.ino: In function 'void mcpCheck(uint8_t, uint32_t, AdcMon&)':
-/home/runner/work/forester/forester/receiver/receiver.ino:666:15: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
-  666 |   M.c[M.i]++; adcChkTotal++;
+/home/runner/work/forester/forester/receiver/receiver.ino:675:15: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
+  675 |   M.c[M.i]++; adcChkTotal++;
       |               ^~~~~~~~~~~
-/home/runner/work/forester/forester/receiver/receiver.ino:667:53: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
-  667 |   if (abs(b - (a + c) / 2) > MCP_TOL) { M.e[M.i]++; adcErrTotal++; }
+/home/runner/work/forester/forester/receiver/receiver.ino:676:53: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
+  676 |   if (abs(b - (a + c) / 2) > MCP_TOL) { M.e[M.i]++; adcErrTotal++; }
       |                                                     ^~~~~~~~~~~
 /home/runner/work/forester/forester/receiver/receiver.ino: In function 'void hlRead(long unsigned int)':
-/home/runner/work/forester/forester/receiver/receiver.ino:1410:106: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
- 1410 |   if (len > sizeof(p) || len < 6) { uint8_t d[64]; radio.readData(d, len > sizeof(d) ? sizeof(d) : len); stShort++; return; }
+/home/runner/work/forester/forester/receiver/receiver.ino:1466:106: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
+ 1466 |   if (len > sizeof(p) || len < 6) { uint8_t d[64]; radio.readData(d, len > sizeof(d) ? sizeof(d) : len); stShort++; return; }
       |                                                                                                          ^~~~~~~
-/home/runner/work/forester/forester/receiver/receiver.ino:1411:54: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
- 1411 |   if (radio.readData(p, len) != RADIOLIB_ERR_NONE) { stCrcBad++; return; }
+/home/runner/work/forester/forester/receiver/receiver.ino:1467:54: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
+ 1467 |   if (radio.readData(p, len) != RADIOLIB_ERR_NONE) { stCrcBad++; return; }
       |                                                      ^~~~~~~~
-/home/runner/work/forester/forester/receiver/receiver.ino:1413:58: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
- 1413 |   if (c != (uint16_t)(p[len - 2] | (p[len - 1] << 8))) { stCrcBad++; return; }
+/home/runner/work/forester/forester/receiver/receiver.ino:1469:58: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
+ 1469 |   if (c != (uint16_t)(p[len - 2] | (p[len - 1] << 8))) { stCrcBad++; return; }
       |                                                          ^~~~~~~~
-/home/runner/work/forester/forester/receiver/receiver.ino:1417:25: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
- 1417 |   if (pr != pairId()) { stPairBad++; return; }
+/home/runner/work/forester/forester/receiver/receiver.ino:1473:25: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
+ 1473 |   if (pr != pairId()) { stPairBad++; return; }
       |                         ^~~~~~~~~
-/home/runner/work/forester/forester/receiver/receiver.ino:1419:23: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
- 1419 |     case HLT_CONTROL: stCtl++; handleControl(p, len, now); break;
+/home/runner/work/forester/forester/receiver/receiver.ino:1475:23: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
+ 1475 |     case HLT_CONTROL: stCtl++; handleControl(p, len, now); break;
       |                       ^~~~~
-/home/runner/work/forester/forester/receiver/receiver.ino:1420:23: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
- 1420 |     case HLT_CFG:     stCfg++; if (len >= 8) { stLastCfgTag = p[3]; stLastCfgOp = p[4]; stLastCfgPrm = p[5]; } handleCfg(p, len, now); break;
+/home/runner/work/forester/forester/receiver/receiver.ino:1476:23: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
+ 1476 |     case HLT_CFG:     stCfg++; if (len >= 8) { stLastCfgTag = p[3]; stLastCfgOp = p[4]; stLastCfgPrm = p[5]; } handleCfg(p, len, now); break;
       |                       ^~~~~
-/home/runner/work/forester/forester/receiver/receiver.ino:1421:23: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
- 1421 |     case HLT_NET:     stNet++; handleNet(p, len); break;
+/home/runner/work/forester/forester/receiver/receiver.ino:1477:23: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
+ 1477 |     case HLT_NET:     stNet++; handleNet(p, len); break;
       |                       ^~~~~
 /home/runner/work/forester/forester/receiver/receiver.ino: In function 'void radioStep(long unsigned int)':
-/home/runner/work/forester/forester/receiver/receiver.ino:1440:96: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
- 1440 |     if (radio.startTransmit(qBuf[qHead], qLen[qHead]) == RADIOLIB_ERR_NONE) { hlTxBusy = true; stTxOk++; if ((qBuf[qHead][0] >> 4) == HLT_ACK) stAck++; else if ((qBuf[qHead][0] >> 4) == HLT_TELEM) stTel++; }
+/home/runner/work/forester/forester/receiver/receiver.ino:1496:96: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
+ 1496 |     if (radio.startTransmit(qBuf[qHead], qLen[qHead]) == RADIOLIB_ERR_NONE) { hlTxBusy = true; stTxOk++; if ((qBuf[qHead][0] >> 4) == HLT_ACK) stAck++; else if ((qBuf[qHead][0] >> 4) == HLT_TELEM) stTel++; }
       |                                                                                                ^~~~~~
-/home/runner/work/forester/forester/receiver/receiver.ino:1440:144: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
- 1440 |     if (radio.startTransmit(qBuf[qHead], qLen[qHead]) == RADIOLIB_ERR_NONE) { hlTxBusy = true; stTxOk++; if ((qBuf[qHead][0] >> 4) == HLT_ACK) stAck++; else if ((qBuf[qHead][0] >> 4) == HLT_TELEM) stTel++; }
+/home/runner/work/forester/forester/receiver/receiver.ino:1496:144: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
+ 1496 |     if (radio.startTransmit(qBuf[qHead], qLen[qHead]) == RADIOLIB_ERR_NONE) { hlTxBusy = true; stTxOk++; if ((qBuf[qHead][0] >> 4) == HLT_ACK) stAck++; else if ((qBuf[qHead][0] >> 4) == HLT_TELEM) stTel++; }
       |                                                                                                                                                ^~~~~
-/home/runner/work/forester/forester/receiver/receiver.ino:1440:198: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
- 1440 |     if (radio.startTransmit(qBuf[qHead], qLen[qHead]) == RADIOLIB_ERR_NONE) { hlTxBusy = true; stTxOk++; if ((qBuf[qHead][0] >> 4) == HLT_ACK) stAck++; else if ((qBuf[qHead][0] >> 4) == HLT_TELEM) stTel++; }
+/home/runner/work/forester/forester/receiver/receiver.ino:1496:198: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
+ 1496 |     if (radio.startTransmit(qBuf[qHead], qLen[qHead]) == RADIOLIB_ERR_NONE) { hlTxBusy = true; stTxOk++; if ((qBuf[qHead][0] >> 4) == HLT_ACK) stAck++; else if ((qBuf[qHead][0] >> 4) == HLT_TELEM) stTel++; }
       |                                                                                                                                                                                                      ^~~~~
-/home/runner/work/forester/forester/receiver/receiver.ino:1441:12: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
- 1441 |     else { stTxErr++; radio.startReceive(); }
+/home/runner/work/forester/forester/receiver/receiver.ino:1497:12: warning: '++' expression of 'volatile'-qualified type is deprecated [-Wvolatile]
+ 1497 |     else { stTxErr++; radio.startReceive(); }
       |            ^~~~~~~
-Sketch uses 1153779 bytes (34%) of program storage space. Maximum is 3342336 bytes.
-Global variables use 67844 bytes (20%) of dynamic memory, leaving 259836 bytes for local variables. Maximum is 327680 bytes.
+Sketch uses 1154739 bytes (34%) of program storage space. Maximum is 3342336 bytes.
+Global variables use 68060 bytes (20%) of dynamic memory, leaving 259620 bytes for local variables. Maximum is 327680 bytes.
