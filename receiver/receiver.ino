@@ -135,7 +135,7 @@ static const RxParamDef RXP[NUM_RXP] = {
   { PS_GLOB,    0,    1,   0 },   // CURR PROT: 0 по току импульса, 1 по среднему току
   { PS_GLOB,    0,    1,   1 },   // SLEEP: функция сна включена (жест на пульте, пробуждение)
   { PS_GLOB,    0,    1,   0 },   // AUTO SLEEP: автосон по времени без связи
-  { PS_GLOB,    2,   15,  10 }    // SLEEP TIMER: минут без связи до автосна (в меню пульта 2, 5, 10, 15)
+  { PS_GLOB,    5,  900, 600 }    // SLEEP TIMER: секунд без связи до автосна (в меню пульта 5, 10, 20 с, 1, 2, 5, 10, 15 мин), по умолчанию 10 мин
 };
 
 #define NMOD          8
@@ -1039,7 +1039,7 @@ static void controlTick(unsigned long now) {
   if (!rxSleep) {
     if (sleepAt && (long)(now - sleepAt) >= 0) sleepEnter(now, "command from the pult");
     else if (ramP[RXP_SLPEN][0][0] && ramP[RXP_SLPAUTO][0][0] && wifiSt == HLW_OFF && !bindMode && noLinkAt &&
-             (now - noLinkAt) >= (unsigned long)ramP[RXP_SLPMIN][0][0] * 60000UL) sleepEnter(now, "no link timer");
+             (now - noLinkAt) >= (unsigned long)ramP[RXP_SLPMIN][0][0] * 1000UL) sleepEnter(now, "no link timer");
   }
   if (rxSleep && (wifiSt != HLW_OFF || bindMode)) sleepExit(now);   // Wi-Fi или привязка (кнопка USER) - приёмник просыпается
   if (rxSleep) {                                            // во сне управление игнорируется; реле и EN доводятся логикой реле

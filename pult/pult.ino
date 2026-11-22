@@ -1204,7 +1204,7 @@ const RxParamDef RXP[NUM_RXP] = {
   { "CURR PROT", PS_GLOB,    0,    1,  1,    0, F_IPROT },   // защита по току: 0 = по току в импульсе (по умолчанию), 1 = по среднему току за период (для проверок с лампой)
   { "SLEEP",     PS_GLOB,    0,    1,  1,    1, F_ONOFF },   // функция сна (жест MENU, пробуждение)
   { "AUTO SLEEP",PS_GLOB,    0,    1,  1,    0, F_ONOFF },   // автосон по времени без связи
-  { "SLP TIMER", PS_GLOB,    2,   15,  1,   10, F_MIN   }    // минут без связи до автосна: 2, 5, 10, 15
+  { "SLP TIMER", PS_GLOB,    5,  900,  1,  600, F_MIN   }    // секунд без связи до автосна: 5, 10, 20 с, 1, 2, 5, 10, 15 мин
 };
 
 // порядок пунктов меню RX Global (параметры приёмника, PS_GLOB)
@@ -3063,7 +3063,7 @@ void fmtParam(int p, int v, char* b, size_t n) {
     case F_MODE:  snprintf(b, n, "%s", v ? "CURRENT" : "PWM"); break;
     case F_MHZ:   snprintf(b, n, "%d.%02dMHz", v / 1000, (v % 1000) / 10); break;
     case F_IPROT: snprintf(b, n, "%s", v ? "AVERAGE" : "IMPULSE"); break;
-    case F_MIN:   snprintf(b, n, "%dmin", v); break;
+    case F_MIN:   if (v < 60) snprintf(b, n, "%ds", v); else snprintf(b, n, "%dmin", v / 60); break;
     default:      snprintf(b, n, "%ddBm", v); break;
   }
 }
@@ -3830,11 +3830,11 @@ void rxEditStep(int a, int m) {
     rxCur = rxSet(rxCh, rxDir, rxParam, TXP_LIST[idx], false);
     return;
   }
-  if (rxParam == RXP_SLPMIN) {                  // таймер автосна: 2, 5, 10, 15 минут
-    static const int L[4] = { 2, 5, 10, 15 };
+  if (rxParam == RXP_SLPMIN) {                  // таймер автосна: 5, 10, 20 с, 1, 2, 5, 10, 15 мин (в секундах)
+    static const int L[8] = { 5, 10, 20, 60, 120, 300, 600, 900 };
     int idx = 0;
-    for (int i = 0; i < 4; i++) if (L[i] <= rxCur) idx = i;
-    idx = constrain(idx + a, 0, 3);
+    for (int i = 0; i < 8; i++) if (L[i] <= rxCur) idx = i;
+    idx = constrain(idx + a, 0, 7);
     rxCur = rxSet(rxCh, rxDir, rxParam, L[idx], false);
     return;
   }
