@@ -351,8 +351,8 @@ static volatile uint16_t adcSps10 = 0;       // замеров АЦП в сек�
 static volatile uint8_t  adcErrPct = 0;      // процент ошибок АЦП за последние ~2 с
 static volatile uint8_t  adcLvl = 0;         // уровень: 0 норма, 1 от 2 %, 2 от 5 %, 3 от 10 %
 static volatile uint32_t adcChkTotal = 0, adcErrTotal = 0;
-static float iK[NMOD], iZ[NMOD];
-static bool  iCal[NMOD];
+static float iK[16], iZ[NMOD];                 // коэффициент А/В по каналам (2m и 2m+1 у модуля m), ноль по модулям
+static bool  iCal[16];
 static float iLim = I_LIM_DEF;               // предел вкладки Test (в рабочем режиме лимиты берутся из параметров LIMIT)
 static float iPeakA[NMOD];                   // ток модуля для защит, А (по выбору CURR PROT: импульс или средний; -1 = нет данных)
 static float iPulseA[NMOD], iAvgA[NMOD];     // ток в импульсе и средний ток, А (-1 = нет данных)
@@ -363,8 +363,6 @@ static unsigned long zeroDoneAt = 0;
 static bool manRed = false, manGreen = false, manBuz = false;
 static uint8_t blinkMode = 0;
 static unsigned long blinkT0 = 0;
-static uint16_t sweepMask = 0;
-static unsigned long sweepT0 = 0, sweepAt = 0;
 static bool testRelay = false, testOe = false, testEn = false;
 static uint8_t tOvlMask = 0, tOvlCnt[NMOD];
 static unsigned long tOvlAt = 0;
@@ -458,7 +456,6 @@ static void hardOff() {
   setOe(false);
   setEn(enHold && !faultCode && !enForceOff);
   pcaSetAll(0);
-  sweepMask = 0;
 }
 
 static void relayOpen(unsigned long now) {
@@ -599,6 +596,8 @@ static void bkAdd(uint8_t m, float v, uint32_t tms) {
   if (v >= thrV[m]) { b.sumOn += v; b.nOn++; }          // отсчёт внутри импульса
 }
 
+static float kOf(uint8_t m);                   // коэффициент А/В активного канала модуля
+
 // раз в 5 мс: пик и среднее по 40 мс; ток в импульсе = среднее отсчётов, которые выше порога (половина прошлого тока импульса, не меньше PULSE_FLOOR_A)
 // отсчётов внутри импульса мало (малая скважность) - окно для тока импульса расширяется до 160 мс; нет импульса совсем - берётся среднее
 static void bkPublish(uint32_t tms) {
@@ -621,7 +620,7 @@ static void bkPublish(uint32_t tms) {
     }
     static bool sm[NMOD];                                   // сглаживание уже запущено (после простоя модуля начинается с первого значения)
     if (n) {
-      float floorV = iZ[m] + PULSE_FLOOR_A / iK[m];
+      float floorV = iZ[m] + PULSE_FLOOR_A / kOf(m);
       float mean = sum / n, pulse;
       pubPeakV[m] = mx;
       if (nOn >= PULSE_MIN_N) { float pm = sOn / nOn; pulse = pm; float th = iZ[m] + 0.5f * (pm - iZ[m]); thrV[m] = th > floorV ? th : floorV; }
@@ -739,7 +738,10 @@ static void samplerTask(void*) {
   }
 }
 
-static float voltToAmp(uint8_t m, float v) { float a = (v - iZ[m]) * iK[m]; return a < 0 ? 0 : a; }
+// у модуля одновременно работает один канал (джойстик в одну сторону): коэффициент берётся у канала с большей скважностью
+static inline uint8_t actCh(uint8_t m) { return (uint8_t)(2 * m + ((pwmDuty[2 * m + 1] > pwmDuty[2 * m]) ? 1 : 0)); }
+static float kOf(uint8_t m) { return iK[actCh(m)]; }
+static float voltToAmp(uint8_t m, float v) { float a = (v - iZ[m]) * kOf(m); return a < 0 ? 0 : a; }
 static float modDuty(uint8_t m) { return pwmDuty[2 * m] > pwmDuty[2 * m + 1] ? pwmDuty[2 * m] : pwmDuty[2 * m + 1]; }
 static uint8_t modActive() {
   uint8_t mask = 0;
@@ -758,16 +760,23 @@ static void calibLoad() {
   iLim = prefs.getFloat("ilim", I_LIM_DEF);
   if (iLim < 0.3f || iLim > 6.0f) iLim = I_LIM_DEF;
   for (uint8_t m = 0; m < NMOD; m++) {
-    char k[8];
-    keyName(k, "ik", m);
-    iCal[m] = prefs.isKey(k);
-    iK[m] = prefs.getFloat(k, K_DEF);
-    if (iK[m] < 0.8f || iK[m] > 3.5f) { iK[m] = K_DEF; iCal[m] = false; }
+    char k[8], ko[8];
+    keyName(ko, "ik", m);                                    // старый ключ: один коэффициент на модуль
+    for (uint8_t s2 = 0; s2 < 2; s2++) {
+      uint8_t c = (uint8_t)(2 * m + s2);
+      keyName(k, "kc", c);
+      float def = K_DEF;
+      bool has = prefs.isKey(k);
+      if (!has && prefs.isKey(ko)) { def = prefs.getFloat(ko, K_DEF); has = true; }   // перенос старой калибровки модуля на оба канала
+      iCal[c] = has;
+      iK[c] = has ? prefs.getFloat(k, def) : K_DEF;
+      if (iK[c] < 0.8f || iK[c] > 3.5f) { iK[c] = K_DEF; iCal[c] = false; }
+    }
     keyName(k, "iz", m);
     iZ[m] = prefs.getFloat(k, 0.0f);
     if (iZ[m] < 0.0f || iZ[m] > 0.3f) iZ[m] = 0.0f;
     iPeakA[m] = iPulseA[m] = iAvgA[m] = -1.0f; pubN[m] = 0; lastHave[m] = false;
-    thrV[m] = iZ[m] + PULSE_FLOOR_A / iK[m];
+    thrV[m] = iZ[m] + PULSE_FLOOR_A / kOf(m);
   }
   kBus = prefs.getFloat("kbus", K_BUS_DEF);
   kFb  = prefs.getFloat("kfb", K_FB_DEF);
@@ -777,8 +786,8 @@ static void calibLoad() {
   if (oscHz < 20e6f || oscHz > 32e6f) oscHz = 25000000.0f;
 }
 
-static uint8_t calMaskBits() { uint8_t m = 0; for (uint8_t i = 0; i < NMOD; i++) if (iCal[i]) m |= (1u << i); return m; }
-static bool anyUncal() { for (uint8_t i = 0; i < NMOD; i++) if (!iCal[i]) return true; return false; }
+static uint16_t calMaskBits() { uint16_t m = 0; for (uint8_t i = 0; i < 16; i++) if (iCal[i]) m |= (uint16_t)(1u << i); return m; }
+static bool anyUncal() { for (uint8_t i = 0; i < 16; i++) if (!iCal[i]) return true; return false; }
 
 // ============================================================
 // Рабочий режим: цели ШИМ, разгон/торможение, дизеринг, защиты по току
@@ -1519,7 +1528,6 @@ static void testOff(const char* why) {
   testRelay = testOe = testEn = testPc = false;
   enForceOff = false;
   manRed = manGreen = manBuz = false; blinkMode = 0;
-  sweepMask = 0;
   tOvlMask = 0;
   hardOff();
   relayOpen(millis());
@@ -1529,25 +1537,16 @@ static void testOff(const char* why) {
 }
 
 static void testCurrentTick(unsigned long now) {
-  if (sweepMask && (long)(now - sweepAt) >= 0) {
-    sweepAt = now + 40;
-    float p = (float)((now - sweepT0) % 10000UL) / 10000.0f;
-    float tri = p < 0.5f ? p * 2.0f : (1.0f - p) * 2.0f;
-    float duty = 10.0f + 80.0f * tri;
-    if (sweepMask == 0xFFFF) pcaSetAll(duty);
-    else for (uint8_t i = 0; i < 16; i++) if (sweepMask & (1u << i)) pcaSetCh(i, duty);
-  }
   currentEval(now);
   if ((now - tOvlAt) >= 40UL) {
     tOvlAt = now;
     uint8_t act = modActive();
     for (uint8_t m = 0; m < NMOD; m++) {
-      bool over = iCal[m] && (act & (1u << m)) && pubN[m] >= 2 && iPeakA[m] > iLim;
+      bool over = iCal[actCh(m)] && (act & (1u << m)) && pubN[m] >= 2 && iPeakA[m] > iLim;
       if (!over) { tOvlCnt[m] = 0; continue; }
       if (++tOvlCnt[m] >= OVL_WINDOWS && !(tOvlMask & (1u << m))) {
         tOvlMask |= (1u << m);
         pcaSetCh(2 * m, 0); pcaSetCh(2 * m + 1, 0);
-        sweepMask &= (uint16_t)~(3u << (2 * m));
         plog("OVERLOAD module %u: peak %.2f A > limit %.2f A, outputs of the module switched off", m + 1, iPeakA[m], iLim);
       }
     }
@@ -1578,8 +1577,8 @@ static void printHelp() {
   plog(" s | scan | adc | i      status, I2C scan, MCP3208 inputs, currents");
   plog(" r 1|0   pc 1|0   oe 1|0   en 1|0   relay, precharge, PCA OE, drivers EN");
   plog(" red/green/buz 1|0, blink 0..3");
-  plog(" pwm 5 40 | pwm all 40   channel duty %%; sweep 5|all|off; freq 200");
-  plog(" izero 1|all   ical 1 2.0   ireset 1|all   ilim 2.0   (current sensors)");
+  plog(" pwm 5 40 | pwm all 40   channel duty %%; freq 200");
+  plog(" izero 1|all (module)   ical 5 2.0 (channel 0..15)   irk 5 (reset channel k)   ireset 1|all (module zero + both k)   ilim 2.0");
   plog(" cal bus 12.05 | cal fb 12.05 | cal reset   fcal 110 | fcal reset");
   plog(" stop        everything off");
 }
@@ -1589,7 +1588,7 @@ static void printStatus() {
   plog("Bus %.2f V (k %.3f), after relay %.2f V (k %.3f)", vBus, kBus, vFb, kFb);
   plog("%s, relay state %d, precharge %s, OE %s, EN %s, RX E-STOP %s, fault %u, current protection by %s", rxSleep ? "SLEEPING" : "awake", (int)relayState, pcOn ? "ON" : "off", oeOn ? "ON" : "off", enOn ? "ON" : "off", estopBtn ? "ACTIVE" : "released", (unsigned)faultCode, ramP[RXP_IPROT][0][0] ? "AVERAGE" : "PULSE");
   plog("PCA9685 %s, PWM %.0f Hz; MCP3208 %s", pcaOk ? "found" : "NOT FOUND", pwmFreq, mcpPresent ? "found" : "NOT FOUND");
-  plog("Current: MCP3208 clock %u kHz, samples/s %u, ADC checks %lu errors %lu (%u pct, level %u), calibrated %u of 8", (unsigned)ramP[RXP_ADCCLK][0][0], (unsigned)adcSps10 * 10u, (unsigned long)adcChkTotal, (unsigned long)adcErrTotal, (unsigned)adcErrPct, (unsigned)adcLvl, (unsigned)__builtin_popcount(calMaskBits()));
+  plog("Current: MCP3208 clock %u kHz, samples/s %u, ADC checks %lu errors %lu (%u pct, level %u), calibrated %u of 16", (unsigned)ramP[RXP_ADCCLK][0][0], (unsigned)adcSps10 * 10u, (unsigned long)adcChkTotal, (unsigned long)adcErrTotal, (unsigned)adcErrPct, (unsigned)adcLvl, (unsigned)__builtin_popcount(calMaskBits()));
   plog("Radio: %s", hlInit ? "OK" : "FAILED");
 }
 
@@ -1617,7 +1616,7 @@ static void printCur() {
   for (uint8_t m = 0; m < NMOD; m++) {
     char pk[40];
     if (iPulseA[m] >= 0) snprintf(pk, sizeof(pk), "%.2f A, avg %.2f A", iPulseA[m], iAvgA[m]); else snprintf(pk, sizeof(pk), "--");
-    plog("M%u: duty %.0f pct, pulse %s, k %.3f A/V (%s), zero %.4f V%s", m + 1, modDuty(m), pk, iK[m], iCal[m] ? "calibrated" : "NOT calibrated", iZ[m],
+    plog("M%u: duty %.0f pct, pulse %s, kA %.3f%s kB %.3f%s A/V, zero %.4f V%s", m + 1, modDuty(m), pk, iK[2 * m], iCal[2 * m] ? "" : "*", iK[2 * m + 1], iCal[2 * m + 1] ? "" : "*", iZ[m],
          (tOvlMask & (1u << m)) ? "  OVERLOAD (switched off)" : "");
   }
 }
@@ -1677,21 +1676,31 @@ static void execCmd(char* line) {
     plog("Measuring zero offset (no load!) for %s, wait 1.2 s...", a1);
   }
   else if (!strcmp(c, "ical")) {
-    uint8_t mask;
+    uint16_t cmask;
     float amps = atof(a2);
-    if (!parseMod(a1, mask) || mask == 0xFF || a2[0] == 0 || amps < 0.3f || amps > 6.0f) { plog("Usage: ical <1..8> <A>  (module at PWM 100 pct, electronic load in CC mode)"); return; }
-    uint8_t m = 0;
-    while (!(mask & (1u << m))) m++;
-    if (modDuty(m) < 99.0f) { plog("REFUSED: calibrate at DC. Set PWM 100 pct on channel %u (Extend) or %u (Retract) of module %u", 2 * m, 2 * m + 1, m + 1); return; }
+    if (!parseCh(a1, cmask) || cmask == 0xFFFF || a2[0] == 0 || amps < 0.3f || amps > 6.0f) { plog("Usage: ical <0..15> <A>  (channel at PWM 100 pct, electronic load in CC mode)"); return; }
+    uint8_t cc = 0;
+    while (!(cmask & (1u << cc))) cc++;
+    uint8_t m = cc >> 1;
+    if (pwmDuty[cc] < 99.0f) { plog("REFUSED: calibrate at DC. Set PWM 100 pct on channel %u (module %u, %s)", (unsigned)cc, m + 1, (cc & 1) ? "B, Retract" : "A, Extend"); return; }
     if (pubN[m] < 5) { plog("M%u: not enough samples (%u), try again in a second", m + 1, (unsigned)pubN[m]); return; }
     float v = pubMeanV[m] - iZ[m];
     if (v < 0.15f) { plog("M%u: signal %.3f V is too small. Is the load connected and ON? (zero offset %.4f V)", m + 1, pubMeanV[m], iZ[m]); return; }
     float k = amps / v;
     if (k < 0.8f || k > 3.5f) { plog("M%u: result %.3f A/V is outside 0.8..3.5, check the IS wiring and the entered current", m + 1, k); return; }
-    iK[m] = k; iCal[m] = true;
-    char key[8]; keyName(key, "ik", m);
+    iK[cc] = k; iCal[cc] = true;
+    char key[8]; keyName(key, "kc", cc);
     prefs.putFloat(key, k);
-    plog("M%u calibrated: %.3f V at %.2f A, k = %.3f A/V (saved)", m + 1, pubMeanV[m], amps, k);
+    plog("M%u channel %u calibrated: %.3f V at %.2f A, k = %.3f A/V (saved)", m + 1, (unsigned)cc, pubMeanV[m], amps, k);
+  }
+  else if (!strcmp(c, "irk")) {
+    uint16_t cmask;
+    if (!parseCh(a1, cmask) || cmask == 0xFFFF) { plog("Usage: irk <0..15>  (reset k of one channel)"); return; }
+    uint8_t cc = 0;
+    while (!(cmask & (1u << cc))) cc++;
+    char k[8]; keyName(k, "kc", cc); prefs.remove(k);
+    iK[cc] = K_DEF; iCal[cc] = false;
+    plog("k of channel %u reset to default", (unsigned)cc);
   }
   else if (!strcmp(c, "ireset")) {
     uint8_t mask;
@@ -1701,7 +1710,8 @@ static void execCmd(char* line) {
       char k[8];
       keyName(k, "ik", m); prefs.remove(k);
       keyName(k, "iz", m); prefs.remove(k);
-      iK[m] = K_DEF; iZ[m] = 0; iCal[m] = false;
+      for (uint8_t s2 = 0; s2 < 2; s2++) { keyName(k, "kc", (uint8_t)(2 * m + s2)); prefs.remove(k); iK[2 * m + s2] = K_DEF; iCal[2 * m + s2] = false; }
+      iZ[m] = 0;
     }
     plog("Current calibration reset for %s", a1);
   }
@@ -1756,19 +1766,9 @@ static void execCmd(char* line) {
     float d = atof(a2);
     if (d < 0 || d > 100) { plog("Duty must be 0..100"); return; }
     if (!pcaOk) { plog("PCA9685 not found"); return; }
-    sweepMask &= (uint16_t)~mask;
     if (d > 0) clearOvlCh(mask);
     if (mask == 0xFFFF) pcaSetAll(d); else for (uint8_t i = 0; i < 16; i++) if (mask & (1u << i)) pcaSetCh(i, d);
     plog("PWM %s = %.1f pct at %.0f Hz%s", a1, d, pwmFreq, oeOn ? "" : "  (OE is off: send 'oe 1' to see it on the outputs)");
-  }
-  else if (!strcmp(c, "sweep")) {
-    if (!strcmp(a1, "off")) { for (uint8_t i = 0; i < 16; i++) if (sweepMask & (1u << i)) pcaSetCh(i, 0); sweepMask = 0; plog("Sweep stopped"); return; }
-    uint16_t mask;
-    if (!parseCh(a1, mask)) { plog("Usage: sweep <0..15|all> or sweep off"); return; }
-    if (!pcaOk) { plog("PCA9685 not found"); return; }
-    if (!sweepMask) sweepT0 = millis();
-    sweepMask |= mask; clearOvlCh(mask);
-    plog("Sweep %s: duty 10-90-10 pct, period 10 s", a1);
   }
   else if (!strcmp(c, "freq")) {
     float f = atof(a1);
@@ -1900,21 +1900,20 @@ progress{width:100%;height:18px}
  <div class="row"><small>Frequency, Hz</small><input id="fq" type="number" min="24" max="1500" value="100"><button onclick="cmd('freq '+$('fq').value)">Set</button></div>
  <div class="row"><small>Scope shows, Hz</small><input id="fm" type="number" step="0.1" placeholder="e.g. 110"><button onclick="cmd('fcal '+$('fm').value)">Calibrate freq</button><button class="sm" onclick="cmd('fcal reset')">Reset</button></div>
  <small>Set 100 Hz, measure the real frequency on the scope, type it here, press Calibrate freq. Oscillator: <span id="osc"></span> MHz</small>
- <div class="row" style="margin-top:6px"><button id="swall" onclick="cmd('sweep all')">Sweep all 10-90%</button><button onclick="cmd('sweep off')">Sweep stop</button></div>
- <div class="ch"><span class="n">ALL</span><input id="sa" type="range" min="0" max="100" value="0"><span class="p" id="pa">0%</span><button class="sm" onclick="cmd('pwm all '+$('sa').value)">Set</button></div>
- <div id="chs"></div>
+ <div class="row" style="margin-top:6px"><small>Module</small><select id="pm" style="background:#0d1219;color:#e8edf3;border:1px solid #2c3848;border-radius:8px;padding:8px;font-size:16px"></select><small>Channel</small><select id="pch" style="background:#0d1219;color:#e8edf3;border:1px solid #2c3848;border-radius:8px;padding:8px;font-size:16px"><option value="0">A (Extend)</option><option value="1">B (Retract)</option></select></div>
+ <div class="ch"><span class="n" id="pn">CH0</span><input id="ps" type="range" min="0" max="100" value="0" oninput="sl(this.value)" onchange="fin(this.value)"><span class="p" id="pv">0%</span></div>
+ <div class="row"><button class="sm" onclick="pw(0)">0%</button><button class="sm" onclick="pw(100)">100%</button><button onclick="cmd('pwm all 0')">PWM 0 (all channels)</button></div>
  <small>Outputs are visible only with PCA OE ON.</small>
 </div>
 
 <div class="card"><h2>Current sensors (IS)</h2>
- <table id="ct"><tr><th>Mod</th><th>Duty</th><th>Pulse, A</th><th>Avg, A</th><th>k, A/V</th><th>State</th></tr></table>
+ <table id="ct"><tr><th>Mod</th><th>Duty</th><th>Pulse, A</th><th>Avg, A</th><th>kA, A/V</th><th>kB, A/V</th><th>State</th></tr></table>
  <small id="ci"></small>
- <div class="row" style="margin-top:8px"><small>Module</small><select id="cm" style="background:#0d1219;color:#e8edf3;border:1px solid #2c3848;border-radius:8px;padding:8px;font-size:16px"></select>
-  <button onclick="cmd('pwm '+(2*($('cm').value-1))+' 100')">PWM 100%</button><button onclick="cmd('pwm all 0')">PWM 0</button></div>
- <div class="row"><button onclick="cmd('izero '+$('cm').value)">1. Measure zero (no load)</button></div>
- <div class="row"><small>Load current, A</small><input id="ca" type="number" step="0.01" value="2.00" inputmode="decimal"><button onclick="cmd('ical '+$('cm').value+' '+$('ca').value)">2. Calibrate (PWM 100%, load ON)</button></div>
- <div class="row"><small>Test limit, A</small><input id="cl2" type="number" step="0.1" value="2.0" inputmode="decimal"><button onclick="cmd('ilim '+$('cl2').value)">Set limit</button><button class="sm" onclick="cmd('ireset '+$('cm').value)">Reset module</button></div>
- <small>Procedure: pick the module, press 1 with the solenoids and load disconnected. Then connect the electronic load in CC mode to the module output, press PWM 100%, enter the current shown by the load, press 2. Values are saved in flash and used by the working firmware. Pulse = mean of the readings inside the PWM pulse (any duty; at low duty the window widens up to 160 ms). Avg = mean over the whole period (40 ms). Calibration uses PWM 100%, where both are equal. Which of them the limit, overload and CURRENT mode use is set by the CURR PROT parameter.</small>
+ <div class="row" style="margin-top:8px"><small>Selected in the PWM block above: <b id="csel"></b></small></div>
+ <div class="row"><button onclick="cmd('izero '+(selM+1))">1. Measure zero of the module (no load)</button><button onclick="cmd('izero all')">Zero all modules</button></div>
+ <div class="row"><small>Load current, A</small><input id="ca" type="number" step="0.01" value="2.00" inputmode="decimal"><button onclick="cmd('ical '+selCh()+' '+$('ca').value)">2. Calibrate channel (PWM 100%, load ON)</button></div>
+ <div class="row"><small>Test limit, A</small><input id="cl2" type="number" step="0.1" value="2.0" inputmode="decimal"><button onclick="cmd('ilim '+$('cl2').value)">Set limit</button><button class="sm" onclick="cmd('irk '+selCh())">Reset channel k</button><button class="sm" onclick="cmd('ireset '+(selM+1))">Reset module</button></div>
+ <small>Procedure: pick the module and channel in the PWM block, press 1 with the solenoids and load disconnected. Then connect the electronic load in CC mode to the module output, press PWM 100%, enter the current shown by the load, press 2. Values are saved in flash and used by the working firmware. Pulse = mean of the readings inside the PWM pulse (any duty; at low duty the window widens up to 160 ms). Avg = mean over the whole period (40 ms). Calibration uses PWM 100%, where both are equal. Which of them the limit, overload and CURRENT mode use is set by the CURR PROT parameter.</small>
 </div>
 
 <div class="card"><h2>MCP3208 inputs (volts, latest sample)</h2>
@@ -1951,14 +1950,18 @@ $('go').onclick=function(){var f=$('f').files[0];if(!f)return;$('go').disabled=t
  x.upload.onprogress=function(e){if(e.lengthComputable)$('pg').value=Math.round(e.loaded*100/e.total)};
  x.onload=function(){try{var j=JSON.parse(x.responseText);$('ust').textContent=j.ok?'Installed. The receiver restarts, close this page.':('Failed: '+j.err)}catch(e){$('ust').textContent='Failed'}$('go').disabled=false};
  x.onerror=function(){$('ust').textContent='Connection lost';$('go').disabled=false};x.send(d)};
-var H='';for(var i=0;i<16;i++){H+='<div class="ch"><span class="n">CH'+i+'</span><input type="range" min="0" max="100" value="0" id="s'+i+'" oninput="sl('+i+',this.value)" onchange="fin('+i+',this.value)"><span class="p" id="p'+i+'">0%</span><button class="sm" id="w'+i+'" onclick="swp('+i+')">Sweep</button></div>'}
-$('chs').innerHTML=H;
-var T='',O='';for(var i=0;i<8;i++){T+='<tr><td>M'+(i+1)+'</td><td id="cd'+i+'">-</td><td id="ca'+i+'">-</td><td id="cv'+i+'">-</td><td id="ck'+i+'">-</td><td id="cs'+i+'">-</td></tr>';O+='<option value="'+(i+1)+'">Module '+(i+1)+'</option>'}
-$('ct').insertAdjacentHTML('beforeend',T);$('cm').innerHTML=O;
-$('sa').oninput=function(){$('pa').textContent=this.value+'%'};
-function sl(i,v){drag[i]=Date.now()+1500;$('p'+i).textContent=v+'%';var t=Date.now();if(t-(lastSend[i]||0)>120){lastSend[i]=t;send('pwm '+i+' '+v)}}
-function fin(i,v){drag[i]=Date.now()+1500;send('pwm '+i+' '+v).then(function(){setTimeout(tick,150)})}
-function swp(i){if(!S)return;if(S.sw&(1<<i))cmd('pwm '+i+' '+Math.round(S.pw[i]));else cmd('sweep '+i)}
+var T='',O='';for(var i=0;i<8;i++){T+='<tr><td>M'+(i+1)+'</td><td id="cd'+i+'">-</td><td id="ca'+i+'">-</td><td id="cv'+i+'">-</td><td id="ck'+i+'">-</td><td id="cb'+i+'">-</td><td id="cs'+i+'">-</td></tr>';O+='<option value="'+(i+1)+'">Module '+(i+1)+'</option>'}
+$('ct').insertAdjacentHTML('beforeend',T);$('pm').innerHTML=O;
+var selM=0,selC=0,dragT=0;
+function selCh(){return 2*selM+selC}
+function updSel(){var t='module '+(selM+1)+', channel '+(selC?'B (Retract)':'A (Extend)')+', CH'+selCh();$('pn').textContent='CH'+selCh();$('csel').textContent=t}
+function chg(m,c){var old=selCh();send('pwm '+old+' 0');selM=m;selC=c;updSel();dragT=0;$('ps').value=0;$('pv').textContent='0%';setTimeout(tick,150)}
+$('pm').onchange=function(){chg(parseInt(this.value)-1,selC)};
+$('pch').onchange=function(){chg(selM,parseInt(this.value))};
+updSel();
+function sl(v){dragT=Date.now()+1500;$('pv').textContent=v+'%';var t=Date.now();if(t-(lastSend[0]||0)>120){lastSend[0]=t;send('pwm '+selCh()+' '+v)}}
+function fin(v){dragT=Date.now()+1500;send('pwm '+selCh()+' '+v).then(function(){setTimeout(tick,150)})}
+function pw(v){dragT=0;$('ps').value=v;$('pv').textContent=v+'%';cmd('pwm '+selCh()+' '+v)}
 function on(id,f){$(id).className=$(id).className.replace(/ ?\bon\b/,'')+(f?' on':'')}
 function render(d){S=d;fails=0;
  $('lnk').textContent='link OK';$('lnk').className='chip ok';
@@ -1971,10 +1974,9 @@ function render(d){S=d;fails=0;
  $('k').textContent='bus '+d.kb.toFixed(3)+', after relay '+d.kf.toFixed(3);
  ['rl','pc','oe','en','rd','gn','bz'].forEach(function(k){on('t_'+k,d[k])});
  for(var b=0;b<4;b++)on('bl'+b,d.bl===b);
- on('swall',d.sw===65535);
- for(var i=0;i<16;i++){if(Date.now()>(drag[i]||0)){$('s'+i).value=Math.round(d.pw[i]);$('p'+i).textContent=Math.round(d.pw[i])+'%'}on('w'+i,(d.sw>>i)&1)}
+ if(Date.now()>dragT){var q=selCh();$('ps').value=Math.round(d.pw[q]);$('pv').textContent=Math.round(d.pw[q])+'%'}
  for(var a=0;a<8;a++)$('a'+a).textContent=d.ad[a]===null?'--':d.ad[a].toFixed(3);
- for(var m=0;m<8;m++){var du=Math.max(d.pw[2*m],d.pw[2*m+1]),st='idle',cl='',cal=(d.ic>>m)&1;
+ for(var m=0;m<8;m++){var du=Math.max(d.pw[2*m],d.pw[2*m+1]),ac=d.pw[2*m+1]>d.pw[2*m]?1:0,st='idle',cl='',cal=(d.ic>>(2*m+ac))&1;
   if((d.ov>>m)&1){st='OVERLOAD';cl='color:#e5484d;font-weight:700'}
   else if((d.zm>>m)&1){st='zero...';cl='color:#e0b030'}
   else if(du>0){if(du/100/d.fq*1000<2.0){st='PWM too low';cl='color:#e0b030'}else if(!cal){st='not calibrated';cl='color:#e0b030'}else{st='ok';cl='color:#2fbf71'}}
@@ -1982,9 +1984,10 @@ function render(d){S=d;fails=0;
   $('cd'+m).textContent=du>0?Math.round(du)+'%':'-';
   $('ca'+m).textContent=d.ia[m]===null?'--':d.ia[m].toFixed(2);
   $('cv'+m).textContent=d.iv[m]===null?'--':d.iv[m].toFixed(2);
-  $('ck'+m).textContent=d.ik[m].toFixed(3)+(cal?'':'*');
+  $('ck'+m).textContent=d.ik[2*m].toFixed(3)+(((d.ic>>(2*m))&1)?'':'*');
+  $('cb'+m).textContent=d.ik[2*m+1].toFixed(3)+(((d.ic>>(2*m+1))&1)?'':'*');
   $('cs'+m).textContent=st;$('cs'+m).style.cssText=cl}
- $('ci').textContent='MCP3208 samples/s: '+d.sps[0]+', ADC errors '+d.er[0]+'% (level '+d.er[1]+', last 2 s, active modules only), limit '+d.lim.toFixed(2)+' A. * = default k, not calibrated.';
+ $('ci').textContent='MCP3208 samples/s: '+d.sps[0]+', ADC errors '+d.er[0]+'% (level '+d.er[1]+', last 2 s, active modules only), limit '+d.lim.toFixed(2)+' A. * = default k, channel not calibrated.';
  if(document.activeElement!==$('cl2'))$('cl2').value=d.lim.toFixed(1);
  $('devs').textContent='PCA9685 '+(d.pca?'found':'NOT FOUND')+', MCP3208 '+(d.ap[0]?'found':'NOT FOUND');
  $('osc').textContent=d.os.toFixed(3);
@@ -2073,21 +2076,21 @@ static void jf(char* b, int& n, int cap, const char* name, const volatile float*
 static void hState() {
   wifiAct = millis();
   lastPoll = wifiAct;
-  static char b[2600];
+  static char b[2900];
   const int cap = sizeof(b);
   bool es = estopBtn || btnLatched;
   int n = snprintf(b, cap,
     "{\"up\":%lu,\"tk\":%d,\"fl\":%u,\"vb\":%.2f,\"vf\":%.2f,\"kb\":%.3f,\"kf\":%.3f,\"rl\":%d,\"oe\":%d,\"en\":%d,\"es\":%d,"
-    "\"rd\":%d,\"gn\":%d,\"bz\":%d,\"bl\":%d,\"fq\":%.0f,\"os\":%.3f,\"sw\":%u,\"pca\":%d,\"ap\":[%d,%d],\"rm\":\"%s\","
+    "\"rd\":%d,\"gn\":%d,\"bz\":%d,\"bl\":%d,\"fq\":%.0f,\"os\":%.3f,\"sw\":0,\"pca\":%d,\"ap\":[%d,%d],\"rm\":\"%s\","
     "\"pc\":%d,\"lim\":%.2f,\"ov\":%u,\"ic\":%u,\"zm\":%u,\"sps\":[%u,%u],\"er\":[%lu,%lu],\"fw\":\"%s\",\"pw\":[",
     millis() / 1000UL, testOK ? 1 : 0, (unsigned)faultCode, vBus, vFb, kBus, kFb, (relayState == RS_ON || relayState == RS_CLOSING) ? 1 : 0, oeOn, enOn, es,
-    outR, outG, outB, blinkMode, pwmFreq, oscHz / 1e6f, (unsigned)sweepMask, pcaOk, mcpPresent, 0, relayMsg,
+    outR, outG, outB, blinkMode, pwmFreq, oscHz / 1e6f, pcaOk, mcpPresent, 0, relayMsg,
     pcOn ? 1 : 0, iLim, (unsigned)tOvlMask, (unsigned)calMaskBits(), (unsigned)zeroMask, (unsigned)adcSps10 * 10u, 0u, (unsigned long)adcErrPct, (unsigned long)adcLvl, FW_VERSION);
   for (int i = 0; i < 16 && n < cap - 20; i++) n += snprintf(b + n, cap - n, "%s%.1f", i ? "," : "", pwmDuty[i]);
   n += snprintf(b + n, cap - n, "],");
   jf(b, n, cap, "ia", iPulseA, NMOD, "%.2f", true);
   jf(b, n, cap, "iv", iAvgA, NMOD, "%.2f", true);
-  jf(b, n, cap, "ik", iK, NMOD, "%.3f", false);
+  jf(b, n, cap, "ik", iK, 16, "%.3f", false);
   n += snprintf(b + n, cap - n, "\"ad\":[");
   for (int i = 0; i < 8 && n < cap - 20; i++) {
     if (lastHave[i]) n += snprintf(b + n, cap - n, "%s%.3f", i ? "," : "", lastV[i]);
@@ -2566,7 +2569,7 @@ void setup() {
   plog("RECEIVER %s, boots %u", FW_VERSION, (unsigned)bootCount);
   plog("Reset reason: %s", rstReasonText());
   plog("%s", FW_TAG);
-  plog("PCA9685 %s; MCP3208 %s, clock %u kHz; current sensors calibrated: %u of 8%s", pcaOk ? "found" : "NOT FOUND", mcpPresent ? "found" : "NOT FOUND", (unsigned)ramP[RXP_ADCCLK][0][0], (unsigned)__builtin_popcount(calMaskBits()), anyUncal() ? " (NOT CALIBRATED: default coefficient is used)" : "");
+  plog("PCA9685 %s; MCP3208 %s, clock %u kHz; current sensors calibrated: %u of 16%s", pcaOk ? "found" : "NOT FOUND", mcpPresent ? "found" : "NOT FOUND", (unsigned)ramP[RXP_ADCCLK][0][0], (unsigned)__builtin_popcount(calMaskBits()), anyUncal() ? " (NOT CALIBRATED: default coefficient is used)" : "");
   if (!pcaOk) setFault(3, "PCA9685 not found at start");
   xTaskCreatePinnedToCore(samplerTask, "adc", 6144, nullptr, 1, nullptr, 0);
 
